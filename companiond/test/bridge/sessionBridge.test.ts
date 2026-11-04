@@ -14,6 +14,8 @@ import {
   appendLines,
   assistantLine,
   claudeTree,
+  makeRepo,
+  makeWorktree,
   MARK,
   removeTempDirs,
   repoWithWorktree,
@@ -320,10 +322,11 @@ test("approval later: resolveNow re-runs resolution", async () => {
 
 test("symlinks to .key files in the Claude folders are refused, never opened, and the pass carries on", async () => {
   const opened: string[] = [];
+  const statted: string[] = [];
   const refused: string[] = [];
   const spy: ReadFs = {
     ...nodeReadFs,
-    stat: (x) => (opened.push(x), nodeReadFs.stat(x)),
+    stat: (x) => (statted.push(x), nodeReadFs.stat(x)),
     readRange: (x, pos, len) => (opened.push(x), nodeReadFs.readRange(x, pos, len)),
   };
   const { p, make, take } = harness({ fs: spy, onRefusedPath: (n) => refused.push(n) });
@@ -344,6 +347,20 @@ test("symlinks to .key files in the Claude folders are refused, never opened, an
   assert.deepEqual(ofType(take(), "sync_error"), []);
   for (const k of ["9.key", "x.key", "k.key"]) assert.ok(refused.includes(k), refused.join(","));
   assert.deepEqual(opened.filter((x) => x.endsWith(".key") || x === f || x === recLink || x.endsWith("9.json")), []);
+  // stat (which opens nothing) only ever sees the real target, to tell a `.key` folder from a key file.
+  assert.deepEqual(statted.filter((x) => x === f || x === recLink || x.endsWith("9.json")), []);
+});
+
+test("a repo folder whose name ends in .key resolves and is never reported as refused", async () => {
+  const root = makeWorktree(makeRepo(), "syn.key");
+  const refused: string[] = [];
+  const { p, make } = harness({ onRefusedPath: (n) => refused.push(n) });
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-a", cwd: root, lastFocusedAt: T0 });
+  const b = make();
+  await b.refresh();
+  const r = b.worktree("local_syn-a");
+  assert.ok(r?.kind === "resolved" && r.root === root, JSON.stringify(r));
+  assert.deepEqual(refused, []);
 });
 
 test("§12.2 refresh after watcher failure re-scans and re-creates only that watcher", async () => {

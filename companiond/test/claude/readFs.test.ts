@@ -45,9 +45,10 @@ test("guarded stat and readRange on a symlink to a .key file are refused before 
   const link = path.join(dir, "9.json");
   fs.symlinkSync(path.join(dir, "9.key"), link);
   const opened: string[] = [];
+  const statted: string[] = [];
   const spy = {
     ...nodeReadFs,
-    stat: (p: string) => (opened.push(p), nodeReadFs.stat(p)),
+    stat: (p: string) => (statted.push(p), nodeReadFs.stat(p)),
     readRange: (p: string, pos: number, len: number) => (opened.push(p), nodeReadFs.readRange(p, pos, len)),
   };
   const refused: string[] = [];
@@ -56,7 +57,23 @@ test("guarded stat and readRange on a symlink to a .key file are refused before 
   await assert.rejects(g.readRange(link, 0, 10), RefusedPathError);
   await assert.rejects(readJsonFile(g, link), RefusedPathError);
   assert.deepEqual(opened, []);
+  // stat opens nothing; it is called on the real target only, to tell a `.key` folder from a key file.
+  assert.ok(statted.every((p) => p === path.join(fs.realpathSync(dir), "9.key")), statted.join(","));
   assert.deepEqual(refused, ["9.key", "9.key", "9.key"]);
+});
+
+test("a folder whose name ends in .key passes stat and realpath; readRange still refuses any .key name", async () => {
+  const dir = tempDir();
+  const folder = path.join(dir, "repo.key");
+  fs.mkdirSync(folder);
+  fs.symlinkSync(folder, path.join(dir, "link-to-folder"));
+  const refused: string[] = [];
+  const g = guardReadFs(nodeReadFs, (b) => refused.push(b));
+  assert.ok((await g.stat(folder)).isDirectory());
+  assert.equal(await g.realpath(folder), fs.realpathSync(folder));
+  assert.ok((await g.stat(path.join(dir, "link-to-folder"))).isDirectory());
+  await assert.rejects(g.readRange(folder, 0, 1), RefusedPathError);
+  assert.deepEqual(refused, ["repo.key"]);
 });
 
 test("guarded stat and readRange follow an ordinary symlink and still report a missing file", async () => {
