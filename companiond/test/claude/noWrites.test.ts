@@ -17,8 +17,18 @@ const walk = (dir: string): string[] =>
     : [];
 const files = M3_DIRS.flatMap(walk).filter((f) => f.endsWith(".ts"));
 
-/** Modules a file may import, by file (posix-style relative path under src/). Relative `.ts` imports are always fine. */
+/** Modules a file may import, by file (posix-style relative path under src/). */
 const ANYWHERE = new Set(["node:path"]);
+/** Relative `.ts` imports must resolve (from the importing file) into an M3 folder or to one of these files. */
+const RELATIVE_OK_FILES = new Set(["git/safeGit.ts", "lineBuffer.ts"]);
+
+function relativeImportOk(file: string, spec: string): boolean {
+  if (!/^\.\.?\/[\w./-]+\.ts$/.test(spec)) return false;
+  const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), spec));
+  if (RELATIVE_OK_FILES.has(target)) return true;
+  const top = target.split("/")[0] ?? "";
+  return target.includes("/") && M3_DIRS.includes(top);
+}
 // `exact`: the whole import. `named`: `import { <named>, type X, ... }` (inline type members are erased, so allowed).
 const ONLY_IN: Record<string, { file: string; exact?: string; named?: string }> = {
   "node:fs/promises": { file: "claude/readFs.ts", exact: 'import * as fsp from "node:fs/promises"' },
@@ -123,7 +133,11 @@ function scanSource(file: string, raw: string): string[] {
     const spec = m[1] ?? m[2] ?? "";
     const rule = ONLY_IN[spec];
     const stmt = m[0].trim().replace(/\s+/g, " ");
-    if (ANYWHERE.has(spec) || /^\.\.?\/[\w./-]+\.ts$/.test(spec)) continue;
+    if (ANYWHERE.has(spec) || relativeImportOk(f, spec)) continue;
+    if (spec.startsWith(".")) {
+      found.push(`relative import ${spec} outside the M3 folders`);
+      continue;
+    }
     if (TYPE_ONLY_OK.has(spec) && /^import type\b/.test(stmt)) continue;
     if (!rule) found.push(`module ${spec}`);
     else if (rule.file !== f) found.push(`module ${spec} outside ${rule.file}`);
@@ -140,6 +154,10 @@ function scanSource(file: string, raw: string): string[] {
     const opens = rest.match(/\bfsp\s*\.\s*open\b/g)?.length ?? 0;
     const readOnlyOpens = rest.match(/\bfsp\.open\(\s*[\w.]+\s*,\s*"r"\s*\)/g)?.length ?? 0;
     if (opens !== readOnlyOpens) found.push("fsp.open other than open(path, \"r\")");
+  }
+  if (f !== "claude/processProbe.ts") {
+    // Signals are only ever sent (as the 0 existence probe) by the probe.
+    if (/\bprocess\s*\.\s*kill\b/.test(text) || /\{[^}]*\bkill\b[^}]*\}\s*=\s*process\b/.test(text)) found.push("process.kill outside claude/processProbe.ts");
   }
   if (f === "claude/processProbe.ts") {
     // Only process.env and process.kill(pid, 0) (existence probe).
@@ -204,6 +222,16 @@ const BYPASSES: Array<[string, string, string]> = [
   ["new Function", "claude/paths.ts", `new Function("return 1")();\n`],
   ["fetch", "claude/paths.ts", `await fetch("http://x");\n`],
   ["WebSocket", "claude/paths.ts", `new WebSocket("ws://x");\n`],
+  ["relative import into the jail", "bridge/x.ts", `import { x } from "../jail/tools.ts";\n`],
+  ["relative import into launch", "claude/paths.ts", `import { y } from "../launch/seatbelt.ts";\n`],
+  ["relative import via ./..", "bridge/x.ts", `import x from "./../jail/tools.ts";\n`],
+  ["relative import outside src", "bridge/x.ts", `import x from "../../test/helpers/fixtures.ts";\n`],
+  ["another git module", "worktree/x.ts", `import { gate } from "../git/configGate.ts";\n`],
+  ["src-level file other than lineBuffer", "bridge/x.ts", `import x from "../other.ts";\n`],
+  ["relative re-export from the jail", "bridge/x.ts", `export * from "../jail/tools.ts";\n`],
+  ["bare relative import from the jail", "bridge/x.ts", `import "../jail/main.ts";\n`],
+  ["process.kill outside the probe", "bridge/x.ts", `process.kill(pid, 0);\n`],
+  ["destructured kill outside the probe", "bridge/x.ts", `const { kill } = process;\n`],
 ];
 
 const CLEAN: Array<[string, string]> = [
@@ -226,6 +254,7 @@ const CLEAN: Array<[string, string]> = [
     `import { execFile } from "node:child_process";\nconst e = process.env;\nprocess.kill(pid, 0);\nexecFile("/bin/ps", []);\n`,
   ],
   ["transcript/x.ts", `import path from "node:path";\nimport type { ReadFs } from "../claude/readFs.ts";\nimport { SafeGit } from "../git/safeGit.ts";\n`],
+  ["bridge/x.ts", `import { a } from "./selection.ts";\nimport { b } from "../transcript/reader.ts";\nimport { c } from "../lineBuffer.ts";\nexport type { d } from "../worktree/resolver.ts";\n`],
 ];
 
 test("the allowlist scan catches every bypass shape", () => {
