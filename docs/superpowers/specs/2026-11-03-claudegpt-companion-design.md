@@ -229,25 +229,47 @@ No single layer is trusted, including the Codex sandbox (R1).
   Profile rules (spike version: `spikes/m1/readonly.sb`):
   - `(deny default)`, `(import "system.sb")`, `(deny network*)`.
   - `process-fork`; `process-exec` only for the **realpath** of the Node binary (a Homebrew
-    `bin/node` symlink fails `execvp`) and the absolute git paths (`xcrun -f git` result, `/usr/bin/git`).
+    `bin/node` symlink fails `execvp`) and the realpath of `xcrun -f git`. *M2:* `/usr/bin/git` (an
+    `xcrun` shim that would exec more programs) is no longer allowed.
   - `file-read*` only: the bound root; the MCP server's own code folder; the Node install prefix; the
     folders Node loads dylibs and OpenSSL config from; the developer dir (`xcode-select -p`) for git;
     system `/usr/lib`, `/usr/share`, `/System`, `/Library/Preferences`; literals `/`, `/usr`,
-    `/usr/bin/git`, `/private/etc/localtime`, `/dev/null`, `/dev/urandom`, `/dev/random`.
+    `/private/etc/localtime`, `/dev/null`, `/dev/urandom`, `/dev/random`. *M2:* a Node read folder that
+    would be too broad (`/usr/local`, `/opt/homebrew`, `/opt/local`, `/Library`, `/Applications`, home)
+    becomes one `literal` rule per file.
     With Homebrew Node on Apple Silicon the dylib/OpenSSL folders were `/opt/homebrew/opt`,
     `/opt/homebrew/Cellar` and `/opt/homebrew/etc/openssl@3` — broader than needed and Homebrew-specific.
     The product computes the exact prefixes from the real Node path (or bundles Node) in M2.
   - `file-write-data` only for `/dev/null`; no other write rule.
   - `sysctl-read`; `mach-lookup` for `com.apple.system.opendirectoryd.libinfo`.
-  - `file-read-metadata` is allowed everywhere in the spike profile, so the profile does not block `stat` outside root (not probed). M2
-    tries to narrow it; if it cannot, the tool layer is what hides existence.
+  - `file-read-metadata` was allowed everywhere in the spike profile. *M2:* it is narrowed (measured;
+    findings doc, "M2 profile measurements") to the read paths, their parent folders, and metadata-only
+    `literal` rules for the symlinks dyld steps through to load Node's libraries. A `stat` of a file
+    outside root and the toolchain is refused by Seatbelt.
   - git runs with `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` (§7.3) instead of a read
     rule for `~/.gitconfig`.
   - Denies do not show in `log show`; expect to debug the profile by trial.
-- **Tool layer:** `path.resolve(root, input)` → containment check before any filesystem call →
-  Unicode NFC + case-fold → deny-list on every segment and the basename → `open` with `O_NOFOLLOW` on
-  the final component, read-only → on the open handle: real path via `F_GETPATH` must be inside root,
-  `st_nlink == 1` (hard links refused), regular file → read (F4).
+  - *M2:* a root that is a linked worktree also gets the realpath'd `git rev-parse --git-dir` and
+    `--git-common-dir` as read-only subpaths. Its `.git` is a file pointing into the main repo's `.git`,
+    and git needs both. The tool layer still denies `.git`.
+  - *M2:* Node read paths are one rule per folder from `process.report.getReport().sharedObjects`, and
+    `OPENSSL_CONF=/dev/null` replaces the OpenSSL config read, unless the M2 measurement says otherwise.
+    Other deny-list names may get Seatbelt `file-read-data` regex denies; `.git` cannot, because git runs
+    inside the same profile. Results: findings doc, "M2 profile measurements".
+- **Tool layer:** `path.resolve(root, input)` → lexical containment check before any filesystem call →
+  fold (`s.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFKC")`) → deny-list on every
+  segment and the basename → `open` read-only with `O_NOFOLLOW | O_NONBLOCK` → on the open handle:
+  `fstat` shows a regular file with `st_nlink == 1` (hard links refused) → `realpath` of the path,
+  folded, must be inside root and pass the deny-list (this also catches a symlinked *parent* folder,
+  which `O_NOFOLLOW` does not stop) → `lstat` of the real path must have the handle's `dev` + `ino` →
+  read from the handle (F4). *M2 finding:* Node has no `F_GETPATH`. On macOS 27 / Node 26.7,
+  `realpath("/dev/fd/N")` returns the input (JS) or a wrong `/dev/fd/<name>` (native), and `node:ffi`
+  is experimental and Node 26 only. With `st_nlink == 1` the file has one name, so a matching
+  `dev` + `ino` at the real path gives the same guarantee. Seatbelt is the backstop for a parent folder
+  swapped between the checks. *Accepted residual:* the `search` and `git_diff` post-filter (below) is
+  check-after-use. git has already read the file by name when the contained open runs, so a concurrent
+  writer could swap a hard link for a plain file between git's read and the check. Anyone who can do
+  that can already copy the secret into the root, so this adds no reach.
 - **Deny-list** (case-insensitive): `.env`, `.env.*`, `.envrc`, `*.pem|key|p8|p12|pfx|jks|keystore|crt|der|ppk|kdbx`,
   `id_rsa*|id_ed25519*|id_ecdsa*|id_dsa*`, `*credentials*`, `*secret*`, `service-account*.json`,
   `*.tfvars`, `*.tfstate*`, `.npmrc`, `.pypirc`, `.netrc`, `.pgpass`, `.git-credentials`, `.htpasswd`;
@@ -256,19 +278,42 @@ No single layer is trusted, including the Codex sandbox (R1).
 - **Caps:** 256 KB per read, 2,000 lines per range, 500 search hits, binary refused.
 - `list_dir` and `git_status` omit denied entries (no existence leak). `search` uses
   `git grep --untracked` (sees new files) and post-filters every hit through the deny-list.
+  *M2:* `search` hits and `git_diff` paths are also kept only if the same contained open as
+  `read_file` succeeds (a deleted path passes the diff check), because git reads files by name and
+  would otherwise follow a hard link or symlink out of the root.
+- *M2:* when the config gate refuses the repo (at launch or inside the jail), every tool returns the
+  refusal reason, file tools included.
 - No write, rename, delete or non-git spawn code; a test asserts the module imports none.
 
 ### 7.3 SafeGit (F3)
-- Absolute git path, `execFile` (no shell), fixed argv, user text only after `-e`/`--`, 10 s timeout,
+- Absolute git path, `spawn` with `shell: false` (no shell), fixed argv, user text only after `-e`/`--`, 10 s timeout,
   output cap.
-- Environment: `GIT_OPTIONAL_LOCKS=0` (no `.git/index` rewrite), `GIT_CONFIG_NOSYSTEM=1`,
-  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `GIT_ATTR_NOSYSTEM=1`.
-- Flags: `-c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat`,
-  `--no-ext-diff --no-textconv`.
-- **Repo config gate:** before use, read `git config --local --list --show-origin` (and worktree config).
-  If any program-valued key is present — `filter.*`, `*.textconv`, `diff.*.command`, `core.fsmonitor`,
-  `core.pager`, `core.sshCommand`, `include.*`, `includeIf.*` — the repo is refused with a visible reason.
-  (With global config ignored, the usual Git LFS filter defined globally does not apply, so normal repos pass.)
+- Environment, built fresh (nothing inherited): `GIT_OPTIONAL_LOCKS=0` (no `.git/index` rewrite),
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`,
+  `GIT_ATTR_NOSYSTEM=1`, and (M2) `PATH=/usr/bin:/bin`, `LC_ALL=C`, `GIT_NO_REPLACE_OBJECTS=1`.
+- Flags: `-c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat`
+  and (M2) `-c core.attributesFile=/dev/null -c core.excludesFile=/dev/null -c core.quotePath=false`;
+  `--no-ext-diff --no-textconv` on every diff; `--ignore-submodules=all` on status and diff (git would
+  otherwise run inside submodules, whose config the gate never read).
+- **Repo config gate:** before every git run, read `git config --list --null --show-scope --no-includes`.
+  Global and system config are already off, so this is local plus worktree config (`config.worktree` when
+  `extensions.worktreeConfig` is on). If any program-valued key is present — `filter.*`, `*.textconv`,
+  `diff.*.command`, `core.fsmonitor`, `core.pager`, `core.sshCommand`, `include.*`, `includeIf.*`, and
+  (M2) `diff.external`, `pager.*`, `core.askPass`, `core.gitProxy`, `core.editor`, `sequence.editor`,
+  or any key whose variable name (last segment) ends in `command`, `cmd`, `program`, `helper`, `driver`,
+  `textconv` or `hook`, dot or no dot (so `core.alternateRefsCommand`, `uploadpack.packObjectsHook`) — the
+  repo is refused with a visible reason. *M2:* `core.worktree` is refused the same way: it moves the tree
+  git reads away from the root the tool layer checks. The key list in the reason is capped at 3 keys and
+  80 code points, with URL-shaped text replaced by `<url>` and every character outside `[\w.:*@/-]`
+  replaced by `?`. (With global config ignored, the usual Git LFS filter defined globally does not apply,
+  so normal repos pass.) git is started with `spawn` and `shell: false`: the same property as
+  `execFile`, and it lets the output cap keep the first 4 MiB.
+- *M2:* git-reported dirs are not trusted. The git dir must be `<toplevel>/.git`, or
+  `<commonDir>/worktrees/<name>` (one segment below, with `commonDir` named `.git`) whose `gitdir` file
+  points back at `<toplevel>/.git` (a relative `gitdir` is resolved against the worktree's git dir);
+  otherwise the repo is refused. A hostile `.git` file could otherwise point the jail's read rules at
+  another repo. Before every git run the dirs are read again and must equal those captured at open, so
+  a `.git` swapped after open is refused.
 - Under Seatbelt (§7.2) git can still only read the root and cannot write or reach the network.
 
 ### 7.4 Redaction (honest scope)
@@ -358,7 +403,11 @@ tool-call approvals for its allowlisted read tools are accepted; `url`-mode and 
 Unit (`node --test`, synthetic fixtures):
 - Traversal: `../`, absolute paths, `~`, encoded and mixed separators, NUL bytes, Unicode look-alikes.
 - Symlink escapes: file and directory symlinks out of root, chains, symlink to a denied file inside root,
-  swap between check and open (race) → refused via `O_NOFOLLOW` + `F_GETPATH`.
+  the file or a parent folder swapped before the open, and the file swapped after the open (race) →
+  refused via `O_NOFOLLOW` + real-path containment + `dev`/`ino` match (§7.2; Node has no `F_GETPATH`).
+- Worktree roots (M2): a main repo plus a `git worktree add` worktree, both in temp dirs. The jail on the
+  worktree reads its own files and runs git, and cannot read the main repo's working tree. A
+  `config.worktree` that sets `core.pager` refuses the worktree.
 - Hard link to an outside file → refused.
 - Sensitive names in mixed case: `.env`, `.ENV.local`, `.envrc`, keys, certs, `id_*`, `credentials.json`,
   `secrets.yaml`, `service-account-prod.json`, `*.tfvars`, `.npmrc`, `.git/config`.
@@ -428,7 +477,7 @@ watcher failure.
 |---|-------|-----------|
 | M0 | Toolchain: full Xcode, Swift package skeleton with tests running, Node workspace with `node --test`, CI for Node tests | `swift test` and `npm test` run locally and in CI |
 | M1 | **Protocol and platform spike** (throwaway code, written findings): per-thread root binding (A vs B), exact flag keys incl. `view_image` and `web_search`, `experimentalFeature/list` + `config/read` self-check, `enabled_tools` hiding a fake `write_file`, server-request reply shapes, thread `cwd` vs `AGENTS.md`, `sandbox-exec` profile on macOS 27, `cliSessionId` change on disk | **done 2026-11-04**: findings doc updated; §2 option A chosen |
-| M2 | `SafeGit` + `companion-readonly` jail under Seatbelt + §12.1 unit suite | suite green |
+| M2 | `SafeGit` + `companion-readonly` jail under Seatbelt + §12.1 unit suite | suite green locally and in CI: a `companiond-macos` job on `macos-26` runs the Seatbelt tests (they skip on Linux); if the runner has no `sandbox-exec`, they are local-only and the README says so |
 | M3 | SessionBridge, tail, parser, WorktreeResolver + terminal/test-failure extraction + §12.2 suite | suite green |
 | M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes |
 | M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release** |
@@ -449,6 +498,8 @@ Independent review (all accepted unless noted):
 - **F1** web search / image view off; runtime guard is an allowlist (§7.1.1, §7.1.6).
 - **F2** Seatbelt as the filesystem layer (§7.2). **F3** SafeGit config gate (§7.3).
 - **F4** case-folding, hard links, `O_NOFOLLOW` + `F_GETPATH`, untracked search, wider deny-list (§7.2).
+  *M2:* `F_GETPATH` (Node has none) is replaced by `fstat` `nlink == 1` + `realpath` + a `dev`/`ino`
+  match at the real path, which gives the same guarantee (§7.2).
 - **F5** exact-match approval, refuse `$HOME` and non-Git folders (§7.5). *Kept* "include worktrees",
   narrowed to the same `--git-common-dir`, because every Claude Desktop session runs in a worktree.
 - **F6** thread `cwd` is an empty folder (§7.1.2). **F7** real-Codex integration tests (§12.1).
