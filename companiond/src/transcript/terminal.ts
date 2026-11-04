@@ -14,7 +14,7 @@ export interface CommandOutcome {
 const TEST_PATTERNS: RegExp[] = [
   /^# fail [1-9]\d*/m, // node:test TAP
   /^ℹ fail [1-9]\d*/m, // node:test spec reporter
-  /^Tests?:\s+.*\b[1-9]\d* failed/m, // jest, vitest
+  /^Tests?:[^\n]*\b[1-9]\d* failed/m, // jest, vitest
   /^=+ .*\b[1-9]\d* failed\b.*=+$/m, // pytest summary line
   /^FAILED \S+/m, // pytest
   /^--- FAIL: /m, // go test
