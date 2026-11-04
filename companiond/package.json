@@ -8,10 +8,14 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\"",
+    "itest": "node --test --test-concurrency=1 \"itest/**/*.itest.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
     "typescript": "5.9"
+  },
+  "dependencies": {
+    "@openai/codex": "0.166.0"
   }
 }
