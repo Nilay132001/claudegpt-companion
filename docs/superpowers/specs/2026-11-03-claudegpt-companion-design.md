@@ -1,6 +1,6 @@
 # ClaudeGPT Companion — design
 
-Status: **v3.1 — M1 findings applied; §7.1.9 awaiting owner approval** · Date: 2026-11-04 (v3:
+Status: **v3.2 — M1 findings applied; §7.1.9 approved by the owner** · Date: 2026-11-04 (v3:
 2026-11-03) · Based on: `docs/findings/2026-11-03-phase1-poc.md`
 
 - v1 → v2: owner review (decisions D1–D3, required changes R1–R8, §15).
@@ -208,17 +208,18 @@ No single layer is trusted, including the Codex sandbox (R1).
 7. `@openai/codex` is pinned; an upgrade must pass the real-Codex boundary tests (§12.1).
 8. **"No writes" basis (M1 finding).** Codex's `apply_patch` cannot be disabled by the features we set.
    The guarantee rests on three layers, all kept: (a) every `fileChange` approval is declined (4) —
-   observed in M1; (b) Codex's `sandbox: "read-only"` (3) — covers command execution, not tested against
-   an approved patch; (c) the runtime guard stops the turn on any non-allowlisted item, and `fileChange`
-   is not allowlisted (6) — a design layer, tested in M4. In M1, `apply_patch` invoked through
-   `functions.exec` still surfaced as a `fileChange` item, so tools that exec invokes are visible to the
-   guard even though exec itself is not. Whether `functions.exec` can read files or run code on its own
+   observed in M1; (b) Codex's `sandbox: "read-only"` (3) — meant to stop writes by commands, not tested
+   against an approved patch; (c) the runtime guard stops the turn on any non-allowlisted item, and `fileChange`
+   is not allowlisted (6) — a design layer, tested in M4. In M1 the model said it called
+   `apply_patch` through `functions.exec`, and a `fileChange` item did appear, so at least `apply_patch`
+   is visible to the guard when exec invokes it (one run) even though exec itself is not. Whether `functions.exec` can read files or run code on its own
    was **not settled** by M1 (one run, the model declined on its own); do not claim it is off.
-9. **Codex itself under Seatbelt — PROPOSED (M1), owner approval needed.** Run the `codex app-server`
+9. **Codex itself under Seatbelt — APPROVED by the owner (2026-11-04).** Run the `codex app-server`
    process under its own Seatbelt profile: reads limited to its own binaries and runtime, `CODEX_HOME`
    and the empty companion `cwd`; writes only to `CODEX_HOME`; network allowed. Reason: Codex's
-   read-only sandbox allows reading any file, and its exec surface could not be proven off. Not decided;
-   see §16 for the open questions.
+   read-only sandbox allows reading any file, and its exec surface could not be proven off. Whether
+   Codex can run this way is probed in M4 (§16). If it cannot, the companion does not ship a weaker
+   fallback silently: the finding goes back to the owner.
 
 ### 7.2 `companion-readonly` jail
 - **OS layer (F2): Seatbelt.** The server runs under `sandbox-exec`. This is the filesystem-layer
@@ -296,7 +297,7 @@ hardened config no command ran and no shell request appeared, a write attempt th
 declined with no file written, the Seatbelt jail blocked out-of-root reads, writes, shell and network for
 our MCP server, and the empty thread `cwd` kept a repo `AGENTS.md` out. What it did not show: that
 Codex's own `functions.exec` cannot read files outside the root or run code (open question, §7.1.8).
-The proposed mitigation is running Codex itself under Seatbelt (§7.1.9, awaiting owner approval).
+The approved mitigation is running Codex itself under Seatbelt (§7.1.9), probed in M4.
 
 ### 7.7 Claude Desktop preservation (R6)
 Reads only the paths in §6.1; never writes under `~/.claude`, Claude's Application Support or any
@@ -470,7 +471,7 @@ Independent review (all accepted unless noted):
 | `apply_patch` cannot be disabled (M1 finding) | three layers (§7.1.8): decline `fileChange` — observed in M1; read-only sandbox — covers command execution, not tested against an approved patch; runtime guard — design layer, tested in M4. Re-check for a removal key on each Codex upgrade |
 | Codex's `functions.exec`, `collaboration.*`, `request_user_input` (at least; list truncated) stay listed despite flags; exec calls don't surface as items (M1 finding) | open for M4 (CodexHost): try the candidate keys in §7.1.1, capture the full tool list; live attack prompts (§12.1); proposed Codex Seatbelt (§7.1.9) |
 | `experimentalFeature/list` shows `unified_exec` on while `config/read` shows it off (M1 finding) | self-check warns (§7.1.5); open: find out which one Codex obeys |
-| Can `codex app-server` run under Seatbelt? (open question for M2/M4, §7.1.9) | probe: Keychain login token access, network to OpenAI, Codex's own `sandbox-exec` nested inside ours, MCP child spawn. Not decided until probed and approved |
+| Can `codex app-server` run under Seatbelt? (approved design, §7.1.9; probed in M4) | probe in M4 (CodexHost): Keychain login token access, network to OpenAI, Codex's own `sandbox-exec` nested inside ours, MCP child spawn. If it cannot run, back to the owner — no silent fallback |
 | Seatbelt profile tied to the local Node install (M1 finding) | compute exact Node prefixes at runtime, or bundle Node (M2) |
 | Plus rate limits | small deltas |
 | SpeechTranscriber assets missing for a locale | install with progress |
