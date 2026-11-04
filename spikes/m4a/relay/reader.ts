@@ -82,7 +82,9 @@ async function main(): Promise<void> {
       const nl = b.indexOf("\n");
       if (nl >= 0) res(b.slice(0, nl));
     });
-  })) as { grants: { token: string; kind: "jail" | "probe"; root: string }[]; fake: string };
+  })) as { grants: { token: string; kind: "jail" | "probe"; root: string }[]; fake: string; holdToolsCallMs?: number };
+  // Step 1 measurement only: hold each tools/call this long before forwarding, so a test can interrupt mid-call.
+  const holdMs = Math.max(0, Math.min(cfg.holdToolsCallMs ?? 0, 60_000));
   // Parent gone = companiond gone: stop serving.
   process.stdin.on("end", () => process.exit(0));
 
@@ -156,7 +158,16 @@ async function main(): Promise<void> {
           continue;
         }
         emit({ ev: "method", conn: id, method: r.forward.method });
-        child.stdin.write(`${JSON.stringify(r.forward)}\n`);
+        const out = `${JSON.stringify(r.forward)}\n`;
+        if (holdMs > 0 && r.forward.method === "tools/call") {
+          setTimeout(() => {
+            if (closed || !child?.stdin?.writable) return;
+            emit({ ev: "released", conn: id });
+            child.stdin.write(out);
+          }, holdMs);
+          continue;
+        }
+        child.stdin.write(out);
       }
     };
     sock.on("end", () => child?.stdin?.end());
