@@ -44,6 +44,15 @@ test("§12.2 unapproved root → Unavailable with no fallback", async () => {
   assert.ok(r.kind === "unavailable" && r.reason === "not_approved" && r.root === worktree);
 });
 
+test("an isApproved that throws is not_approved, not a failed pass", async () => {
+  const { main } = repoWithWorktree();
+  const throwing: IsApproved = () => {
+    throw new Error("synthetic approval store failure");
+  };
+  const r = await resolveWorktree({ transcriptCwd: null, recordCwd: main }, deps(throwing));
+  assert.ok(r.kind === "unavailable" && r.reason === "not_approved" && r.root === main, JSON.stringify(r));
+});
+
 test("a repo whose config can run programs is repo_refused, with no fallback", async () => {
   const main = makeRepo();
   fixtureGit(main, ["config", "core.sshCommand", "/bin/false"]);

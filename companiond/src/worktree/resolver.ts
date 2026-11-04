@@ -102,7 +102,13 @@ export async function resolveWorktree(input: ResolveInput, deps: ResolveDeps): P
   if (dirs.toplevel !== real) {
     return unavailable("not_worktree_root", "Claude's working folder is inside a repository but is not its top folder", dirs.toplevel, dirs.commonDir);
   }
-  if (!deps.isApproved(dirs.toplevel, dirs.commonDir)) return unavailable("not_approved", "This repository is not approved yet", dirs.toplevel, dirs.commonDir);
+  let approved = false;
+  try {
+    approved = deps.isApproved(dirs.toplevel, dirs.commonDir);
+  } catch {
+    // M4's approval store failed: treat as not approved rather than abort the whole pass.
+  }
+  if (!approved) return unavailable("not_approved", "This repository is not approved yet", dirs.toplevel, dirs.commonDir);
   let branch: string | null;
   try {
     const git = await SafeGit.open({ root: dirs.toplevel, gitPath: deps.gitPath });
