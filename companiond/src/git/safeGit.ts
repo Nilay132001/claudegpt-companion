@@ -85,6 +85,19 @@ export function validateRepoDirs(dirs: RepoDirs): void {
   if (back !== dotGit) throw new RepoRefusedError("its worktree link does not point back to it");
 }
 
+export type LocateErrorKind = "not_git" | "git_failed" | "refused";
+
+export class LocateError extends Error {
+  readonly kind: LocateErrorKind;
+  readonly reason: string;
+  constructor(kind: LocateErrorKind, reason: string) {
+    super(`${kind}: ${reason}`);
+    this.name = "LocateError";
+    this.kind = kind;
+    this.reason = reason;
+  }
+}
+
 export class SafeGit {
   readonly root: string;
   readonly gitPath: string;
@@ -119,6 +132,39 @@ export class SafeGit {
     if (dirs.toplevel !== root) throw new RepoRefusedError("not the top level of a git repository");
     validateRepoDirs(dirs);
     return git;
+  }
+
+  // For M3's WorktreeResolver: the repo that contains `cwd` (any sub-folder). Gate first; never requires
+  // cwd to be the toplevel. Exit 128 from git means "not a git repository".
+  static async locate(opts: { gitPath: string; cwd: string; timeoutMs?: number }): Promise<RepoDirs> {
+    if (!path.isAbsolute(opts.gitPath)) throw new Error("gitPath must be an absolute path");
+    let cwd: string;
+    try {
+      cwd = fs.realpathSync.native(opts.cwd);
+    } catch {
+      throw new LocateError("not_git", "folder not found");
+    }
+    const git = new SafeGit(cwd, opts.gitPath, opts.timeoutMs ?? 10_000, SMALL_CAP);
+    try {
+      await git.checkConfig();
+      const dirs = await git.repoDirs();
+      validateRepoDirs(dirs);
+      return dirs;
+    } catch (e) {
+      if (e instanceof RepoRefusedError) throw new LocateError("refused", e.reason);
+      if (e instanceof GitError && e.code === 128) throw new LocateError("not_git", "not inside a git repository");
+      throw new LocateError("git_failed", e instanceof Error ? e.message : "git failed");
+    }
+  }
+
+  async branch(): Promise<string | null> {
+    const head = await this.#run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], [0, 1], SMALL_CAP);
+    if (head.code !== 0) return null;
+    const sym = await this.#run(["symbolic-ref", "--short", "-q", "HEAD"], [0, 1], SMALL_CAP);
+    const name = sym.stdout.toString("utf8").trim();
+    if (sym.code === 0 && name !== "") return name;
+    const short = await this.#run(["rev-parse", "--short", "HEAD"], [0], SMALL_CAP);
+    return `detached@${short.stdout.toString("utf8").trim()}`;
   }
 
   async checkConfig(): Promise<void> {
