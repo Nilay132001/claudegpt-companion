@@ -49,9 +49,13 @@ export class RefusedPathError extends Error {}
 const REFUSED = /\.key$/i;
 
 /**
- * Wraps a ReadFs so any `.key` file is refused before the call (and a realpath that lands on one is refused
- * after it). `onRefused` gets the basename only. SessionBridge is the one place that wraps; lower-level
- * readers take whatever ReadFs they are given.
+ * Wraps a ReadFs so any `.key` file is refused before the call. stat and readRange resolve symlinks first
+ * (realpath), check the real path too, and then operate on the real path, so `9.json → 9.key` is refused
+ * without the key ever being opened. `onRefused` gets the basename only. SessionBridge is the one place
+ * that wraps; lower-level readers take whatever ReadFs they are given.
+ *
+ * Known limit: a link swapped between the realpath and the open (TOCTOU) is not caught. Claude's folders
+ * are the user's own; this guards against mistakes and planted links, not a racing local attacker.
  */
 export function guardReadFs(inner: ReadFs, onRefused: (basename: string) => void = () => {}): ReadFs {
   const check = (p: string): void => {
@@ -61,16 +65,17 @@ export function guardReadFs(inner: ReadFs, onRefused: (basename: string) => void
       throw new RefusedPathError(`refused credential file: ${base}`);
     }
   };
+  const resolved = async (p: string): Promise<string> => {
+    check(p);
+    const real = await inner.realpath(p);
+    check(real);
+    return real;
+  };
   return {
     readdir: (dir) => inner.readdir(dir),
-    stat: async (p) => (check(p), inner.stat(p)),
-    readRange: async (f, pos, len) => (check(f), inner.readRange(f, pos, len)),
-    async realpath(p) {
-      check(p);
-      const real = await inner.realpath(p);
-      check(real);
-      return real;
-    },
+    stat: async (p) => inner.stat(await resolved(p)),
+    readRange: async (f, pos, len) => inner.readRange(await resolved(f), pos, len),
+    realpath: resolved,
   };
 }
 

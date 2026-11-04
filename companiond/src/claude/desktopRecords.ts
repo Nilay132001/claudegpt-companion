@@ -90,7 +90,8 @@ export async function readDesktopRecords(fs: ReadFs, dir: string): Promise<Deskt
       for (const name of names) {
         if (!/^local_[A-Za-z0-9_-]+\.json$/.test(name)) continue;
         const file = path.join(accDir, name);
-        const rec = toDesktopRecord(await readJsonFile(fs, file), file);
+        // A refused file (e.g. a link to a `*.key`) counts as skipped; the guard has already reported it.
+        const rec = toDesktopRecord(await readJsonFile(fs, file).catch(() => null), file);
         if (!rec) {
           skipped++;
           continue;

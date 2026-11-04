@@ -41,7 +41,8 @@ export async function readRunningFiles(fs: ReadFs, dir: string): Promise<Running
   for (const name of names) {
     if (!RUNNING_NAME.test(name)) continue;
     const file = path.join(dir, name);
-    const raw = await readJsonFile(fs, file);
+    // A refused file (e.g. a link to a `*.key`) is skipped; the guard has already reported it.
+    const raw = await readJsonFile(fs, file).catch(() => null);
     if (typeof raw !== "object" || raw === null) continue;
     const r = raw as Record<string, unknown>;
     if (typeof r.sessionId !== "string") continue;

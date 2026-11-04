@@ -39,6 +39,36 @@ test("guardReadFs refuses a realpath that lands on a .key file", async () => {
   await assert.rejects(guardReadFs(nodeReadFs).realpath(path.join(dir, "innocent.json")), RefusedPathError);
 });
 
+test("guarded stat and readRange on a symlink to a .key file are refused before the key is opened", async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, "9.key"), MARK);
+  const link = path.join(dir, "9.json");
+  fs.symlinkSync(path.join(dir, "9.key"), link);
+  const opened: string[] = [];
+  const spy = {
+    ...nodeReadFs,
+    stat: (p: string) => (opened.push(p), nodeReadFs.stat(p)),
+    readRange: (p: string, pos: number, len: number) => (opened.push(p), nodeReadFs.readRange(p, pos, len)),
+  };
+  const refused: string[] = [];
+  const g = guardReadFs(spy, (b) => refused.push(b));
+  await assert.rejects(g.stat(link), RefusedPathError);
+  await assert.rejects(g.readRange(link, 0, 10), RefusedPathError);
+  await assert.rejects(readJsonFile(g, link), RefusedPathError);
+  assert.deepEqual(opened, []);
+  assert.deepEqual(refused, ["9.key", "9.key", "9.key"]);
+});
+
+test("guarded stat and readRange follow an ordinary symlink and still report a missing file", async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, "real.json"), JSON.stringify({ m: MARK }));
+  fs.symlinkSync(path.join(dir, "real.json"), path.join(dir, "link.json"));
+  const g = guardReadFs(nodeReadFs);
+  assert.ok((await g.stat(path.join(dir, "link.json"))).isFile());
+  assert.deepEqual(await readJsonFile(g, path.join(dir, "link.json")), { m: MARK });
+  await assert.rejects(g.stat(path.join(dir, "missing.json")), { code: "ENOENT" });
+});
+
 test("readJsonFile returns null for missing, non-JSON and oversized files", async () => {
   const dir = tempDir();
   fs.writeFileSync(path.join(dir, "bad.json"), `{not json ${MARK}`);
