@@ -106,3 +106,23 @@ test("§12.2 subagent files are tailed and only their latest assistant text is r
   appendLines(sub, [assistantLine(S, "/syn/a", [{ type: "text", text: `${MARK} step 2` }])]);
   assert.deepEqual((await tails.poll()).map((u) => u.summary), [`${MARK} step 2`]);
 });
+
+test("a removed subagent file's reader is pruned; a long subagent file still reports its latest text", async () => {
+  const f = setup([userLine(S, "/syn/a", "main")]);
+  const dir = subagentDir(f);
+  fs.mkdirSync(dir, { recursive: true });
+  const long = path.join(dir, "agent-long.jsonl");
+  const gone = path.join(dir, "agent-gone.jsonl");
+  writeTranscript(long, S, Array.from({ length: 60 }, (_, i) => assistantLine(S, "/syn/a", [{ type: "text", text: `${MARK} step ${i}` }])));
+  writeTranscript(gone, S, [assistantLine(S, "/syn/a", [{ type: "text", text: `${MARK} short` }])]);
+  const tails = new SubagentTails(f, nodeReadFs);
+  const first = await tails.poll();
+  assert.deepEqual(first.map((u) => [u.agentId, u.summary]), [["agent-gone", `${MARK} short`], ["agent-long", `${MARK} step 59`]]);
+  assert.equal(tails.size, 2);
+  fs.rmSync(gone);
+  assert.deepEqual(await tails.poll(), []);
+  assert.equal(tails.size, 1);
+  fs.rmSync(dir, { recursive: true });
+  assert.deepEqual(await tails.poll(), []);
+  assert.equal(tails.size, 0);
+});

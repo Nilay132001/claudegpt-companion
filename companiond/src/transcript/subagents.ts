@@ -13,6 +13,9 @@ export interface SubagentUpdate {
 
 export const SUBAGENT_SUMMARY_MAX = 2_000;
 
+/** Window per subagent reader: only the latest assistant text is used, so a small window suffices. */
+export const SUBAGENT_WINDOW = { maxEvents: 20, maxEventBytes: 256 * 1024 } as const;
+
 /** `<transcript dir>/<cliSessionId>/subagents/` for a transcript path. */
 export function subagentDir(transcriptPath: string): string {
   return path.join(path.dirname(transcriptPath), path.basename(transcriptPath, ".jsonl"), "subagents");
@@ -30,18 +33,28 @@ export class SubagentTails {
     this.#fs = fs;
   }
 
+  /** Number of subagent files currently tailed. */
+  get size(): number {
+    return this.#readers.size;
+  }
+
   async poll(): Promise<SubagentUpdate[]> {
     let names: string[] = [];
     try {
       names = await this.#fs.readdir(this.dir);
     } catch {
-      return [];
+      names = [];
     }
+    const listed = names.filter((n) => /^[A-Za-z0-9_-]+\.jsonl$/.test(n)).sort();
+    // Files no longer listed take their reader and last summary with them.
+    const keep = new Set(listed);
+    for (const n of [...this.#readers.keys()]) if (!keep.has(n)) this.#readers.delete(n);
+    for (const n of [...this.#last.keys()]) if (!keep.has(n)) this.#last.delete(n);
     const updates: SubagentUpdate[] = [];
-    for (const name of names.filter((n) => /^[A-Za-z0-9_-]+\.jsonl$/.test(n)).sort()) {
+    for (const name of listed) {
       let reader = this.#readers.get(name);
       if (!reader) {
-        reader = new TranscriptReader(path.join(this.dir, name), this.#fs);
+        reader = new TranscriptReader(path.join(this.dir, name), this.#fs, SUBAGENT_WINDOW);
         this.#readers.set(name, reader);
       }
       let batch;
