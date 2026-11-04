@@ -32,6 +32,16 @@ node poc.mjs attack /path/to/repo   # checks that shell, writes and secret reads
 The PoC keeps its own Codex home in `~/Library/Application Support/ClaudeGPTCompanion/` and stores the
 login in the macOS Keychain. It does not touch your normal Codex or Claude configuration.
 
+## Development
+
+Requires macOS 26+, full Xcode, Node 24+.
+
+```bash
+(cd companiond && npm ci && npm test && npm run typecheck)
+(cd app && swift test)
+bash scripts/check-repo.sh
+```
+
 ## Not affiliated
 
 Independent personal project. Not affiliated with Anthropic or OpenAI.
