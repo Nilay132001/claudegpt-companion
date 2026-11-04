@@ -1,6 +1,6 @@
 # Implementation plans — roadmap
 
-Spec: `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` (v3.1). Milestones from spec §14.
+Spec: `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` (v3.2). Milestones from spec §14.
 
 | M | Plan | Status |
 |---|------|--------|
@@ -21,7 +21,7 @@ After M1: M2 builds on the §7.2 Seatbelt profile (exact Node prefixes, narrower
 on the confirmed `sessionId` check (no id change observed); M4 (CodexHost) on option A plus a
 `thread/resume` test, the per-type replies (elicitation accepted only for a tool-call approval of an
 allowlisted tool on an allowlisted server; `url` and form elicitations always declined), the candidate
-tool-removal keys, the `unified_exec` self-check exception, and the open question of running Codex
-itself under Seatbelt (§7.1.9, owner approval needed).
+tool-removal keys, the `unified_exec` self-check exception, and running Codex itself under Seatbelt
+(§7.1.9, approved by the owner 2026-11-04; M4 probes whether it can run that way).
 
 Every milestone: feature branch → PR → review → owner merges. Short progress summary after each.
