@@ -1,7 +1,8 @@
 // Spec §6.1, §7.7: M3 code reads Claude's files only. Allowlist scan (not a deny-list of write names, which
 // aliasing, bracket access and destructuring get past; see test/jail/noWrites.test.ts) over every .ts file
 // that exists under these folders at test time, so later tasks are covered automatically.
-// Comments are not stripped: a banned word in a comment is a finding too (stripping is itself bypassable).
+// Comments are stripped first (stripComments, which respects string and template literals); string contents are
+// still scanned. Known limit: a regex literal containing a quote or comment marker can confuse the stripper.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -18,11 +19,36 @@ const files = M3_DIRS.flatMap(walk).filter((f) => f.endsWith(".ts"));
 
 /** Modules a file may import, by file (posix-style relative path under src/). Relative `.ts` imports are always fine. */
 const ANYWHERE = new Set(["node:path"]);
-const ONLY_IN: Record<string, { file: string; exact: string }> = {
+// `exact`: the whole import. `named`: `import { <named>, type X, ... }` (inline type members are erased, so allowed).
+const ONLY_IN: Record<string, { file: string; exact?: string; named?: string }> = {
   "node:fs/promises": { file: "claude/readFs.ts", exact: 'import * as fsp from "node:fs/promises"' },
-  "node:fs": { file: "bridge/watcher.ts", exact: 'import { watch } from "node:fs"' },
-  "node:child_process": { file: "claude/processProbe.ts", exact: 'import { execFile } from "node:child_process"' },
+  "node:fs": { file: "bridge/watcher.ts", named: "watch" },
+  "node:child_process": { file: "claude/processProbe.ts", named: "execFile" },
 };
+const TYPE_ONLY_OK = new Set(["node:fs", "node:fs/promises"]); // `import type {...}` is erased at runtime: any file
+
+/** Replaces // and /* *\/ comments with spaces (newlines kept), leaving string and template literals untouched. */
+export function stripComments(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    const c = text[i] ?? "";
+    const n = text[i + 1];
+    if (c === "/" && n === "/") {
+      while (i < text.length && text[i] !== "\n") (out += " "), i++;
+    } else if (c === "/" && n === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end < 0 ? text.length : end + 2;
+      out += text.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && !(c !== "`" && text[j] === "\n")) j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else (out += c), i++;
+  }
+  return out;
+}
 const FSP_MEMBERS = new Set(["open", "readdir", "stat", "realpath"]);
 
 const BANNED: Array<[string, RegExp]> = [
@@ -38,20 +64,31 @@ const BANNED: Array<[string, RegExp]> = [
   ["WebSocket", /\bWebSocket\b/],
 ];
 
-function scanSource(file: string, text: string): string[] {
+/** `import { <value>, type A, type B } from "<spec>"`: the only value member is `value`. */
+function namedOnly(stmt: string, spec: string, value: string): boolean {
+  const m = stmt.match(new RegExp(`^import \\{([^}]*)\\} from ["']${spec.replace(/[/.]/g, "\\$&")}["']$`));
+  if (!m) return false;
+  const members = (m[1] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  return members.filter((x) => !x.startsWith("type ")).join() === value;
+}
+
+function scanSource(file: string, raw: string): string[] {
+  const text = stripComments(raw);
   const f = file.split(path.sep).join("/");
   const found: string[] = [];
   for (const [what, re] of BANNED) if (re.test(text)) found.push(what);
 
   // Imports: every `import ... from "x"`, `export ... from "x"` and bare `import "x"`.
   let rest = text;
-  for (const m of text.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']|^\s*import\s*["']([^"']+)["']/gm)) {
+  for (const m of text.matchAll(/^\s*(?:import|export)\b[^;'"`(]*?\bfrom\s*["']([^"']+)["']|^\s*import\s*["']([^"']+)["']/gm)) {
     const spec = m[1] ?? m[2] ?? "";
     const rule = ONLY_IN[spec];
+    const stmt = m[0].trim().replace(/\s+/g, " ");
     if (ANYWHERE.has(spec) || /^\.\.?\/[\w./-]+\.ts$/.test(spec)) continue;
+    if (TYPE_ONLY_OK.has(spec) && /^import type\b/.test(stmt)) continue;
     if (!rule) found.push(`module ${spec}`);
     else if (rule.file !== f) found.push(`module ${spec} outside ${rule.file}`);
-    else if (m[0].trim() !== rule.exact) found.push(`${spec} imported another way`);
+    else if (rule.exact !== undefined ? stmt !== rule.exact : !namedOnly(stmt, spec, rule.named ?? "")) found.push(`${spec} imported another way`);
     else rest = rest.replace(m[0], "");
   }
 
@@ -158,6 +195,40 @@ test("the allowlist scan catches every bypass shape", () => {
 
 test("the allowlist scan passes plain allowed code", () => {
   for (const [file, text] of CLEAN) assert.deepEqual(scanSource(file, text), [], file);
+});
+
+test("comments are not scanned, the same tokens in code are, and strings do not hide code", () => {
+  const prose = [
+    "// Real probe. `process.kill(pid, 0)` sends no signal; fsp, require (, fetch (, WebSocket, globalThis, eval(",
+    '/* from "x" and import("y") and process.binding */',
+    "export interface Rec { cwd: string }",
+    '/** doc with from "x" inside */',
+    "export interface Other { a: number }",
+  ].join("\n");
+  assert.deepEqual(scanSource("claude/paths.ts", prose), []);
+  assert.deepEqual(scanSource("claude/processProbe.ts", 'import { execFile } from "node:child_process";\n// process.exit(1)\nprocess.kill(pid, 0);'), []);
+  for (const code of ['require("x");', "fetch (u);", "new WebSocket(u);", "globalThis.x;", "eval(1);", 'import("x");'])
+    assert.notDeepEqual(scanSource("claude/paths.ts", code), [], code);
+  assert.notDeepEqual(scanSource("claude/paths.ts", 'const u = "https://x"; globalThis.y;'), []);
+  assert.notDeepEqual(scanSource("claude/paths.ts", "const u = `//`; require('fs');"), []);
+  assert.notDeepEqual(scanSource("claude/paths.ts", 'const u = "a"; /* c */ require("fs");'), []);
+  assert.notDeepEqual(scanSource("claude/processProbe.ts", 'import { execFile } from "node:child_process";\n// ok\nprocess.exit(1);'), []);
+});
+
+test("type-only fs imports are allowed; value imports stay restricted", () => {
+  for (const [file, text] of [
+    ["claude/paths.ts", 'import type { Stats } from "node:fs";'],
+    ["transcript/x.ts", 'import type { FileHandle } from "node:fs/promises";'],
+    ["bridge/watcher.ts", 'import { watch, type FSWatcher } from "node:fs";'],
+    ["bridge/watcher.ts", 'import {\n  watch,\n  type FSWatcher,\n} from "node:fs";'],
+  ] as const) assert.deepEqual(scanSource(file, text), [], text);
+  for (const [file, text] of [
+    ["bridge/watcher.ts", 'import { watch, type FSWatcher, writeFileSync } from "node:fs";'],
+    ["bridge/watcher.ts", 'import { type FSWatcher } from "node:fs";'],
+    ["claude/paths.ts", 'import { type Stats, readFileSync } from "node:fs";'],
+    ["claude/paths.ts", 'import type { Foo } from "node:net";'],
+    ["claude/paths.ts", 'import type { Foo } from "node:os";'],
+  ] as const) assert.notDeepEqual(scanSource(file, text), [], text);
 });
 
 test("the M3 folders are scanned", () => {
