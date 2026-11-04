@@ -261,6 +261,10 @@ test("§6.3 a session that moved repo while untailed reports the change when sel
   b.pin("local_syn-b");
   await b.idle();
   assert.equal(b.syncStatus("local_syn-a").state, "not_tracked");
+  // §6.3: no last-good root is exposed for a session that is not being tailed.
+  assert.equal(b.worktree("local_syn-a"), null);
+  assert.equal(await b.liveBranch("local_syn-a"), null);
+  assert.equal(await b.resolveNow("local_syn-a"), null);
   appendLines(f, [userLine("cli-a", other.main, "moved while untailed")]);
   take();
   b.pin("local_syn-a");
@@ -310,6 +314,36 @@ test("approval later: resolveNow re-runs resolution", async () => {
   approved = true;
   assert.equal((await b.resolveNow("local_syn-a"))?.kind, "resolved");
   assert.equal(b.snapshot().sessions[0].resolvedRoot, a.main);
+  assert.equal(await b.resolveNow("local_syn-unlisted"), null);
+  assert.equal(b.worktree("local_syn-unlisted"), null);
+});
+
+test("symlinks to .key files in the Claude folders are refused, never opened, and the pass carries on", async () => {
+  const opened: string[] = [];
+  const refused: string[] = [];
+  const spy: ReadFs = {
+    ...nodeReadFs,
+    stat: (x) => (opened.push(x), nodeReadFs.stat(x)),
+    readRange: (x, pos, len) => (opened.push(x), nodeReadFs.readRange(x, pos, len)),
+  };
+  const { p, make, take } = harness({ fs: spy, onRefusedPath: (n) => refused.push(n) });
+  fs.writeFileSync(path.join(p.runningDir, "9.key"), MARK);
+  fs.symlinkSync(path.join(p.runningDir, "9.key"), path.join(p.runningDir, "9.json"));
+  const f = transcriptPath(p, "/syn/a", "cli-a");
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(path.join(path.dirname(f), "x.key"), MARK);
+  fs.symlinkSync(path.join(path.dirname(f), "x.key"), f);
+  const rec = writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-a", cwd: "/syn/a", lastFocusedAt: T0 });
+  const recLink = path.join(path.dirname(rec), "local_syn-k.json");
+  fs.writeFileSync(path.join(path.dirname(rec), "k.key"), MARK);
+  fs.symlinkSync(path.join(path.dirname(rec), "k.key"), recLink);
+  const b = make();
+  const snap = await b.refresh();
+  await b.tick();
+  assert.deepEqual(snap.sessions.map((s) => [s.sessionId, s.transcriptMissing]), [["local_syn-a", "not_found"]]);
+  assert.deepEqual(ofType(take(), "sync_error"), []);
+  for (const k of ["9.key", "x.key", "k.key"]) assert.ok(refused.includes(k), refused.join(","));
+  assert.deepEqual(opened.filter((x) => x.endsWith(".key") || x === f || x === recLink || x.endsWith("9.json")), []);
 });
 
 test("§12.2 refresh after watcher failure re-scans and re-creates only that watcher", async () => {
@@ -336,7 +370,8 @@ test("§12.2 refresh after watcher failure re-scans and re-creates only that wat
 
 test("a missing watched folder (ENOENT) re-arms with backoff and does not rescan", async () => {
   const { created, watch } = fakeWatch();
-  const { p, make, take } = harness({ watch, pollIntervalMs: 60_000, rewatchDelayMs: 5 });
+  // Re-arm delays are 25 ms, then 50 ms; each check sits at least 25 ms from the timer it waits on.
+  const { p, make, take } = harness({ watch, pollIntervalMs: 60_000, rewatchDelayMs: 25 });
   const b = make();
   b.start();
   await b.idle();
@@ -345,12 +380,12 @@ test("a missing watched folder (ENOENT) re-arms with backoff and does not rescan
   created[1].onError(enoent);
   await b.idle();
   assert.deepEqual(b.snapshot().sessions, []);
-  await sleep(20);
+  await sleep(75);
   assert.equal(created.length, 4);
   created[3].onError(enoent);
-  await sleep(6);
+  await sleep(10);
   assert.equal(created.length, 4, "second re-arm waits for the doubled delay");
-  await sleep(20);
+  await sleep(90);
   assert.equal(created.length, 5);
   assert.ok(ofType(take(), "sync_error").every((e) => e.message === "watcher failed (running files): ENOENT"));
   b.stop();

@@ -122,6 +122,8 @@ export class SessionBridge {
   /** Last cliSessionId a reader was made for, per session; survives untracking. */
   #lastCli = new Map<string, string>();
   #worktrees = new Map<string, WorktreeState>();
+  /** Sessions polled in the last pass: listed and (selected or busy). */
+  #active = new Set<string>();
   #pin: Pin | null = null;
   #pinRestored = false;
   #desktopError: string | null = null;
@@ -148,6 +150,10 @@ export class SessionBridge {
     }
   }
 
+  /**
+   * Adds a listener; returns the function that removes it. Listeners are called synchronously; an exception
+   * thrown by a listener is caught and dropped (not reported), so guard your own listener if you need to know.
+   */
   on(listener: BridgeListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
@@ -206,7 +212,13 @@ export class SessionBridge {
     return this.#tracked.get(sessionId)?.reader.hasUuid(uuid) ?? false;
   }
 
+  /**
+   * Resolution of a session polled in the last pass (selected or busy), else null. An untailed session's
+   * stored resolution may be stale, and §6.3 forbids presenting a last-good root; the stored entry is kept
+   * internally only so a move made while untailed is reported once the session is tailed again.
+   */
   worktree(sessionId: string): WorktreeResolution | null {
+    if (!this.#active.has(sessionId)) return null;
     return this.#worktrees.get(sessionId)?.resolution ?? null;
   }
 
@@ -221,9 +233,10 @@ export class SessionBridge {
     }
   }
 
-  /** Re-run resolution now, e.g. after the user approves a root (M4). */
+  /** Re-run resolution now, e.g. after the user approves a root (M4). Null (and no change) for an untailed or unlisted session. */
   resolveNow(sessionId: string): Promise<WorktreeResolution | null> {
     return this.#enqueue(async () => {
+      if (!this.#active.has(sessionId)) return;
       await this.#resolve(sessionId, true);
       this.#emitSnapshot();
     }).then(() => this.worktree(sessionId));
@@ -418,6 +431,7 @@ export class SessionBridge {
     const listed = new Set(sessions.map((s) => s.sessionId));
     // A pinned session that vanished stays pinned (pinnedMissing) but is not tailed.
     if (selected && listed.has(selected)) active.add(selected);
+    this.#active = active;
     for (const [id, t] of [...this.#tracked]) {
       if (active.has(id)) continue;
       this.#tracked.delete(id);
