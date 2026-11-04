@@ -27,9 +27,16 @@ const ONLY_IN: Record<string, { file: string; exact?: string; named?: string }> 
 };
 const TYPE_ONLY_OK = new Set(["node:fs", "node:fs/promises"]); // `import type {...}` is erased at runtime: any file
 
-/** Replaces // and /* *\/ comments with spaces (newlines kept), leaving string and template literals untouched. */
-export function stripComments(text: string): string {
+const REGEX_AFTER_WORD = new Set("return typeof instanceof in of new delete void throw case do else yield await".split(" "));
+
+/**
+ * Replaces // and block comments with spaces (newlines kept). String, template and regex literals are copied
+ * through untouched (a `/` starts a regex after start-of-input, one of `(,=:;{}[!&|?+-*%<>~^` or a keyword such as
+ * `return`; otherwise it is division). Fails closed: an unterminated string or regex sets `error`.
+ */
+export function stripComments(text: string): { out: string; error: boolean } {
   let out = "";
+  let error = false;
   for (let i = 0; i < text.length; ) {
     const c = text[i] ?? "";
     const n = text[i + 1];
@@ -37,18 +44,50 @@ export function stripComments(text: string): string {
       while (i < text.length && text[i] !== "\n") (out += " "), i++;
     } else if (c === "/" && n === "*") {
       const end = text.indexOf("*/", i + 2);
+      if (end < 0) error = true;
       const stop = end < 0 ? text.length : end + 2;
       out += text.slice(i, stop).replace(/[^\n]/g, " ");
       i = stop;
     } else if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
       while (j < text.length && text[j] !== c && !(c !== "`" && text[j] === "\n")) j += text[j] === "\\" ? 2 : 1;
+      if (text[j] !== c) error = true;
       out += text.slice(i, j + 1);
       i = j + 1;
+    } else if (c === "/" && startsRegex(out)) {
+      let j = i + 1;
+      let inClass = false;
+      for (; j < text.length && text[j] !== "\n"; j++) {
+        const ch = text[j];
+        if (ch === "\\") j++;
+        else if (ch === "[") inClass = true;
+        else if (ch === "]") inClass = false;
+        else if (ch === "/" && !inClass) break;
+      }
+      if (text[j] !== "/") {
+        error = true;
+        out += text.slice(i, j);
+        i = j;
+      } else {
+        j++;
+        while (/[A-Za-z]/.test(text[j] ?? "")) j++;
+        out += text.slice(i, j);
+        i = j;
+      }
     } else (out += c), i++;
   }
-  return out;
+  return { out, error };
 }
+
+function startsRegex(before: string): boolean {
+  const t = before.trimEnd();
+  if (t === "") return true;
+  const last = t[t.length - 1] ?? "";
+  if ("(,=:;{}[!&|?+-*%<>~^".includes(last)) return true;
+  const word = t.match(/[A-Za-z_$][\w$]*$/)?.[0];
+  return word !== undefined && REGEX_AFTER_WORD.has(word);
+}
+
 const FSP_MEMBERS = new Set(["open", "readdir", "stat", "realpath"]);
 
 const BANNED: Array<[string, RegExp]> = [
@@ -73,9 +112,9 @@ function namedOnly(stmt: string, spec: string, value: string): boolean {
 }
 
 function scanSource(file: string, raw: string): string[] {
-  const text = stripComments(raw);
+  const { out: text, error } = stripComments(raw);
   const f = file.split(path.sep).join("/");
-  const found: string[] = [];
+  const found: string[] = error ? ["unparseable source"] : [];
   for (const [what, re] of BANNED) if (re.test(text)) found.push(what);
 
   // Imports: every `import ... from "x"`, `export ... from "x"` and bare `import "x"`.
@@ -213,6 +252,21 @@ test("comments are not scanned, the same tokens in code are, and strings do not 
   assert.notDeepEqual(scanSource("claude/paths.ts", "const u = `//`; require('fs');"), []);
   assert.notDeepEqual(scanSource("claude/paths.ts", 'const u = "a"; /* c */ require("fs");'), []);
   assert.notDeepEqual(scanSource("claude/processProbe.ts", 'import { execFile } from "node:child_process";\n// ok\nprocess.exit(1);'), []);
+});
+
+test("regex literals neither hide code nor desync the scan; unterminated literals fail closed", () => {
+  const flagged = (code: string) => assert.notDeepEqual(scanSource("claude/paths.ts", code), [], code);
+  flagged("const r = /^https?:\\/\\//; if (r.test(u)) fetch(u);");
+  flagged("const g = /^\\/*$/;\nfetch(u);\n/* later */");
+  flagged("const r = /`/;\nrequire('x');\nconst s = `a`;");
+  flagged("const r = /[/]/; fetch(u);");
+  flagged("return /a/.test(x) && fetch(u);");
+  flagged("const r = /abc\n");
+  flagged('const s = "abc\n');
+  flagged("const t = `abc");
+  flagged("/* open");
+  assert.deepEqual(scanSource("claude/paths.ts", "const q = a / b; // fetch( and require(\nconst z = c / d / e;"), []);
+  assert.deepEqual(scanSource("claude/paths.ts", "const r = /[/]x\\/\\//g; // require(\n"), []);
 });
 
 test("type-only fs imports are allowed; value imports stay restricted", () => {
