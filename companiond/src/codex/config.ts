@@ -45,7 +45,9 @@ export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES): str
     "# Written by companiond at every start. Edits are overwritten.",
     'cli_auth_credentials_store = "keyring"',
     'web_search = "disabled"',
-    'approval_policy = "untrusted"',
+    // No approval_policy here: 0.166.0 refuses `approval_policy = "untrusted"` in config.toml
+    // ("no longer supported"). thread/start sets it per thread and checkThreadResponse verifies it.
+    'approvals_reviewer = "user"',
     'sandbox_mode = "read-only"',
     "",
     "[features]",

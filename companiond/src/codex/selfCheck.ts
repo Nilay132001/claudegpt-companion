@@ -60,11 +60,16 @@ export function checkFeatureList(entries: readonly unknown[], off: readonly stri
   const r = empty();
   const x = UNIFIED_EXEC_EXCEPTION;
   for (const k of off) {
-    const e = entries.map(obj).find((f) => f?.name === k);
-    if (!e) {
+    const matches = entries.map(obj).filter((f): f is Record<string, unknown> => f?.name === k);
+    if (matches.length === 0) {
       r.failures.push(`experimentalFeature/list has no ${k}`);
       continue;
     }
+    if (matches.length > 1) {
+      r.failures.push(`experimentalFeature/list has ${matches.length} entries for ${k}`);
+      continue;
+    }
+    const e = matches[0]!;
     if (e.enabled === false) continue;
     if (k === x.feature && version === x.version && e.stage === x.stage && e.enabled === x.enabled && e.defaultEnabled === x.defaultEnabled) {
       r.warnings.push("unified_exec: experimentalFeature/list shows it on while config/read shows it off (known on Codex 0.166.0, spec §7.1.5)");
@@ -77,7 +82,15 @@ export function checkFeatureList(entries: readonly unknown[], off: readonly stri
 
 export function checkCompanionCwd(cwd: string, fsx: FsProbe = nodeFsProbe): CheckResult {
   const r = empty();
-  if (fsx.list(cwd).length !== 0) r.failures.push("the companion's empty folder is not empty");
+  if (!path.isAbsolute(cwd)) {
+    r.failures.push("the companion's folder is not an absolute path");
+    return r;
+  }
+  try {
+    if (fsx.list(cwd).length !== 0) r.failures.push("the companion's empty folder is not empty");
+  } catch {
+    r.failures.push("the companion's empty folder is missing or cannot be read");
+  }
   let dir = cwd;
   for (let up = 0; ; up++) {
     for (const name of INSTRUCTION_FILES) {
@@ -128,6 +141,7 @@ export function checkThreadResponse(resp: unknown, emptyCwd: string): CheckResul
   else if (src.length > 0) r.failures.push(`Codex loaded ${src.length} instruction file(s) for this thread`);
   if (o?.cwd !== emptyCwd) r.failures.push("thread cwd is not the companion's empty folder");
   if (o?.approvalPolicy !== "untrusted") r.failures.push("thread approval policy is not untrusted");
+  if (o?.approvalsReviewer !== "user") r.failures.push("thread approvals reviewer is not the user");
   if (obj(o?.sandbox)?.type !== "readOnly") r.failures.push("thread sandbox is not read-only");
   return r;
 }

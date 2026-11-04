@@ -49,6 +49,8 @@ test("experimentalFeature/list: the unified_exec exception is exact and 0.166.0-
   const shell = goodFeatures().map((f) => (f.name === "shell_tool" ? feature(f.name, true) : f));
   assert.match(checkFeatureList(shell, OFF_FEATURES, "0.166.0").failures.join(), /shell_tool/);
   assert.match(checkFeatureList(goodFeatures().slice(1), OFF_FEATURES, "0.166.0").failures.join(), /no shell_tool/);
+  const dup = [...goodFeatures(), feature("shell_tool", true)];
+  assert.match(checkFeatureList(dup, OFF_FEATURES, "0.166.0").failures.join(), /2 entries for shell_tool/);
 });
 
 function fakeFs(present: string[], listing: Record<string, string[]> = {}): FsProbe {
@@ -62,6 +64,11 @@ test("companion folder: empty, and no .git or AGENTS file in it or any ancestor"
     assert.equal(checkCompanionCwd(cwd, fakeFs([bad])).failures.length, 1, bad);
   }
   assert.match(checkCompanionCwd(cwd, fakeFs([], { [cwd]: ["x"] })).failures.join(), /not empty/);
+  assert.match(checkCompanionCwd("rel/dir", fakeFs([])).failures.join(), /absolute/);
+  const unlistable: FsProbe = { exists: () => false, list: () => { throw new Error("ENOENT /secret/path"); } };
+  const u = checkCompanionCwd(cwd, unlistable);
+  assert.equal(u.failures.length, 1);
+  assert.doesNotMatch(u.failures.join(), /secret|ENOENT/);
   assert.doesNotMatch(checkCompanionCwd(cwd, fakeFs(["/a/.git"])).failures.join(), /\/a/); // no paths in the detail
 });
 
@@ -82,12 +89,15 @@ test("MCP status: subset per process, exact per bound thread", () => {
 });
 
 test("thread responses: no instruction files, empty cwd, untrusted, read-only", () => {
-  const good = { thread: { id: "t" }, cwd: "/e", instructionSources: [], approvalPolicy: "untrusted", sandbox: { type: "readOnly", networkAccess: false } };
+  const good = { thread: { id: "t" }, cwd: "/e", instructionSources: [], approvalPolicy: "untrusted", approvalsReviewer: "user", sandbox: { type: "readOnly", networkAccess: false } };
   assert.deepEqual(checkThreadResponse(good, "/e").failures, []);
   assert.match(checkThreadResponse({ ...good, instructionSources: ["/r/AGENTS.md"] }, "/e").failures.join(), /instruction/);
   assert.equal(checkThreadResponse({ ...good, cwd: "/r" }, "/e").failures.length, 1);
   assert.equal(checkThreadResponse({ ...good, approvalPolicy: "never" }, "/e").failures.length, 1);
   assert.equal(checkThreadResponse({ ...good, sandbox: { type: "workspaceWrite" } }, "/e").failures.length, 1);
-  assert.equal(checkThreadResponse({}, "/e").failures.length, 4);
+  for (const rev of ["auto_review", "guardian_subagent", undefined]) {
+    assert.match(checkThreadResponse({ ...good, approvalsReviewer: rev }, "/e").failures.join(), /reviewer/, String(rev));
+  }
+  assert.equal(checkThreadResponse({}, "/e").failures.length, 5);
   assert.equal(mergeChecks(checkThreadResponse({}, "/e"), { failures: [], warnings: ["w"] }).warnings.length, 1);
 });

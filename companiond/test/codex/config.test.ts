@@ -21,7 +21,8 @@ test("the config turns every feature off and keeps the base server inert", () =>
   for (const k of OFF_FEATURES) assert.match(t, new RegExp(`^${k} = false$`, "m"), k);
   assert.match(t, /^cli_auth_credentials_store = "keyring"$/m);
   assert.match(t, /^web_search = "disabled"$/m);
-  assert.match(t, /^approval_policy = "untrusted"$/m);
+  assert.doesNotMatch(t, /^approval_policy/m); // 0.166.0 rejects it in config.toml; set per thread instead
+  assert.match(t, /^approvals_reviewer = "user"$/m);
   assert.match(t, /^sandbox_mode = "read-only"$/m);
   assert.match(t, /^\[mcp_servers\.companion-readonly\]$/m);
   assert.match(t, new RegExp(`^command = "${BASE_MCP_COMMAND}"$`, "m"));
