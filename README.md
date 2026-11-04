@@ -9,7 +9,7 @@ official Codex app-server. No API keys.
 - It explains code, Claude's last message, test failures and Jira tickets in plain language.
 - Microphone dictation and Read Aloud use on-device macOS speech.
 
-> Status: **Phase 1 done (proof of concept), design under review.** Not usable yet.
+> Status: **Phase 1 done (proof of concept), design v2 in review.** Not usable yet.
 
 ## Docs
 
@@ -38,4 +38,5 @@ Independent personal project. Not affiliated with Anthropic or OpenAI.
 
 ## License
 
-MIT
+Not decided yet. Until a license is added, no rights to reuse the code are granted beyond viewing it on
+GitHub.
