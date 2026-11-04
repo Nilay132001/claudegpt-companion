@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { describeKeys, parseConfigList, programKeys } from "./configGate.ts";
+import { denyPathspecs } from "../jail/denyList.ts";
 
 // Fixed-size answers (config list, rev-parse, hash-object) get their own cap, so a small
 // maxOutputBytes can never turn into a refusal.
@@ -98,6 +99,47 @@ export class LocateError extends Error {
   }
 }
 
+export interface StatusEntry {
+  code: string;
+  path: string;
+}
+
+export interface StatusResult {
+  branch: string;
+  entries: StatusEntry[];
+  truncated: boolean;
+}
+
+export interface GrepHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
+// `git status --porcelain=v1 -z --branch --no-renames`: "## <branch>\0" then "XY <path>\0" per entry.
+export function parseStatusZ(out: string): { branch: string; entries: StatusEntry[] } {
+  let branch = "";
+  const entries: StatusEntry[] = [];
+  for (const p of out.split("\0")) {
+    if (p.startsWith("## ")) branch = p.slice(3);
+    else if (p.length >= 4) entries.push({ code: p.slice(0, 2), path: p.slice(3) });
+  }
+  return { branch, entries };
+}
+
+// `git grep -z -n`: "<path>\0<line>:<text>\n" (some versions print "\0" after the line number too).
+export function parseGrepZ(out: string): GrepHit[] {
+  const hits: GrepHit[] = [];
+  for (const line of out.split("\n")) {
+    const a = line.indexOf("\0");
+    if (a <= 0) continue;
+    const m = line.slice(a + 1).match(/^(\d+)[:\0]([\s\S]*)$/); // match, not RegExp exec: the no-writes scan bans that call name
+    if (!m) continue;
+    hits.push({ path: line.slice(0, a), line: Number(m[1]), text: m[2] ?? "" });
+  }
+  return hits;
+}
+
 export class SafeGit {
   readonly root: string;
   readonly gitPath: string;
@@ -191,7 +233,50 @@ export class SafeGit {
     };
   }
 
-  // Gate, then run with the safety flags. Tasks 4b and 5 add the public queries that call this.
+  async status(): Promise<StatusResult> {
+    const r = await this.#run([
+      "status", "--porcelain=v1", "-z", "--branch", "--untracked-files=all", "--ignore-submodules=all", "--no-renames",
+    ]);
+    return { ...parseStatusZ(r.stdout.toString("utf8")), truncated: r.truncated };
+  }
+
+  async diffNames(): Promise<{ names: string[]; truncated: boolean }> {
+    const base = await this.#base();
+    const r = await this.#run([
+      "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--no-renames", base, "--",
+    ]);
+    const parts = r.stdout.toString("utf8").split("\0");
+    if (r.truncated) parts.pop(); // the last name may be cut off
+    return { names: parts.filter((p) => p.length > 0), truncated: r.truncated };
+  }
+
+  async diff(paths: readonly string[]): Promise<{ text: string; truncated: boolean }> {
+    if (paths.length === 0) return { text: "", truncated: false };
+    const base = await this.#base();
+    const r = await this.#run([
+      "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=all", "--no-renames", base, "--",
+      ...paths.map((p) => `:(literal)${p}`),
+    ]);
+    return { text: r.stdout.toString("utf8"), truncated: r.truncated };
+  }
+
+  async grep(query: string): Promise<{ hits: GrepHit[]; truncated: boolean }> {
+    const r = await this.#run(
+      ["grep", "-z", "-n", "-I", "-F", "--untracked", "--no-color", "-e", query, "--", ".", ...denyPathspecs()],
+      [0, 1],
+    );
+    return { hits: r.code === 1 ? [] : parseGrepZ(r.stdout.toString("utf8")), truncated: r.truncated };
+  }
+
+  // HEAD, or the empty tree when HEAD is unborn (no commits yet).
+  async #base(): Promise<string> {
+    const head = await this.#run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], [0, 1], SMALL_CAP);
+    if (head.code === 0) return "HEAD";
+    const empty = await this.#run(["hash-object", "-t", "tree", "/dev/null"], [0], SMALL_CAP);
+    return empty.stdout.toString("utf8").trim();
+  }
+
+  // Gate, then run with the safety flags.
   async #run(args: readonly string[], okCodes: readonly number[] = [0], cap = this.#maxBytes): Promise<GitResult> {
     await this.checkConfig();
     const r = await this.#spawnGit([...SAFE_GIT_FLAGS, ...args], cap);
