@@ -27,16 +27,22 @@ console.log(
     nodeUnderHomebrew: tc.nodePath.startsWith("/opt/homebrew/"),
     nodeReadDirs: tc.nodeReadDirs.length,
     nodeReadFiles: tc.nodeReadFiles.length,
+    metadataPaths: tc.metadataPaths.length,
     default: DEFAULT_PROFILE_OPTIONS,
   }),
 );
+// Control row: the default without the symlink metadata rules (the first Task 8 measurement's failure).
+const runs: { v: ProfileOptions; symlinkMetadata: boolean }[] = [
+  { v: DEFAULT_PROFILE_OPTIONS, symlinkMetadata: false },
+  ...variants.map((v) => ({ v, symlinkMetadata: true })),
+];
 try {
-  for (const v of variants) {
+  for (const { v, symlinkMetadata } of runs) {
     for (const kind of ["main", "worktree"] as ProbeKind[]) {
-      const run = runProbe(tc, await makeProbeSetup(kind), v);
+      const run = runProbe(symlinkMetadata ? tc : { ...tc, metadataPaths: [] }, await makeProbeSetup(kind), v);
       const failures = run.result ? probeFailures(run.result, v, kind) : [`node did not start (exit ${run.exit})`];
       const info = run.result ? Object.fromEntries(Object.entries(run.result).filter(([k]) => k.startsWith("info:"))) : {};
-      console.log(JSON.stringify({ variant: v, kind, pass: failures.length === 0, failures, info }));
+      console.log(JSON.stringify({ variant: v, symlinkMetadata, kind, pass: failures.length === 0, failures, info }));
     }
   }
 } finally {

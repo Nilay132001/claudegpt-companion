@@ -28,6 +28,8 @@ for (const kind of ["main", "worktree"] as const) {
     const run = runProbe(tc, s, DEFAULT_PROFILE_OPTIONS);
     assert.ok(run.result, `probe did not run (exit ${run.exit}): ${run.stderrTail}`);
     assert.deepEqual(probeFailures(run.result, DEFAULT_PROFILE_OPTIONS, kind), []);
+    // Narrow metadata: stat of an existing file outside root and outside the toolchain is refused by Seatbelt.
+    assert.match(run.result.statOutside ?? "missing", /^blocked:(EPERM|EACCES)$/);
     assert.equal(fs.existsSync(path.join(s.root, "PWNED.txt")), false);
     assert.equal(fs.existsSync(path.join(s.root, "pwned-dir")), false);
     assert.equal(fs.existsSync(path.join(s.root, "README.md")), true);

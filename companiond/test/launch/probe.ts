@@ -88,7 +88,7 @@ export interface ProbeRun {
 export function runProbe(tc: Toolchain, s: ProbeSetup, options: ProfileOptions): ProbeRun {
   const profile = buildReadonlyProfile({
     root: s.root, gitDir: s.gitDir, commonDir: s.commonDir, codeDir: tc.codeDir, nodePath: tc.nodePath,
-    nodeReadDirs: tc.nodeReadDirs, nodeReadFiles: tc.nodeReadFiles, gitPath: tc.gitPath,
+    nodeReadDirs: tc.nodeReadDirs, nodeReadFiles: tc.nodeReadFiles, metadataPaths: tc.metadataPaths, gitPath: tc.gitPath,
     developerDir: tc.developerDir, options,
   });
   const probe = path.join(tc.codeDir, "test", "launch", "sandboxProbe.ts");

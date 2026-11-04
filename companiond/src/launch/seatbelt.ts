@@ -13,11 +13,11 @@ export interface ProfileOptions {
 }
 
 // Set from the Task 8 measurement. See the findings doc, "M2 profile measurements".
-// metadata is "all": with exact Node reads, narrow metadata stops dyld from following Homebrew's
-// /opt/homebrew/opt/<formula> symlinks to Node's libraries, and Node aborts at start.
+// metadata is "narrow": dyld reaches Node's libraries through symlinks (Homebrew's /opt/homebrew/opt/<formula>),
+// so narrow mode also allows metadata, never data, on exactly those links (ProfileInput.metadataPaths).
 export const DEFAULT_PROFILE_OPTIONS: ProfileOptions = Object.freeze({
   nodeReads: "exact",
-  metadata: "all",
+  metadata: "narrow",
   denyNames: true,
   opensslConf: "devnull",
 });
@@ -30,6 +30,8 @@ export interface ProfileInput {
   nodePath: string;
   nodeReadDirs: readonly string[];
   nodeReadFiles: readonly string[];
+  // Symlinks dyld steps through (Toolchain.metadataPaths): metadata-only literals in narrow mode.
+  metadataPaths: readonly string[];
   gitPath: string;
   developerDir: string | null;
   options: ProfileOptions;
@@ -133,13 +135,19 @@ export function buildReadonlyProfile(i: ProfileInput): string {
   for (const p of own) assertReadablePrefix(p);
   const reads = [...new Set([...own, ...(o.nodeReads === "homebrew-broad" ? HOMEBREW_BROAD : [])])];
   const files = [...new Set(i.nodeReadFiles)];
+  for (const m of i.metadataPaths) {
+    sbString(m);
+    if (isTooBroad(m)) throw new Error(`refusing a metadata rule for a whole system or home folder: ${path.resolve(m)}`);
+  }
   const readRule = [
     "(allow file-read*",
     ...[...reads, ...SYSTEM_READ_SUBPATHS].map((p) => `  ${subpath(p)}`),
     `  ${[...files, ...SYSTEM_READ_LITERALS].map(literal).join(" ")})`,
   ].join("\n");
   const metaLiterals = [
-    ...new Set([...[...reads, ...files, i.nodePath, i.gitPath].flatMap(ancestors), ...files, ...SYSTEM_META_LITERALS]),
+    ...new Set([
+      ...[...reads, ...files, i.nodePath, i.gitPath].flatMap(ancestors), ...files, ...i.metadataPaths, ...SYSTEM_META_LITERALS,
+    ]),
   ];
   const metaRule =
     o.metadata === "all"

@@ -5,8 +5,61 @@ import {
   assertReadablePrefix, buildReadonlyProfile, caseInsensitive, DEFAULT_PROFILE_OPTIONS, denyRegex,
   profileEnv, sbString, type ProfileInput,
 } from "../../src/launch/seatbelt.ts";
-import { isTooBroad, nodeReadPaths } from "../../src/launch/toolchain.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { isTooBroad, machOLoadPaths, nodeReadPaths, symlinkMetadataPaths } from "../../src/launch/toolchain.ts";
 import { DENIED_SEATBELT_SEGMENTS, isDeniedName } from "../../src/jail/denyList.ts";
+import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
+
+test.after(removeTempDirs);
+
+test("symlink hops get metadata-only literal rules in narrow mode, and nothing else", () => {
+  const links = ["/opt/homebrew/opt/llhttp", "/opt/homebrew/opt/libuv"];
+  const p = buildReadonlyProfile({ ...base, metadataPaths: links });
+  const meta = p.slice(p.indexOf("(allow file-read-metadata"), p.indexOf("(allow file-write-data"));
+  const read = p.slice(p.indexOf("(allow file-read*"), p.indexOf("(allow file-read-metadata"));
+  assert.equal(p.match(/file-write/g)?.length, 1);
+  for (const m of links) {
+    assert.ok(meta.includes(`(literal "${m}")`), m);
+    assert.ok(!p.includes(`(subpath "${m}")`), m);
+    assert.ok(!read.includes(`"${m}"`), `${m} must not be in the file-read* rule`);
+  }
+  assert.ok(!p.includes('(subpath "/opt/homebrew/opt")'));
+  assert.throws(() => buildReadonlyProfile({ ...base, metadataPaths: ["/opt/homebrew"] }), /refusing/);
+  assert.throws(() => buildReadonlyProfile({ ...base, metadataPaths: ["/tmp"] }), /refusing/);
+  assert.throws(() => buildReadonlyProfile({ ...base, metadataPaths: ['/a"b'] }), /not usable/);
+});
+
+test("symlinkMetadataPaths records every hop, follows link chains, and leaves out too-broad links", () => {
+  const t = tempDir("cgc-links-");
+  fs.mkdirSync(path.join(t, "Cellar/foo/1/lib"), { recursive: true });
+  fs.writeFileSync(path.join(t, "Cellar/foo/1/lib/libfoo.1.dylib"), "SYNTHETIC FIXTURE\n");
+  fs.symlinkSync("libfoo.1.dylib", path.join(t, "Cellar/foo/1/lib/libfoo.dylib"));
+  fs.mkdirSync(path.join(t, "opt"));
+  fs.symlinkSync("../Cellar/foo/1", path.join(t, "opt/foo"));
+  fs.symlinkSync("foo", path.join(t, "opt/foo-alias")); // link to a link
+  fs.mkdirSync(path.join(t, "real"));
+  const got = symlinkMetadataPaths([
+    path.join(t, "opt/foo-alias/lib/libfoo.dylib"), path.join(t, "missing/x.dylib"), "relative/x.dylib",
+  ]);
+  assert.deepEqual(got, [
+    path.join(t, "Cellar/foo/1/lib/libfoo.dylib"), path.join(t, "opt/foo"), path.join(t, "opt/foo-alias"),
+  ]);
+  for (const g of got) assert.equal(isTooBroad(g), false, g);
+  // On macOS /tmp and /var are symlinks into /private: too broad to name, so never recorded.
+  const sys = symlinkMetadataPaths(["/tmp/x", "/var/x"]);
+  assert.ok(!sys.includes("/tmp") && !sys.includes("/var"));
+  assert.equal(symlinkMetadataPaths([t]).length, 0);
+});
+
+test("machOLoadPaths reads Node's install names on macOS and returns [] for non-Mach-O files", { skip: process.platform !== "darwin" && "macOS only" }, () => {
+  const loads = machOLoadPaths(fs.realpathSync.native(process.execPath));
+  assert.ok(loads.some((l) => l.startsWith("/usr/lib/")), loads.join(","));
+  const t = tempDir("cgc-macho-");
+  assert.deepEqual(machOLoadPaths(path.join(t, "nope")), []);
+  fs.writeFileSync(path.join(t, "text"), "SYNTHETIC FIXTURE\n");
+  assert.deepEqual(machOLoadPaths(path.join(t, "text")), []);
+});
 
 const base: ProfileInput = {
   root: "/private/var/folders/xx/T/cgc-repo-1",
@@ -16,6 +69,7 @@ const base: ProfileInput = {
   nodePath: "/opt/homebrew/Cellar/node/26.7.0/bin/node",
   nodeReadDirs: ["/opt/homebrew/Cellar/node/26.7.0", "/opt/homebrew/Cellar/libuv/1.52.1"],
   nodeReadFiles: [],
+  metadataPaths: [],
   gitPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
   developerDir: "/Applications/Xcode.app/Contents/Developer",
   options: { nodeReads: "exact", metadata: "narrow", denyNames: true, opensslConf: "devnull" },
@@ -148,7 +202,7 @@ test("profile env sets OPENSSL_CONF only for devnull", () => {
 });
 
 test("the default options are the measured ones (findings doc, M2 profile measurements)", () => {
-  assert.deepEqual({ ...DEFAULT_PROFILE_OPTIONS }, { nodeReads: "exact", metadata: "all", denyNames: true, opensslConf: "devnull" });
+  assert.deepEqual({ ...DEFAULT_PROFILE_OPTIONS }, { nodeReads: "exact", metadata: "narrow", denyNames: true, opensslConf: "devnull" });
   assert.ok(Object.isFrozen(DEFAULT_PROFILE_OPTIONS));
 });
 
