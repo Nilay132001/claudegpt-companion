@@ -37,8 +37,8 @@ login in the macOS Keychain. It does not touch your normal Codex or Claude confi
 Requires macOS 26+, full Xcode, Node 24+.
 
 ```bash
-cd companiond && npm ci && npm test && npm run typecheck
-cd app && swift test
+(cd companiond && npm ci && npm test && npm run typecheck)
+(cd app && swift test)
 bash scripts/check-repo.sh
 ```
 
