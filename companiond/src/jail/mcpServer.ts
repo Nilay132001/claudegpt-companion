@@ -111,18 +111,15 @@ export function serveStdio(
   output: Writable,
   handle: typeof handleMessage = handleMessage,
 ): Promise<void> {
-  const lb = new LineBuffer();
+  const lb = new LineBuffer({ maxLineBytes: MAX_LINE_BYTES });
+  let repliedInvalid = 0;
+  let repliedOversized = 0;
   let chain: Promise<void> = Promise.resolve();
-  let discarding = false; // inside an oversize line: drop bytes until its newline
   let closed = false; // the reader went away (EPIPE): stop writing, stop reading
   const send = (m: Json) => {
     if (!closed) output.write(`${JSON.stringify(m)}\n`);
   };
   const handleLine = async (line: string) => {
-    if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) {
-      send(rpcError(null, -32700, "Message too large"));
-      return;
-    }
     let msg: unknown;
     try {
       msg = JSON.parse(line);
@@ -144,17 +141,14 @@ export function serveStdio(
       resolve();
     });
     input.on("data", (chunk: Buffer) => {
-      let buf = chunk;
-      if (discarding) {
-        const nl = buf.indexOf(0x0a);
-        if (nl === -1) return;
-        discarding = false;
-        buf = buf.subarray(nl + 1);
+      for (const line of lb.push(chunk)) chain = chain.then(() => handleLine(line));
+      // Lines LineBuffer drops still get a reply, so a client never waits forever.
+      while (repliedInvalid < lb.invalidUtf8Lines) {
+        repliedInvalid++;
+        chain = chain.then(() => send(rpcError(null, -32700, "Parse error")));
       }
-      for (const line of lb.push(buf)) chain = chain.then(() => handleLine(line));
-      if (lb.pendingBytes > MAX_LINE_BYTES) {
-        lb.reset();
-        discarding = true;
+      while (repliedOversized < lb.oversizedLines) {
+        repliedOversized++;
         chain = chain.then(() => send(rpcError(null, -32700, "Message too large")));
       }
     });
