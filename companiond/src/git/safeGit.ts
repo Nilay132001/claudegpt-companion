@@ -130,12 +130,18 @@ export function parseStatusZ(out: string): { branch: string; entries: StatusEntr
 // `git grep -z -n`: "<path>\0<line>:<text>\n" (some versions print "\0" after the line number too).
 export function parseGrepZ(out: string): GrepHit[] {
   const hits: GrepHit[] = [];
-  for (const line of out.split("\n")) {
-    const a = line.indexOf("\0");
-    if (a <= 0) continue;
-    const m = line.slice(a + 1).match(/^(\d+)[:\0]([\s\S]*)$/); // match, not RegExp exec: the no-writes scan bans that call name
-    if (!m) continue;
-    hits.push({ path: line.slice(0, a), line: Number(m[1]), text: m[2] ?? "" });
+  // A tokenizer, not a line split: -z prints raw file names, which may contain "\n".
+  let pos = 0;
+  while (pos < out.length) {
+    const a = out.indexOf("\0", pos);
+    if (a < 0) break;
+    const m = out.slice(a + 1).match(/^(\d+)[:\0]/); // match, not RegExp exec: the no-writes scan bans that call name
+    if (!m) break;
+    const textStart = a + 1 + m[0].length;
+    const nl = out.indexOf("\n", textStart);
+    const end = nl < 0 ? out.length : nl;
+    hits.push({ path: out.slice(pos, a), line: Number(m[1]), text: out.slice(textStart, end) });
+    pos = end + 1;
   }
   return hits;
 }
@@ -236,14 +242,18 @@ export class SafeGit {
   async status(): Promise<StatusResult> {
     const r = await this.#run([
       "status", "--porcelain=v1", "-z", "--branch", "--untracked-files=all", "--ignore-submodules=all", "--no-renames",
+      "--", ...denyPathspecs(),
     ]);
-    return { ...parseStatusZ(r.stdout.toString("utf8")), truncated: r.truncated };
+    const parsed = parseStatusZ(r.stdout.toString("utf8"));
+    if (r.truncated) parsed.entries.pop(); // the last entry may be cut off
+    return { ...parsed, truncated: r.truncated };
   }
 
   async diffNames(): Promise<{ names: string[]; truncated: boolean }> {
     const base = await this.#base();
     const r = await this.#run([
       "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--no-renames", base, "--",
+      ...denyPathspecs(),
     ]);
     const parts = r.stdout.toString("utf8").split("\0");
     if (r.truncated) parts.pop(); // the last name may be cut off
@@ -252,10 +262,12 @@ export class SafeGit {
 
   async diff(paths: readonly string[]): Promise<{ text: string; truncated: boolean }> {
     if (paths.length === 0) return { text: "", truncated: false };
+    if (paths.some((p) => p === "")) throw new Error("diff paths must not be empty"); // `:(literal)` alone matches everything
     const base = await this.#base();
     const r = await this.#run([
       "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=all", "--no-renames", base, "--",
       ...paths.map((p) => `:(literal)${p}`),
+      ...denyPathspecs(),
     ]);
     return { text: r.stdout.toString("utf8"), truncated: r.truncated };
   }
@@ -265,7 +277,9 @@ export class SafeGit {
       ["grep", "-z", "-n", "-I", "-F", "--untracked", "--no-color", "-e", query, "--", ".", ...denyPathspecs()],
       [0, 1],
     );
-    return { hits: r.code === 1 ? [] : parseGrepZ(r.stdout.toString("utf8")), truncated: r.truncated };
+    const hits = r.code === 1 ? [] : parseGrepZ(r.stdout.toString("utf8"));
+    if (r.truncated) hits.pop(); // the last hit may be cut off
+    return { hits, truncated: r.truncated };
   }
 
   // HEAD, or the empty tree when HEAD is unborn (no commits yet).

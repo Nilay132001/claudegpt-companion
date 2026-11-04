@@ -100,6 +100,57 @@ test("the parent's git environment is not inherited", async () => {
   assert.equal(fs.existsSync(sentinel), false);
 });
 
+test("parseGrepZ keeps a newline inside a file name in the path", () => {
+  assert.deepEqual(parseGrepZ("evil\nreal.txt\x001\x00NEEDLE spoof\nok.txt\x002:fine\n"), [
+    { path: "evil\nreal.txt", line: 1, text: "NEEDLE spoof" },
+    { path: "ok.txt", line: 2, text: "fine" },
+  ]);
+});
+
+test("grep reports a file whose name contains a newline under that name", async () => {
+  const repo = makeRepo({ "real.txt": "x\n" });
+  put(repo, "evil\nreal.txt", "NEEDLE spoof\n");
+  const hits = (await (await open(repo)).grep("NEEDLE")).hits;
+  assert.deepEqual(hits.map((h) => h.path), ["evil\nreal.txt"]);
+});
+
+test("a modified tracked denied file is absent from status, diffNames and diff", async () => {
+  const repo = makeRepo({ "config/credentials.json": "old\n", "src/a.ts": "one\n" });
+  put(repo, "config/credentials.json", "DENIED_DIFF_MARKER\n");
+  put(repo, "src/a.ts", "two\n");
+  const git = await open(repo);
+  assert.deepEqual((await git.status()).entries.map((e) => e.path), ["src/a.ts"]);
+  assert.deepEqual((await git.diffNames()).names, ["src/a.ts"]);
+  const text = (await git.diff(["src/a.ts", "config/credentials.json"])).text;
+  assert.match(text, /\+two/);
+  assert.doesNotMatch(text, /DENIED_DIFF_MARKER/);
+});
+
+test("diff refuses an empty path", async () => {
+  const repo = makeRepo({ "src/a.ts": "one\n" });
+  await assert.rejects((await open(repo)).diff([""]), /empty/);
+});
+
+test("status and grep drop a possibly partial last item when truncated", async () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 20; i++) files[`src/some-long-file-name-number-${i}.ts`] = "one\n";
+  const repo = makeRepo({});
+  for (const [rel, body] of Object.entries(files)) put(repo, rel, `CAP_MARKER ${body}`);
+  const git = await SafeGit.open({ root: repo, gitPath: testGitPath(), maxOutputBytes: 300 });
+  const s = await git.status();
+  assert.equal(s.truncated, true);
+  for (const e of s.entries) assert.ok(Object.hasOwn(files, e.path), e.path);
+  const g = await git.grep("CAP_MARKER");
+  assert.equal(g.truncated, true);
+  for (const h of g.hits) {
+    assert.ok(Object.hasOwn(files, h.path), h.path);
+    assert.equal(h.text, "CAP_MARKER one");
+  }
+});
+
+// Proves: the parent's hooks (.git/hooks and a core.hooksPath the gate allows) never fire on these queries.
+// It cannot prove `core.hooksPath=/dev/null` is load-bearing: status/diff/grep with GIT_OPTIONAL_LOCKS=0 fire
+// no hook in any git config the gate accepts, so removing that one flag leaves this test green.
 test("hooks never run during status, diff and grep on a stat-dirty repo", async () => {
   const { script, sentinel } = sentinelScript();
   const repo = makeRepo({ "src/a.ts": "one\n" });
