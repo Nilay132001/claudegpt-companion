@@ -570,6 +570,23 @@ test("desktop records unreadable: error shown and transcripts still listed", asy
   assert.deepEqual(snap.sessions.map((s) => [s.sessionId, s.source]), [["transcript:cli-only", "transcript_only"]]);
 });
 
+test("transcript-only mode: a tick over unchanged transcripts re-reads no heads", async () => {
+  const { p, make } = harness();
+  fs.rmSync(p.desktopSessionsDir, { recursive: true });
+  for (const id of ["cli-a", "cli-b", "cli-c"]) writeTranscript(transcriptPath(p, `/syn/${id}`, id), id, [userLine(id, `/syn/${id}`, "x")]);
+  const headReads: string[] = [];
+  const spy: ReadFs = { ...nodeReadFs, readRange: (f, pos, len) => (pos === 0 && headReads.push(f), nodeReadFs.readRange(f, pos, len)) };
+  const b = make({ fs: spy });
+  await b.refresh();
+  assert.equal(b.snapshot().sessions.length, 3);
+  assert.ok(headReads.length >= 3);
+  headReads.length = 0;
+  await b.tick();
+  await b.tick();
+  assert.equal(b.snapshot().sessions.length, 3);
+  assert.deepEqual(headReads, []);
+});
+
 test("§12.2 malformed lines and subagent files flow through the bridge", async () => {
   const { p, make, take } = harness();
   const f = transcriptPath(p, "/syn/a", "cli-a");

@@ -18,7 +18,7 @@ import { describeChange, resolveWorktree } from "../worktree/resolver.ts";
 import { SafeGit } from "../git/safeGit.ts";
 import type { Pin, Selection, SessionSummary } from "./selection.ts";
 import { computeStatus, focusedSessionId, select } from "./selection.ts";
-import { listTranscripts } from "./transcriptOnly.ts";
+import { listTranscripts, TRANSCRIPT_ONLY_MAX, TranscriptHeadCache } from "./transcriptOnly.ts";
 import type { WatchFactory, WatchHandle } from "./watcher.ts";
 import { nodeWatchFactory } from "./watcher.ts";
 
@@ -129,6 +129,8 @@ export class SessionBridge {
    * record yet, or while the reader is dropped, so the candidate does not flip back to the record cwd.
    */
   #lastTranscriptCwd = new Map<string, string>();
+  /** Transcript-only mode: head checks kept across ticks so unchanged files are only stat'ed. */
+  readonly #heads = new TranscriptHeadCache();
   /** Sessions polled in the last pass: listed and (selected or busy). */
   #active = new Set<string>();
   #pin: Pin | null = null;
@@ -406,7 +408,7 @@ export class SessionBridge {
         });
       }
     } else {
-      for (const t of await listTranscripts(this.#fs, this.#paths.projectsDir)) {
+      for (const t of await listTranscripts(this.#fs, this.#paths.projectsDir, TRANSCRIPT_ONLY_MAX, this.#heads)) {
         sessions.push({
           sessionId: `transcript:${t.cliSessionId}`,
           cliSessionId: t.cliSessionId,
