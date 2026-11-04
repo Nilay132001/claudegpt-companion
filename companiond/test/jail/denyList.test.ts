@@ -12,6 +12,7 @@ import {
 test("fold maps case, Kelvin sign, long s and fullwidth letters to ASCII lower case", () => {
   assert.equal(foldName(".ENV.Local"), ".env.local");
   assert.equal(foldName("a.Key"), "a.key");
+  assert.equal(foldName("a.Key"), "a.key"); // U+212A KELVIN SIGN, measured to open a.key on APFS
   assert.equal(foldName("ſecret.txt"), "secret.txt");
   assert.equal(foldName("ｓecret.yaml"), "secret.yaml");
   assert.equal(foldName("Café"), "café");
@@ -19,7 +20,7 @@ test("fold maps case, Kelvin sign, long s and fullwidth letters to ASCII lower c
 
 const denied = [
   ".env", ".ENV", ".ENV.local", ".env.example", ".envrc",
-  "server.PEM", "a.key", "a.Key", "x.p8", "x.p12", "x.pfx", "x.jks", "x.keystore", "x.crt", "x.der",
+  "server.PEM", "a.key", "a.Key", "a.Key", ".Kube", "x.p8", "x.p12", "x.pfx", "x.jks", "x.keystore", "x.crt", "x.der",
   "x.ppk", "vault.kdbx", "id_rsa", "id_ed25519.pub", "ID_ECDSA", "id_dsa",
   "credentials.json", "aws-Credentials", "secrets.yaml", "ſecret.txt", "ｓecret.yaml",
   "service-account-prod.json", "prod.tfvars", "terraform.tfstate", "terraform.tfstate.backup",

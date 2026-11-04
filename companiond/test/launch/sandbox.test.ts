@@ -10,12 +10,8 @@ import { makeProbeSetup, probeFailures, runProbe } from "./probe.ts";
 
 after(removeTempDirs);
 
-const skip =
-  process.platform !== "darwin"
-    ? "Seatbelt is macOS-only"
-    : process.env.COMPANION_SEATBELT_LOCAL_ONLY === "1"
-      ? "Seatbelt tests are local-only on this CI runner"
-      : false;
+// Skipped only off macOS. On macOS a missing sandbox-exec fails these tests; there is no opt-out.
+const skip = process.platform !== "darwin" ? "Seatbelt is macOS-only" : false;
 
 test("sandbox-exec is present (macOS must fail, not skip, without it)", { skip }, () => {
   assert.ok(fs.existsSync(SANDBOX_EXEC), `${SANDBOX_EXEC} is missing`);

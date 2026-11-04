@@ -148,9 +148,9 @@ test("status and grep drop a possibly partial last item when truncated", async (
   }
 });
 
-// Proves: the parent's hooks (.git/hooks and a core.hooksPath the gate allows) never fire on these queries.
-// It cannot prove `core.hooksPath=/dev/null` is load-bearing: status/diff/grep with GIT_OPTIONAL_LOCKS=0 fire
-// no hook in any git config the gate accepts, so removing that one flag leaves this test green.
+// Proves: with hook scripts in .git/hooks and in a local core.hooksPath (.husky), status, diff and grep on
+// this stat-dirty repo run none of them. It does not prove `core.hooksPath=/dev/null` is load-bearing: in
+// this setup the queries fire no hook even without that flag, so removing it leaves this test green.
 test("hooks never run during status, diff and grep on a stat-dirty repo", async () => {
   const { script, sentinel } = sentinelScript();
   const repo = makeRepo({ "src/a.ts": "one\n" });

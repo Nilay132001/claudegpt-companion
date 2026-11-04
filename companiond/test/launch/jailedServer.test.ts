@@ -13,12 +13,8 @@ import { callTool, startClient } from "../helpers/mcpClient.ts";
 
 after(removeTempDirs);
 
-const skip =
-  process.platform !== "darwin"
-    ? "Seatbelt is macOS-only"
-    : process.env.COMPANION_SEATBELT_LOCAL_ONLY === "1"
-      ? "Seatbelt tests are local-only on this CI runner"
-      : false;
+// Skipped only off macOS. On macOS a missing sandbox-exec fails these tests; there is no opt-out.
+const skip = process.platform !== "darwin" ? "Seatbelt is macOS-only" : false;
 
 test("the launch spec is sandbox-exec + profile + node + entry, with a fixed env", { skip }, async () => {
   const repo = makeRepo();
