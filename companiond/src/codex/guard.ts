@@ -50,6 +50,8 @@ export class RuntimeGuard {
     const threadId = str(p?.threadId);
     if (method === "turn/completed") {
       if (threadId) for (const [k, c] of this.#inflight) if (c.threadId === threadId) this.#inflight.delete(k);
+      const doneTurn = str(obj(p?.turn)?.id);
+      if (threadId && doneTurn) this.#interrupted.delete(`${threadId}\0${doneTurn}`);
       return;
     }
     if (method !== "item/started" && method !== "item/completed") return;
@@ -62,9 +64,16 @@ export class RuntimeGuard {
       const key = `${threadId}\0${turnId}`;
       if (!this.#interrupted.has(key)) {
         this.#interrupted.add(key);
-        void this.#actions.interrupt(threadId, turnId).catch(() => {
-          // the turn may already be over; the alert stands either way
-        });
+        // A failed interrupt is forgotten so the next bad item retries it. No raw error text: it may hold paths.
+        const failed = (): void => {
+          this.#interrupted.delete(key);
+          this.#actions.alert({ threadId, turnId, itemType: "interrupt", detail: "Could not interrupt the turn" });
+        };
+        try {
+          this.#actions.interrupt(threadId, turnId).then(undefined, failed);
+        } catch {
+          failed();
+        }
       }
       return;
     }

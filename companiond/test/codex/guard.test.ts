@@ -78,3 +78,47 @@ test("in-flight tool calls feed the elicitation lookup", () => {
   const p = { threadId: "t1", turnId: "u1", serverName: "companion-readonly", mode: "form", _meta: { [APPROVAL_KIND_KEY]: "mcp_tool_call" } };
   assert.equal(decideServerRequest("mcpServer/elicitation/request", p, COMPANION_ALLOWLIST, g.lookup).outcome, "declined");
 });
+
+test("a rejected interrupt alerts and is retried on the next bad item", async () => {
+  const alerts: GuardAlert[] = [];
+  let calls = 0;
+  const g = new RuntimeGuard(COMPANION_ALLOWLIST, {
+    interrupt: async () => { calls++; if (calls === 1) throw new Error("/secret/path failed"); },
+    alert: (a) => alerts.push(a),
+  });
+  const bad = (id: string) => g.onNotification("item/started", { threadId: "t1", turnId: "u1", item: { type: "commandExecution", id } });
+  bad("a");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls, 1);
+  const failure = alerts.find((a) => a.itemType === "interrupt");
+  assert.ok(failure);
+  assert.ok(!failure.detail.includes("secret"));
+  bad("b");
+  assert.equal(calls, 2);
+  bad("c");
+  assert.equal(calls, 2); // the retry went through, so no third
+});
+
+test("an interrupt that throws synchronously does not escape and is retried", () => {
+  const alerts: GuardAlert[] = [];
+  let calls = 0;
+  const g = new RuntimeGuard(COMPANION_ALLOWLIST, {
+    interrupt: () => { calls++; throw new Error("boom"); },
+    alert: (a) => alerts.push(a),
+  });
+  const bad = () => g.onNotification("item/started", { threadId: "t1", turnId: "u1", item: { type: "fileChange", id: "x" } });
+  assert.doesNotThrow(bad);
+  assert.doesNotThrow(bad);
+  assert.equal(calls, 2);
+  assert.ok(alerts.some((a) => a.itemType === "interrupt"));
+});
+
+test("a second turn on the same thread gets its own interrupt; turn/completed prunes", () => {
+  const { g, interrupts, started } = setup();
+  started({ type: "commandExecution", id: "a" }, "u1");
+  g.onNotification("turn/completed", { threadId: "t1", turn: { id: "u1", status: "interrupted" } });
+  started({ type: "commandExecution", id: "b" }, "u2");
+  assert.deepEqual(interrupts, ["t1/u1", "t1/u2"]);
+  started({ type: "commandExecution", id: "c" }, "u1"); // u1 was pruned, so a stray late item interrupts again
+  assert.deepEqual(interrupts, ["t1/u1", "t1/u2", "t1/u1"]);
+});
