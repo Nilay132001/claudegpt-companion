@@ -14,7 +14,7 @@ export interface Opened {
   fd: number;
   real: string;
   rel: string;
-  stat: fs.Stats;
+  stat: { readonly dev: number; readonly ino: number }; // the handle's identity (from fstat)
 }
 
 // Test seam: lets the race tests swap files at the two points that matter.

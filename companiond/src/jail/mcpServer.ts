@@ -97,13 +97,32 @@ export async function handleMessage(state: ServerState, raw: unknown): Promise<J
 
 const MAX_LINE_BYTES = 1024 * 1024;
 
-export function serveStdio(state: ServerState, input: Readable, output: Writable): Promise<void> {
+// The id of a parsed request, when it has a usable one (for error replies).
+function requestId(msg: unknown): string | number | null {
+  if (typeof msg !== "object" || msg === null || Array.isArray(msg)) return null;
+  const id = (msg as Json).id;
+  return typeof id === "string" || typeof id === "number" ? id : null;
+}
+
+// `handle` is a test seam; the server always uses handleMessage.
+export function serveStdio(
+  state: ServerState,
+  input: Readable,
+  output: Writable,
+  handle: typeof handleMessage = handleMessage,
+): Promise<void> {
   const lb = new LineBuffer();
   let chain: Promise<void> = Promise.resolve();
+  let discarding = false; // inside an oversize line: drop bytes until its newline
+  let closed = false; // the reader went away (EPIPE): stop writing, stop reading
   const send = (m: Json) => {
-    output.write(`${JSON.stringify(m)}\n`);
+    if (!closed) output.write(`${JSON.stringify(m)}\n`);
   };
   const handleLine = async (line: string) => {
+    if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) {
+      send(rpcError(null, -32700, "Message too large"));
+      return;
+    }
     let msg: unknown;
     try {
       msg = JSON.parse(line);
@@ -112,19 +131,35 @@ export function serveStdio(state: ServerState, input: Readable, output: Writable
       return;
     }
     try {
-      const reply = await handleMessage(state, msg);
+      const reply = await handle(state, msg);
       if (reply) send(reply);
     } catch {
-      send(rpcError(null, -32603, "Internal error"));
+      send(rpcError(requestId(msg), -32603, "Internal error"));
     }
   };
   return new Promise((resolve) => {
+    output.on("error", () => {
+      closed = true;
+      input.destroy();
+      resolve();
+    });
     input.on("data", (chunk: Buffer) => {
-      for (const line of lb.push(chunk)) chain = chain.then(() => handleLine(line));
+      let buf = chunk;
+      if (discarding) {
+        const nl = buf.indexOf(0x0a);
+        if (nl === -1) return;
+        discarding = false;
+        buf = buf.subarray(nl + 1);
+      }
+      for (const line of lb.push(buf)) chain = chain.then(() => handleLine(line));
       if (lb.pendingBytes > MAX_LINE_BYTES) {
         lb.reset();
+        discarding = true;
         chain = chain.then(() => send(rpcError(null, -32700, "Message too large")));
       }
+    });
+    input.on("error", () => {
+      void chain.then(resolve);
     });
     input.on("end", () => {
       void chain.then(resolve);

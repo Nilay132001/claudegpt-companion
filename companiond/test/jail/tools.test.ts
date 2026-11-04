@@ -49,6 +49,34 @@ test("read_file reads only the first 256 KB and refuses binary", async () => {
   assert.deepEqual(await runTool(ctx, "read_file", { path: "bin.dat" }), { text: "Binary file; not shown.", isError: true });
 });
 
+test("read_file shows the first 256 KB of a single-line file larger than the cap, with the size note", async () => {
+  const { ctx, repo } = await fixture();
+  fs.writeFileSync(path.join(repo, "one-line.txt"), `SYNTHETIC FIXTURE ${"x".repeat(300 * 1024)}`);
+  const r = await runTool(ctx, "read_file", { path: "one-line.txt" });
+  assert.equal(r.isError, false);
+  const [first, note] = r.text.split("\n");
+  assert.ok(first?.startsWith("1\tSYNTHETIC FIXTURE xxx"), first?.slice(0, 40));
+  assert.equal(first?.length, "1\t".length + 256 * 1024);
+  assert.match(note ?? "", /only the first 256 KB/);
+  const past = await runTool(ctx, "read_file", { path: "one-line.txt", start_line: 2 });
+  assert.match(past.text, /has 1 lines/);
+  assert.match(past.text, /only the first 256 KB/);
+});
+
+test("every tool's success path goes through redact", async () => {
+  const { ctx: base, repo } = await fixture();
+  put(repo, "docs/guide.md", "guide changed REDACT_PROBE\n");
+  const ctx: JailContext = { ...base, redact: (s) => `[[REDACTED-MARKER]]${s}` };
+  for (const [name, args] of [
+    ["list_dir", {}], ["read_file", { path: "notes.txt" }], ["search", { query: "REDACT_PROBE" }],
+    ["git_status", {}], ["git_diff", {}],
+  ] as const) {
+    const r = await runTool(ctx, name, args);
+    assert.equal(r.isError, false, `${name}: ${r.text}`);
+    assert.ok(r.text.startsWith("[[REDACTED-MARKER]]"), `${name}: ${r.text.slice(0, 60)}`);
+  }
+});
+
 test("read_file rejects bad ranges and a missing path by input, not by file", async () => {
   const { ctx } = await fixture();
   assert.match((await runTool(ctx, "read_file", { path: "src/app.ts", start_line: 0 })).text, /whole numbers/);

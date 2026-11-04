@@ -98,14 +98,17 @@ export function readFile(ctx: JailContext, args: Record<string, unknown>): ToolR
     const { buf, truncated } = readCapped(o.fd, LIMITS.readBytes);
     if (buf.subarray(0, 8000).includes(0)) return err("Binary file; not shown.");
     const lines = buf.toString("utf8").split("\n");
-    if (truncated || lines.at(-1) === "") lines.pop();
-    if (start > lines.length) return ok(`(the readable part of this file has ${lines.length} lines)`);
+    // Drop the trailing "" after a final newline. When the cap cut a line, drop that partial line too,
+    // unless it is the only line: then the first 256 KB of it is what is readable.
+    if (lines.at(-1) === "" || (truncated && lines.length > 1)) lines.pop();
+    const sizeNote = truncated ? "\n… file is larger than 256 KB; only the first 256 KB is readable" : "";
+    if (start > lines.length) return ok(`(the readable part of this file has ${lines.length} lines)${sizeNote}`);
     const end = Math.min(endReq, start + LIMITS.rangeLines - 1, lines.length);
     let text = lines.slice(start - 1, end).map((l, i) => `${start + i}\t${l}`).join("\n");
     if (end < Math.min(endReq, lines.length)) {
       text += `\n… range capped at ${LIMITS.rangeLines} lines; ask again from line ${end + 1}`;
     }
-    if (truncated) text += "\n… file is larger than 256 KB; only the first 256 KB is readable";
+    text += sizeNote;
     return ok(ctx.redact(text));
   } catch {
     return err(NOT_AVAILABLE);
