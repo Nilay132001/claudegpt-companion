@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import type { ClaudePaths } from "../../src/claude/paths.ts";
+import { encodeCwd } from "../../src/claude/paths.ts";
 
 export const MARK = "SYNTHETIC FIXTURE";
 
@@ -83,4 +85,94 @@ export function sentinelScript(): { script: string; sentinel: string } {
   const script = path.join(dir, "run.sh");
   fs.writeFileSync(script, `#!/bin/sh\ntouch "${sentinel}"\ncat\n`, { mode: 0o755 });
   return { script, sentinel };
+}
+
+// ---- M3: Claude data builders (SYNTHETIC FIXTURE). Everything goes into tempDir() folders. ----
+
+export function claudeTree(): ClaudePaths & { root: string } {
+  const root = tempDir("cgc-claude-");
+  const p = {
+    root,
+    desktopSessionsDir: path.join(root, "desktop", "claude-code-sessions"),
+    projectsDir: path.join(root, "home", ".claude", "projects"),
+    runningDir: path.join(root, "home", ".claude", "sessions"),
+  };
+  for (const d of [p.desktopSessionsDir, p.projectsDir, p.runningDir]) fs.mkdirSync(d, { recursive: true });
+  return p;
+}
+
+export interface RecordFields {
+  sessionId: string;
+  cliSessionId: string;
+  cwd: string;
+  title?: string;
+  lastFocusedAt?: number | string;
+  lastActivityAt?: number | string;
+  isArchived?: boolean;
+  branch?: string;
+}
+
+export function writeRecord(p: ClaudePaths, r: RecordFields, org = "org-syn", account = "acct-syn"): string {
+  const dir = path.join(p.desktopSessionsDir, org, account);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${r.sessionId}.json`);
+  fs.writeFileSync(file, JSON.stringify({ _fixture: MARK, title: `${MARK} ${r.sessionId}`, ...r }));
+  return file;
+}
+
+export function writeRunning(p: ClaudePaths, pid: number, fields: Record<string, unknown>): string {
+  const file = path.join(p.runningDir, `${pid}.json`);
+  fs.writeFileSync(file, JSON.stringify({ _fixture: MARK, pid, ...fields }));
+  return file;
+}
+
+let uuidSeq = 0;
+export function userLine(sessionId: string, cwd: string, text: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: "user",
+    uuid: `u-${++uuidSeq}`,
+    sessionId,
+    cwd,
+    gitBranch: "syn-branch",
+    timestamp: "2026-11-04T10:00:00.000Z",
+    message: { role: "user", content: text },
+    ...extra,
+  });
+}
+
+export function assistantLine(sessionId: string, cwd: string, content: unknown[], extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: "assistant",
+    uuid: `a-${++uuidSeq}`,
+    sessionId,
+    cwd,
+    timestamp: "2026-11-04T10:00:01.000Z",
+    message: { role: "assistant", content },
+    ...extra,
+  });
+}
+
+export function markerLine(sessionId: string): string {
+  return JSON.stringify({ type: "custom-title", sessionId, customTitle: MARK });
+}
+
+/** `<projectsDir>/<encoded cwd>/<cliSessionId>.jsonl`. */
+export function transcriptPath(p: ClaudePaths, cwd: string, cliSessionId: string, folder = encodeCwd(cwd)): string {
+  return path.join(p.projectsDir, folder, `${cliSessionId}.jsonl`);
+}
+
+/** First line carries the marker. */
+export function writeTranscript(file: string, sessionId: string, lines: string[]): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [markerLine(sessionId), ...lines].map((l) => l + "\n").join(""));
+}
+
+export function appendLines(file: string, lines: string[]): void {
+  fs.appendFileSync(file, lines.map((l) => l + "\n").join(""));
+}
+
+/** M2's makeRepo + makeWorktree, with the worktree on branch `feature-a`. */
+export function repoWithWorktree(): { main: string; worktree: string } {
+  const main = makeRepo();
+  return { main, worktree: makeWorktree(main, "feature-a") };
 }
