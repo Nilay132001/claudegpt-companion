@@ -1,7 +1,9 @@
 // Seatbelt profile for companion-readonly (spec §7.2, M2 rulings 3–5). Runs in companiond.
 import path from "node:path";
 import { DENIED_SEATBELT_SEGMENTS } from "../jail/denyList.ts";
-import { isTooBroad } from "./toolchain.ts";
+import fs from "node:fs";
+import { SafeGit } from "../git/safeGit.ts";
+import { discoverToolchain, isTooBroad, type Toolchain } from "./toolchain.ts";
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
@@ -176,4 +178,45 @@ export function buildReadonlyProfile(i: ProfileInput): string {
 
 export function profileEnv(o: ProfileOptions): Record<string, string> {
   return o.opensslConf === "devnull" ? { OPENSSL_CONF: "/dev/null" } : {};
+}
+
+// What M4 puts into Codex's per-thread `mcp_servers.companion-readonly` config: command + args + env (+ cwd).
+export interface LaunchSpec {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string;
+}
+
+export async function buildReadonlyLaunch(opts: {
+  root: string;
+  toolchain?: Toolchain;
+  options?: ProfileOptions;
+}): Promise<LaunchSpec> {
+  if (process.platform !== "darwin") throw new Error("companion-readonly runs under Seatbelt, which is macOS-only");
+  const tc = opts.toolchain ?? discoverToolchain();
+  const root = fs.realpathSync.native(opts.root);
+  assertReadablePrefix(root);
+  const git = await SafeGit.open({ root, gitPath: tc.gitPath });
+  const dirs = await git.repoDirs();
+  const options = opts.options ?? DEFAULT_PROFILE_OPTIONS;
+  const profile = buildReadonlyProfile({
+    root,
+    gitDir: dirs.gitDir,
+    commonDir: dirs.commonDir,
+    codeDir: tc.codeDir,
+    nodePath: tc.nodePath,
+    nodeReadDirs: tc.nodeReadDirs,
+    nodeReadFiles: tc.nodeReadFiles,
+    metadataPaths: tc.metadataPaths,
+    gitPath: tc.gitPath,
+    developerDir: tc.developerDir,
+    options,
+  });
+  return {
+    command: SANDBOX_EXEC,
+    args: ["-p", profile, tc.nodePath, tc.serverEntry],
+    env: { COMPANION_ROOT: root, COMPANION_GIT: tc.gitPath, PATH: "/usr/bin:/bin", ...profileEnv(options) },
+    cwd: root,
+  };
 }
