@@ -1,11 +1,46 @@
+# Dependencies and build output
 node_modules/
 poc/codex/proto/
 .build/
 build/
 dist/
+DerivedData/
 *.xcuserstate
+xcuserdata/
+.swiftpm/
+*.app/
+*.dmg
 .DS_Store
+
+# Secrets and credentials — never commit
 .env
 .env.*
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.der
+id_rsa*
+id_ed25519*
+id_ecdsa*
+.npmrc
+.netrc
+.pgpass
+.git-credentials
+auth.json
+*credentials*.json
+
+# Local data: transcripts, databases, Codex homes, logs
+*.jsonl
+!fixtures/**/*.jsonl
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+codex-home/
+poc-codex-home/
+*.log
+logs/
