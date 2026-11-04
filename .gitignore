@@ -44,3 +44,6 @@ codex-home/
 poc-codex-home/
 *.log
 logs/
+
+# Probe temp folders (spikes)
+spikes/**/.tmp/
