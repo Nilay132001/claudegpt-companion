@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ReadFs } from "../claude/readFs.ts";
 import { LocateError, RepoRefusedError, SafeGit } from "../git/safeGit.ts";
 
@@ -63,8 +64,10 @@ export interface ResolveDeps {
  * Unavailable with a reason. Never falls back to another root. M3 never runs git itself.
  */
 export async function resolveWorktree(input: ResolveInput, deps: ResolveDeps): Promise<WorktreeResolution> {
-  const candidate = input.transcriptCwd ?? input.recordCwd;
-  const candidateSource: CandidateSource | null = input.transcriptCwd ? "transcript" : input.recordCwd ? "desktop_record" : null;
+  const transcriptCwd = input.transcriptCwd === "" ? null : input.transcriptCwd;
+  const recordCwd = input.recordCwd === "" ? null : input.recordCwd;
+  const candidate = transcriptCwd ?? recordCwd;
+  const candidateSource: CandidateSource | null = transcriptCwd !== null ? "transcript" : recordCwd !== null ? "desktop_record" : null;
   const unavailable = (reason: UnavailableReason, detail: string, root: string | null = null, gitCommonDir: string | null = null): WorktreeResolution => ({
     kind: "unavailable",
     reason,
@@ -75,6 +78,8 @@ export async function resolveWorktree(input: ResolveInput, deps: ResolveDeps): P
     gitCommonDir,
   });
   if (candidate === null || candidateSource === null) return unavailable("no_cwd", "Claude has not reported a working folder yet");
+  // A relative path would be resolved against the daemon's own cwd and could bind an unrelated root.
+  if (!path.isAbsolute(candidate)) return unavailable("path_missing", "Path is not absolute");
   let real: string;
   try {
     const st = await deps.fs.stat(candidate);
@@ -128,7 +133,9 @@ export interface RepoChange {
   contextNote: string;
 }
 
-const where = (r: WorktreeResolution): string | null => (r.kind === "resolved" ? r.root : (r.root ?? r.candidate));
+// For not_worktree_root, `root` is the parent repo; naming it would present the silent widening §6.3 forbids.
+const where = (r: WorktreeResolution): string | null =>
+  r.kind === "resolved" ? r.root : r.reason === "not_worktree_root" ? r.candidate : (r.root ?? r.candidate);
 const state = (r: WorktreeResolution): string => (r.kind === "resolved" ? "resolved" : `unavailable:${r.reason}`);
 
 /** Non-null when the session moved, or its repository changed state (e.g. became refused). Never silent (spec §6.3). */
@@ -141,6 +148,6 @@ export function describeChange(prev: WorktreeResolution | null, next: WorktreeRe
   const contextNote =
     from === to
       ? `Repository ${to ?? "none"} is now ${next.kind === "resolved" ? "available" : "unavailable"}`
-      : `Repository changed from ${from ?? "none"} to ${to ?? "none"}`;
+      : `Repository changed from ${from ?? "none"} to ${to ?? "none"}${next.kind === "unavailable" ? ` — unavailable: ${next.detail}` : ""}`;
   return { from, to, banner: `Claude is now in ${label}`, contextNote };
 }

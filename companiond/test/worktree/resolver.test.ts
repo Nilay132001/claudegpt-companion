@@ -96,6 +96,7 @@ test("§12.2 worktree switch mid-session and move into another repo are never si
   const c23 = describeChange(r2, r3);
   assert.ok(c23 && r3.kind === "unavailable" && r3.reason === "not_approved");
   assert.match(c23.banner, /unavailable/);
+  assert.equal(c23.contextNote, `Repository changed from ${a.worktree} to ${b.main} — unavailable: This repository is not approved yet`);
   assert.equal(describeChange(r2, r2), null);
   assert.equal(describeChange(null, r1), null);
 });
@@ -116,4 +117,29 @@ test("detached HEAD reports detached@<sha>", async () => {
   const r = await resolveWorktree({ transcriptCwd: main, recordCwd: null }, deps());
   assert.ok(r.kind === "resolved");
   assert.match(r.branch ?? "", /^detached@[0-9a-f]+$/);
+});
+
+test("a relative cwd is unavailable (never resolved against the daemon's cwd)", async () => {
+  const r = await resolveWorktree({ transcriptCwd: "some/relative/dir", recordCwd: null }, deps());
+  assert.ok(r.kind === "unavailable" && r.reason === "path_missing" && r.detail === "Path is not absolute", JSON.stringify(r));
+});
+
+test("an empty transcript cwd is treated as absent", async () => {
+  const main = makeRepo();
+  const r = await resolveWorktree({ transcriptCwd: "", recordCwd: main }, deps());
+  assert.ok(r.kind === "resolved" && r.candidateSource === "desktop_record" && r.root === main, JSON.stringify(r));
+});
+
+test("a move into a non-root folder names the folder, never the parent repo", async () => {
+  const { main, worktree } = repoWithWorktree();
+  const nested = path.join(main, "nested-wt");
+  fixtureGit(main, ["worktree", "add", "-q", "-b", "nested2", nested]);
+  fs.rmSync(path.join(nested, ".git"));
+  const r1 = await resolveWorktree({ transcriptCwd: worktree, recordCwd: null }, deps());
+  const r2 = await resolveWorktree({ transcriptCwd: nested, recordCwd: null }, deps());
+  const c = describeChange(r1, r2);
+  assert.ok(c);
+  assert.equal(c.to, nested);
+  assert.match(c.contextNote, new RegExp(`^Repository changed from ${worktree} to ${nested} — unavailable: `));
+  assert.ok(!c.contextNote.includes(`to ${main} `));
 });
