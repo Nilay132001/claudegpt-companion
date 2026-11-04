@@ -7,7 +7,7 @@ Spec: `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` (v3.2). 
 | M0 | [Toolchain](2026-11-03-m0-toolchain.md) | written |
 | M1 | [Protocol and platform spike](2026-11-03-m1-protocol-spike.md) | done 2026-11-04 (findings doc, "M1 spike results") |
 | M2 | [SafeGit + `companion-readonly` jail under Seatbelt](2026-11-04-m2-safegit-jail.md) | written, reviewed twice; in progress |
-| M3 | [Session bridge, tail, parser, worktree resolver](2026-11-04-m3-session-bridge.md) | written, reviewed twice; runs after M2 merges |
+| M3 | [Session bridge, tail, parser, worktree resolver](2026-11-04-m3-session-bridge.md) | written, reviewed twice; implemented, PR open |
 | M4a | [CodexHost, hardened config, replies, guard, Codex under Seatbelt](2026-11-04-m4a-codex-host.md) | written, reconciled with M2/M3; not yet reviewed |
 | M4b | [Redactor, store, privacy, context, daemon API, bundle skeleton](2026-11-04-m4b-context-daemon.md) | written, reconciled with M2/M3; not yet reviewed |
 | M5 | SwiftUI app + speech → first usable release | written after M4 |
