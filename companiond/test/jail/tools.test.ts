@@ -5,7 +5,7 @@ import path from "node:path";
 import { SafeGit } from "../../src/git/safeGit.ts";
 import { NOT_AVAILABLE } from "../../src/jail/containedPath.ts";
 import { runTool, type JailContext } from "../../src/jail/tools.ts";
-import { makeRepo, put, removeTempDirs, tempDir, testGitPath } from "../helpers/fixtures.ts";
+import { fixtureGit, makeRepo, put, removeTempDirs, tempDir, testGitPath } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
 
@@ -146,6 +146,25 @@ test("git_diff still shows a deleted file", async () => {
   const diff = await runTool(ctx, "git_diff", {});
   assert.match(diff.text, /deleted file mode/);
   assert.match(diff.text, /docs\/guide\.md/);
+});
+
+test("core.worktree set after open is refused by git_diff, git_status and search", async () => {
+  const { ctx, repo } = await fixture();
+  // Another tree with a modified a.txt whose content must never be shown.
+  const other = makeRepo({ "a.txt": "OTHER_ORIGINAL\n" });
+  put(other, "a.txt", "OTHER_TREE_MARKER\n");
+  put(repo, "a.txt", "ROOT_MARKER\n");
+  fixtureGit(repo, ["add", "a.txt"]);
+  fixtureGit(repo, ["commit", "-q", "-m", "a"]);
+  fixtureGit(repo, ["config", "--local", "core.worktree", other]);
+  for (const [name, args] of [
+    ["git_diff", {}], ["git_status", {}], ["search", { query: "OTHER_TREE_MARKER" }],
+  ] as const) {
+    const r = await runTool(ctx, name, args);
+    assert.equal(r.isError, true, `${name}: ${r.text}`);
+    assert.match(r.text, /Repository refused: .*core\.worktree/, name);
+    assert.doesNotMatch(r.text, /OTHER_TREE_MARKER/, name);
+  }
 });
 
 test("unknown tools are an error", async () => {

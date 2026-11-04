@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { describeKeys, parseConfigList, programKeys } from "./configGate.ts";
+import { describeKeys, parseConfigList, programKeys, repoShapeKeys } from "./configGate.ts";
 import { denyPathspecs } from "../jail/denyList.ts";
 
 // Fixed-size answers (config list, rev-parse, hash-object) get their own cap, so a small
@@ -41,7 +41,7 @@ export class RepoRefusedError extends Error {
 }
 
 export class GitError extends Error {
-  readonly code: number | null; // git's exit code; null = timed out or killed
+  readonly code: number | null; // git's exit code; null = timed out, killed, or could not start
   constructor(message: string, code: number | null) {
     super(message);
     this.name = "GitError";
@@ -69,17 +69,18 @@ export interface RepoDirs {
 }
 
 // Don't trust what git reports: a `.git` file can point anywhere, and these dirs become Seatbelt read
-// rules. Allowed: <toplevel>/.git, or a linked worktree's <commonDir>/worktrees/<name> whose `gitdir`
-// file points back at <toplevel>/.git.
+// rules. Allowed: <toplevel>/.git, or a linked worktree's <commonDir>/worktrees/<name> (exactly one
+// segment below, with commonDir named `.git`) whose `gitdir` file points back at <toplevel>/.git.
+// A relative `gitdir` (worktree.useRelativePaths) is relative to the worktree's git dir, never to cwd.
 export function validateRepoDirs(dirs: RepoDirs): void {
   const dotGit = path.join(dirs.toplevel, ".git");
   if (dirs.gitDir === dotGit && dirs.commonDir === dotGit) return;
-  if (!dirs.gitDir.startsWith(path.join(dirs.commonDir, "worktrees") + path.sep)) {
+  if (path.basename(dirs.commonDir) !== ".git" || path.dirname(dirs.gitDir) !== path.join(dirs.commonDir, "worktrees")) {
     throw new RepoRefusedError("its .git points outside the repository");
   }
   let back: string;
   try {
-    back = fs.realpathSync.native(fs.readFileSync(path.join(dirs.gitDir, "gitdir"), "utf8").trim());
+    back = fs.realpathSync.native(path.resolve(dirs.gitDir, fs.readFileSync(path.join(dirs.gitDir, "gitdir"), "utf8").trim()));
   } catch {
     throw new RepoRefusedError("its worktree link cannot be checked");
   }
@@ -151,6 +152,7 @@ export class SafeGit {
   readonly gitPath: string;
   readonly #timeoutMs: number;
   readonly #maxBytes: number;
+  #opened: RepoDirs | null = null; // set once open() has validated the dirs
 
   private constructor(root: string, gitPath: string, timeoutMs: number, maxBytes: number) {
     this.root = root;
@@ -170,15 +172,15 @@ export class SafeGit {
     const git = new SafeGit(root, opts.gitPath, opts.timeoutMs ?? 10_000, opts.maxOutputBytes ?? 4 * 1024 * 1024);
     let dirs: RepoDirs;
     try {
-      await git.checkConfig();
-      dirs = await git.repoDirs();
+      dirs = await git.repoDirs(); // gate first, then rev-parse
     } catch (e) {
       if (e instanceof RepoRefusedError) throw e;
-      if (e instanceof GitError && e.code === null) throw e; // timed out: say so, do not call it a refusal
+      if (e instanceof GitError && e.code === null) throw e; // timed out or could not start: say so, do not call it a refusal
       throw new RepoRefusedError("not a git repository");
     }
     if (dirs.toplevel !== root) throw new RepoRefusedError("not the top level of a git repository");
     validateRepoDirs(dirs);
+    git.#opened = dirs;
     return git;
   }
 
@@ -194,8 +196,7 @@ export class SafeGit {
     }
     const git = new SafeGit(cwd, opts.gitPath, opts.timeoutMs ?? 10_000, SMALL_CAP);
     try {
-      await git.checkConfig();
-      const dirs = await git.repoDirs();
+      const dirs = await git.repoDirs(); // gate first, then rev-parse
       validateRepoDirs(dirs);
       return dirs;
     } catch (e) {
@@ -219,24 +220,39 @@ export class SafeGit {
     const r = await this.#spawnGit(["config", "--list", "--null", "--show-scope", "--no-includes"], SMALL_CAP);
     if (r.truncated) throw new RepoRefusedError("repository config is too large");
     if (r.code !== 0) throw new GitError(`git config failed (${r.code === null ? "timed out" : `exit ${r.code}`})`, r.code);
-    const bad = programKeys(parseConfigList(r.stdout.toString("utf8")));
+    const entries = parseConfigList(r.stdout.toString("utf8"));
+    const bad = programKeys(entries);
     if (bad.length > 0) throw new RepoRefusedError(`its git config can run programs (${describeKeys(bad)})`);
+    const shape = repoShapeKeys(entries);
+    if (shape.length > 0) throw new RepoRefusedError(`its git config moves the work tree (${describeKeys(shape)})`);
   }
 
+  // Gate, then the dirs as git reports them now. Once open, they must still be the dirs captured at open:
+  // a `.git` swapped afterwards for a link to another repo is refused before git reads anything there.
   async repoDirs(): Promise<RepoDirs> {
-    const r = await this.#run(
-      ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"],
-      [0],
+    await this.checkConfig();
+    return this.#currentDirs();
+  }
+
+  async #currentDirs(): Promise<RepoDirs> {
+    const r = await this.#spawnGit(
+      [...SAFE_GIT_FLAGS, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"],
       SMALL_CAP,
     );
     if (r.truncated) throw new GitError("git rev-parse output is too large", 0);
+    if (r.code !== 0) throw new GitError(`git rev-parse failed (${r.code === null ? "timed out" : `exit ${r.code}`})`, r.code);
     const [toplevel, gitDir, commonDir] = r.stdout.toString("utf8").split("\n");
     if (!toplevel || !gitDir || !commonDir) throw new GitError("git rev-parse returned no paths", 0);
-    return {
+    const dirs = {
       toplevel: fs.realpathSync.native(toplevel),
       gitDir: fs.realpathSync.native(gitDir),
       commonDir: fs.realpathSync.native(commonDir),
     };
+    const was = this.#opened;
+    if (was && (dirs.toplevel !== was.toplevel || dirs.gitDir !== was.gitDir || dirs.commonDir !== was.commonDir)) {
+      throw new RepoRefusedError("its .git changed after it was opened");
+    }
+    return dirs;
   }
 
   async status(): Promise<StatusResult> {
@@ -290,9 +306,9 @@ export class SafeGit {
     return empty.stdout.toString("utf8").trim();
   }
 
-  // Gate, then run with the safety flags.
+  // Gate (config, then the repo dirs against those captured at open), then run with the safety flags.
   async #run(args: readonly string[], okCodes: readonly number[] = [0], cap = this.#maxBytes): Promise<GitResult> {
-    await this.checkConfig();
+    await this.repoDirs();
     const r = await this.#spawnGit([...SAFE_GIT_FLAGS, ...args], cap);
     if (!r.truncated && (r.code === null || !okCodes.includes(r.code))) {
       throw new GitError(`git ${args[0]} failed (${r.code === null ? "timed out" : `exit ${r.code}`})`, r.code);
@@ -325,7 +341,8 @@ export class SafeGit {
         chunks.push(c);
         size += c.length;
       });
-      child.on("error", reject);
+      // A git that cannot start (missing, not executable) is a GitError, not "not a git repository".
+      child.on("error", (e: NodeJS.ErrnoException) => reject(new GitError(`git could not start (${e.code ?? "error"})`, null)));
       child.on("close", (code) => resolve({ stdout: Buffer.concat(chunks), code, truncated }));
     });
   }

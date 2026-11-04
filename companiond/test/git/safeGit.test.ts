@@ -2,7 +2,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { GitError, RepoRefusedError, SafeGit } from "../../src/git/safeGit.ts";
+import { GitError, RepoRefusedError, SafeGit, validateRepoDirs } from "../../src/git/safeGit.ts";
 import {
   fixtureGit, makeRepo, makeWorktree, put, removeTempDirs, sentinelScript, slowGitPath, tempDir, testGitPath,
 } from "../helpers/fixtures.ts";
@@ -93,11 +93,89 @@ test("a .git file pointing at another repo's worktree is refused", async () => {
   await assert.rejects(open(root), (e: unknown) => e instanceof RepoRefusedError && /point back/.test(e.reason));
 });
 
+test("a worktree added with relative paths opens", async () => {
+  const main = makeRepo();
+  const dir = path.join(tempDir("cgc-relwt-"), "rel");
+  fixtureGit(main, ["worktree", "add", "-q", "--relative-paths", "-b", "rel", dir]);
+  const wt = fs.realpathSync.native(dir);
+  const back = fs.readFileSync(path.join(main, ".git", "worktrees", "rel", "gitdir"), "utf8").trim();
+  assert.equal(path.isAbsolute(back), false, back); // the fixture really is relative
+  const dirs = await (await open(wt)).repoDirs();
+  assert.equal(dirs.gitDir, path.join(main, ".git", "worktrees", "rel"));
+});
+
+test("a worktree whose common dir is not named .git is refused", async () => {
+  const main = makeRepo();
+  const wt = makeWorktree(main);
+  const store = path.join(main, "store");
+  fs.renameSync(path.join(main, ".git"), store);
+  fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(store, "worktrees", "wt")}\n`);
+  await assert.rejects(open(wt), (e: unknown) => e instanceof RepoRefusedError && /outside/.test(e.reason));
+});
+
+test("a worktree gitdir file reading `.git` does not point back, even when cwd is the root", async () => {
+  const main = makeRepo();
+  const wt = makeWorktree(main);
+  fs.writeFileSync(path.join(main, ".git", "worktrees", "wt", "gitdir"), ".git\n");
+  const cwd = process.cwd();
+  process.chdir(wt);
+  try {
+    await assert.rejects(open(wt), RepoRefusedError);
+  } finally {
+    process.chdir(cwd);
+  }
+});
+
+test("a gitDir nested deeper than <commonDir>/worktrees/<name> is refused", () => {
+  const main = makeRepo();
+  const dotGit = path.join(main, ".git");
+  const deep = path.join(dotGit, "worktrees", "a", "b");
+  fs.mkdirSync(deep, { recursive: true });
+  fs.writeFileSync(path.join(deep, "gitdir"), `${path.join(main, ".git")}\n`);
+  assert.throws(
+    () => validateRepoDirs({ toplevel: main, gitDir: deep, commonDir: dotGit }),
+    (e: unknown) => e instanceof RepoRefusedError && /outside/.test(e.reason),
+  );
+});
+
+test("a git binary that cannot start is a GitError, not 'not a git repository'", async () => {
+  const missing = path.join(tempDir("cgc-nogit-"), "no-such-git");
+  await assert.rejects(
+    SafeGit.open({ root: makeRepo(), gitPath: missing }),
+    (e: unknown) => e instanceof GitError && !(e instanceof RepoRefusedError) && /could not start/.test(e.message),
+  );
+});
+
 test("the gate runs again before every git call", async () => {
   const repo = makeRepo();
   const git = await open(repo);
   fixtureGit(repo, ["config", "--local", "core.pager", "cat"]);
   await assert.rejects(git.repoDirs(), RepoRefusedError);
+});
+
+test("core.worktree is refused at open, in local and in worktree config", async () => {
+  const elsewhere = makeRepo();
+  const repo = makeRepo();
+  fixtureGit(repo, ["config", "--local", "core.worktree", elsewhere]);
+  await assert.rejects(open(repo), (e: unknown) => e instanceof RepoRefusedError && e.reason.includes("core.worktree"));
+  const main = makeRepo();
+  const wt = makeWorktree(main);
+  fixtureGit(main, ["config", "--local", "extensions.worktreeConfig", "true"]);
+  const git = await open(wt);
+  fixtureGit(wt, ["config", "--worktree", "core.worktree", elsewhere]);
+  await assert.rejects(git.status(), (e: unknown) => e instanceof RepoRefusedError && e.reason.includes("core.worktree"));
+});
+
+test("a .git swapped after open for a link to another repo is refused on the next call", async () => {
+  const other = makeRepo({ "a.txt": "OTHER\n" });
+  put(other, "a.txt", "OTHER_CHANGED\n");
+  const repo = makeRepo();
+  const git = await open(repo);
+  fs.renameSync(path.join(repo, ".git"), path.join(repo, "moved-git"));
+  fs.writeFileSync(path.join(repo, ".git"), `gitdir: ${path.join(other, ".git")}\n`);
+  await assert.rejects(git.status(), (e: unknown) => e instanceof RepoRefusedError && /changed after it was opened/.test(e.reason));
+  await assert.rejects(git.diffNames(), RepoRefusedError);
+  await assert.rejects(git.grep("OTHER"), RepoRefusedError);
 });
 
 test("worktree config is gated too", async () => {
