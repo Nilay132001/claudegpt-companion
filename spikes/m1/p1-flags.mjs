@@ -12,6 +12,9 @@ const cfg = await c.request("config/read", { includeLayers: true, cwd: empty });
 console.log(JSON.stringify({
   flags,
   allOff: Object.values(flags).every((v) => v === false),
+  listEntries: Object.fromEntries(want.map((n) => { const f = all.find((x) => x.name === n); return [n, f ? { stage: f.stage, enabled: f.enabled, defaultEnabled: f.defaultEnabled } : "MISSING"]; })),
+  configReadFeatures: Object.fromEntries(want.map((n) => [n, cfg.config.features?.[n] ?? "MISSING"])),
+  configAllOff: want.every((n) => cfg.config.features?.[n] === false),
   web_search: cfg.config.web_search,
   layers: (cfg.layers || []).map((l) => l.name ?? l.source ?? Object.keys(l)),
 }, null, 2));
