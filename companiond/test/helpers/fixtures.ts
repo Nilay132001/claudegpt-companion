@@ -69,6 +69,13 @@ export function makeWorktree(main: string, branch = "wt"): string {
   return fs.realpathSync.native(dir);
 }
 
+// An executable "git" that blocks far longer than any test timeout, so timeout tests never race a fast git.
+export function slowGitPath(): string {
+  const script = path.join(tempDir("cgc-slowgit-"), "git");
+  fs.writeFileSync(script, "#!/bin/sh\nexec /bin/sleep 30\n", { mode: 0o755 });
+  return script;
+}
+
 // An executable that creates `sentinel` when run. Tests assert the sentinel never appears.
 export function sentinelScript(): { script: string; sentinel: string } {
   const dir = tempDir("cgc-sentinel-");

@@ -2,7 +2,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { LocateError, SafeGit } from "../../src/git/safeGit.ts";
-import { fixtureGit, makeRepo, makeWorktree, removeTempDirs, tempDir, testGitPath } from "../helpers/fixtures.ts";
+import { fixtureGit, makeRepo, makeWorktree, removeTempDirs, slowGitPath, tempDir, testGitPath } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
 
@@ -35,7 +35,7 @@ test("not a repo, a missing folder, program-valued config", async () => {
 });
 
 test("a timeout is git_failed", async () => {
-  await assert.rejects(SafeGit.locate({ gitPath: testGitPath(), cwd: makeRepo(), timeoutMs: 1 }), kindOf("git_failed"));
+  await assert.rejects(SafeGit.locate({ gitPath: slowGitPath(), cwd: makeRepo(), timeoutMs: 200 }), kindOf("git_failed"));
 });
 
 test("branch: named, detached, and no commits", async () => {

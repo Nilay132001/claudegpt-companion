@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { GitError, RepoRefusedError, SafeGit } from "../../src/git/safeGit.ts";
 import {
-  fixtureGit, makeRepo, makeWorktree, put, removeTempDirs, sentinelScript, tempDir, testGitPath,
+  fixtureGit, makeRepo, makeWorktree, put, removeTempDirs, sentinelScript, slowGitPath, tempDir, testGitPath,
 } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
@@ -73,7 +73,7 @@ test("a local core.hooksPath (husky) is not a reason to refuse", async () => {
 
 test("a timeout is a GitError, not a refusal", async () => {
   await assert.rejects(
-    SafeGit.open({ root: makeRepo(), gitPath: testGitPath(), timeoutMs: 1 }),
+    SafeGit.open({ root: makeRepo(), gitPath: slowGitPath(), timeoutMs: 200 }),
     (e: unknown) => e instanceof GitError && e.code === null && /timed out/.test(e.message),
   );
 });
