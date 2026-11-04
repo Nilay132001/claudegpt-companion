@@ -28,7 +28,7 @@ export type RunningCheck = { live: true; state: LiveState } | { live: false; rea
 export const START_TOLERANCE_MS = 2000;
 
 /** Only `<digits>.json`. `*.key` and every other name are never listed or opened (spec §6.1). */
-const RUNNING_NAME = /^[0-9]{1,10}\.json$/;
+const RUNNING_NAME = /^[1-9][0-9]{0,9}\.json$/;
 
 export async function readRunningFiles(fs: ReadFs, dir: string): Promise<RunningFile[]> {
   let names: string[];

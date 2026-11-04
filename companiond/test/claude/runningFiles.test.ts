@@ -46,6 +46,14 @@ test("lists only <pid>.json and never opens .key files or keeps the socket path"
   assert.equal(JSON.stringify(files).includes("/syn/sock"), false);
 });
 
+test("0.json and zero-padded names are not running files", async () => {
+  const p = claudeTree();
+  for (const name of ["0.json", "007.json"]) {
+    fs.writeFileSync(path.join(p.runningDir, name), JSON.stringify({ _fixture: MARK, pid: 7, sessionId: "cli-a", entrypoint: "claude-desktop" }));
+  }
+  assert.deepEqual(await readRunningFiles(nodeReadFs, p.runningDir), []);
+});
+
 test("a body pid that disagrees with the file name is skipped", async () => {
   const p = claudeTree();
   fs.writeFileSync(path.join(p.runningDir, "500.json"), JSON.stringify({ _fixture: MARK, pid: 501, sessionId: "cli-a" }));
