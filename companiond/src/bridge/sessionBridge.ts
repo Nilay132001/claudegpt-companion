@@ -79,6 +79,8 @@ interface Tracked {
 interface WorktreeState {
   resolution: WorktreeResolution;
   candidate: string | null;
+  /** dev:ino of a resolved root at resolve time; a different folder at that path forces a re-resolve. */
+  rootId: string | null;
 }
 
 interface WatchSlot {
@@ -122,6 +124,11 @@ export class SessionBridge {
   /** Last cliSessionId a reader was made for, per session; survives untracking. */
   #lastCli = new Map<string, string>();
   #worktrees = new Map<string, WorktreeState>();
+  /**
+   * Latest transcript cwd seen per session. Carried over while a new reader (new cliSessionId) has no cwd
+   * record yet, or while the reader is dropped, so the candidate does not flip back to the record cwd.
+   */
+  #lastTranscriptCwd = new Map<string, string>();
   /** Sessions polled in the last pass: listed and (selected or busy). */
   #active = new Set<string>();
   #pin: Pin | null = null;
@@ -444,6 +451,7 @@ export class SessionBridge {
     for (const id of [...this.#lastCli.keys()]) if (!listed.has(id)) this.#lastCli.delete(id);
     for (const id of [...this.#locations.keys()]) if (!listed.has(id)) this.#locations.delete(id);
     for (const id of [...this.#worktrees.keys()]) if (!listed.has(id)) this.#worktrees.delete(id);
+    for (const id of [...this.#lastTranscriptCwd.keys()]) if (!listed.has(id)) this.#lastTranscriptCwd.delete(id);
     for (const s of sessions) if (active.has(s.sessionId)) await this.#pollSession(s, full);
     this.#emitSnapshot();
   }
@@ -507,7 +515,11 @@ export class SessionBridge {
       }
       for (const update of await t.subagents.poll()) this.#emit({ type: "subagent", sessionId: s.sessionId, update });
     } else if (t) {
+      // The transcript is no longer known (e.g. a new cliSessionId whose file is not there yet): say so.
       this.#tracked.delete(s.sessionId);
+      if (!t.missing) {
+        this.#emit({ type: "transcript", sessionId: s.sessionId, cliSessionId: t.cliSessionId, batch: { kind: "missing" }, stats: t.reader.stats });
+      }
     }
     await this.#resolve(s.sessionId, full);
     const r = this.#worktrees.get(s.sessionId)?.resolution;
@@ -517,15 +529,44 @@ export class SessionBridge {
   async #resolve(sessionId: string, force: boolean): Promise<void> {
     const t = this.#tracked.get(sessionId);
     const recordCwd = this.#records.get(sessionId)?.cwd ?? null;
-    const transcriptCwd = t?.reader.latestCwd ?? null;
+    const readerCwd = t?.reader.latestCwd ?? null;
+    if (readerCwd !== null) this.#lastTranscriptCwd.set(sessionId, readerCwd);
+    const transcriptCwd = readerCwd ?? this.#lastTranscriptCwd.get(sessionId) ?? null;
     const candidate = transcriptCwd ?? recordCwd;
     const prev = this.#worktrees.get(sessionId) ?? null;
-    if (!force && prev && prev.candidate === candidate) return;
+    if (!force && prev && prev.candidate === candidate && (await this.#stillResolved(prev))) return;
     const resolution = await resolveWorktree({ transcriptCwd, recordCwd }, { fs: this.#fs, gitPath: this.#gitPath, isApproved: this.#isApproved });
-    this.#worktrees.set(sessionId, { resolution, candidate });
+    const rootId = resolution.kind === "resolved" ? await this.#folderId(resolution.root) : null;
+    this.#worktrees.set(sessionId, { resolution, candidate, rootId });
     const s = this.#sessions.find((x) => x.sessionId === sessionId);
     if (s) s.resolvedRoot = resolution.kind === "resolved" ? resolution.root : null;
     if (prev && JSON.stringify(prev.resolution) === JSON.stringify(resolution)) return;
     this.#emit({ type: "worktree", sessionId, resolution, change: describeChange(prev?.resolution ?? null, resolution) });
+  }
+
+  /**
+   * Cheap re-check of a stored resolution whose candidate did not change (no git is run): a resolved root
+   * must still be approved and still be the same folder (dev:ino). False forces a full re-resolve, which
+   * reports the change (§6.3: never silent). Unavailable entries are kept until the candidate changes.
+   */
+  async #stillResolved(w: WorktreeState): Promise<boolean> {
+    const r = w.resolution;
+    if (r.kind !== "resolved") return true;
+    try {
+      if (!this.#isApproved(r.root, r.gitCommonDir)) return false;
+    } catch {
+      return false;
+    }
+    const id = await this.#folderId(r.root);
+    return id !== null && id === w.rootId;
+  }
+
+  async #folderId(dir: string): Promise<string | null> {
+    try {
+      const st = await this.#fs.stat(dir);
+      return st.isDirectory() ? `${st.dev}:${st.ino}` : null;
+    } catch {
+      return null;
+    }
   }
 }

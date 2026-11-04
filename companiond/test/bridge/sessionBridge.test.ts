@@ -278,6 +278,81 @@ test("§6.3 a session that moved repo while untailed reports the change when sel
   assert.equal(wt[0].change?.contextNote, `Repository changed from ${a.main} to ${other.main}`);
 });
 
+test("§6.3 a resolved root whose approval is revoked becomes unavailable on the next tick", async () => {
+  const a = repoWithWorktree();
+  let approved = true;
+  const { p, make, take } = harness({ isApproved: () => approved });
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-a", cwd: a.main, lastFocusedAt: T0 });
+  const b = make();
+  await b.refresh();
+  assert.equal(b.worktree("local_syn-a")?.kind, "resolved");
+  take();
+  approved = false;
+  await b.tick();
+  const wt = ofType(take(), "worktree");
+  assert.equal(wt.length, 1);
+  assert.ok(wt[0].resolution.kind === "unavailable" && wt[0].resolution.reason === "not_approved");
+  assert.notEqual(wt[0].change, null);
+  assert.equal(b.worktree("local_syn-a")?.kind, "unavailable");
+  assert.equal(b.snapshot().sessions[0].resolvedRoot, null);
+});
+
+test("§6.3 a resolved root whose folder is deleted becomes path_missing on the next tick", async () => {
+  const a = repoWithWorktree();
+  const { p, make, take } = harness();
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-a", cwd: a.worktree, lastFocusedAt: T0 });
+  const b = make();
+  await b.refresh();
+  assert.equal(b.worktree("local_syn-a")?.kind, "resolved");
+  take();
+  fs.rmSync(a.worktree, { recursive: true, force: true });
+  await b.tick();
+  const wt = ofType(take(), "worktree");
+  assert.equal(wt.length, 1);
+  assert.ok(wt[0].resolution.kind === "unavailable" && wt[0].resolution.reason === "path_missing");
+  assert.notEqual(wt[0].change, null);
+  // Unchanged after that: no event per tick.
+  await b.tick();
+  assert.deepEqual(ofType(take(), "worktree"), []);
+});
+
+test("a new cliSessionId whose file has no cwd record yet keeps the transcript cwd (no flip to the record cwd)", async () => {
+  const a = repoWithWorktree();
+  const { p, make, take } = harness();
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-1", cwd: a.main, lastFocusedAt: T0 });
+  writeTranscript(transcriptPath(p, a.main, "cli-1"), "cli-1", [userLine("cli-1", a.worktree, "in the worktree")]);
+  writeTranscript(transcriptPath(p, a.main, "cli-2"), "cli-2", []);
+  const b = make();
+  await b.refresh();
+  assert.ok(b.worktree("local_syn-a")?.kind === "resolved");
+  take();
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-2", cwd: a.main, lastFocusedAt: T0 });
+  await b.tick();
+  const ev = take();
+  assert.ok(ofType(ev, "transcript").some((e) => e.cliSessionId === "cli-2" && e.batch.kind === "reset"));
+  assert.deepEqual(ofType(ev, "worktree"), []);
+  const r = b.worktree("local_syn-a");
+  assert.ok(r?.kind === "resolved" && r.root === a.worktree);
+});
+
+test("a tracked transcript that stops being known is reported missing before its reader is dropped", async () => {
+  const { p, make, take } = harness();
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-1", cwd: "/syn/a", lastFocusedAt: T0 });
+  writeTranscript(transcriptPath(p, "/syn/a", "cli-1"), "cli-1", [userLine("cli-1", "/syn/a", "old")]);
+  const b = make();
+  await b.refresh();
+  take();
+  writeRecord(p, { sessionId: "local_syn-a", cliSessionId: "cli-2", cwd: "/syn/a", lastFocusedAt: T0 });
+  await b.tick();
+  assert.deepEqual(
+    ofType(take(), "transcript").map((e) => [e.cliSessionId, e.batch.kind]),
+    [["cli-1", "missing"]],
+  );
+  assert.equal(b.syncStatus("local_syn-a").state, "not_tracked");
+  await b.tick();
+  assert.deepEqual(ofType(take(), "transcript"), []);
+});
+
 test("a throwing listener does not freeze the bridge or starve other listeners", async () => {
   const { p, make } = harness();
   const b = make();
