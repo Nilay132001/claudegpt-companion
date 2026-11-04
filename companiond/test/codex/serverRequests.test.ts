@@ -57,6 +57,9 @@ test("everything else is declined", () => {
     ["form without approval kind", elicitation({}, { tool_name: "read_file" }), none],
     ["no _meta", elicitation({}, null), none],
     ["no tool name anywhere", elicitation({}, { [APPROVAL_KIND_KEY]: APPROVAL_KIND_MCP_TOOL_CALL }), none],
+    ["conflicting tool name keys", elicitation({}, { [APPROVAL_KIND_KEY]: APPROVAL_KIND_MCP_TOOL_CALL, tool_name: "read_file", toolName: "write_file" }), none],
+    ["conflicting call id keys", elicitation({}, { [APPROVAL_KIND_KEY]: APPROVAL_KIND_MCP_TOOL_CALL, tool_name: "read_file", call_id: "a", callId: "b" }), inflight("read_file")],
+    ["call id not in flight", elicitation({}, { [APPROVAL_KIND_KEY]: APPROVAL_KIND_MCP_TOOL_CALL, tool_name: "read_file", call_id: "i1" }), none],
     ["not an object", "junk", none],
   ];
   for (const [why, params, lookup] of cases) {
