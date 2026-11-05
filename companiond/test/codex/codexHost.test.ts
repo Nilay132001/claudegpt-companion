@@ -28,9 +28,9 @@ const FAKE_INSTALL: CodexInstall = { version: "0.166.0", vendorDir: "/v", binary
 const detail = (s: HostState) => (s.state === "failed" ? s.detail : "");
 const LOGIN_PROFILE = "(version 1) ; sign-in";
 
-function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; maxProcesses?: number; maxBindings?: number; exitTimeoutMs?: number; unsandboxed?: boolean; measurementOnly?: boolean; prepare?: (paths: AppPaths) => () => PreparedCodeMode } = {}) {
+function host(o: { handlers?: () => Record<string, Handler>; jiraTools?: readonly string[]; paths?: AppPaths; maxProcesses?: number; maxBindings?: number; exitTimeoutMs?: number; unsandboxed?: boolean; measurementOnly?: boolean; prepare?: (paths: AppPaths) => () => PreparedCodeMode } = {}) {
   const paths = o.paths ?? ensureAppDirs(appPaths(tempDir()));
-  const f = fakeSpawn(o.handlers);
+  const f = fakeSpawn(o.handlers ?? (() => goodHandlers({ jiraTools: o.jiraTools })));
   const broker = new FakeBroker();
   const events: HostEvent[] = [];
   const env = { CODEX_HOME: paths.codexHome };
@@ -711,4 +711,141 @@ test("sign-in runs in its own process under the sign-in launch and ends on accou
   await tick(10);
   assert.equal(login.killed, true);
   assert.ok(events.some((e) => e.type === "auth"));
+});
+
+// M6 Task 6: companion-jira is bound per thread through a second relay grant. SYNTHETIC FIXTURE values only.
+const JIRA = "mcp_servers.companion-jira";
+const jiraBinding = (secret = "SYNTHETIC-SECRET\n") => ({
+  launch: { command: "/usr/bin/sandbox-exec", args: ["-p", "(version 1)", "/node", "/c/src/jira/main.ts"], env: { PATH: "/usr/bin:/bin" }, cwd: "/" },
+  validator: { command: "/usr/bin/sandbox-exec", args: ["-p", "(version 1)", "/node", "/c/src/relay/validator.ts", "jira_get_issue,jira_search,jira_get_comments"], env: {}, cwd: "/" },
+  secret,
+});
+
+test("M6: without Jira every thread gets an inert companion-jira override", async () => {
+  const { h, f } = host();
+  await h.start();
+  await h.openThread(null, null);
+  const p = f.servers[0]!.lastThreadParams();
+  assert.equal(p.config[`${JIRA}.command`], "/usr/bin/false");
+});
+
+test("M6: with Jira a thread gets a second grant with the Jira validator and the secret; the secret is never in Codex's params", async () => {
+  const { h, f, broker } = host();
+  await h.start();
+  h.setJira(jiraBinding());
+  await h.openThread(null, null);
+  const g = broker.grants.find((x) => x.secret !== null)!;
+  assert.equal(g.secret, "SYNTHETIC-SECRET\n");
+  assert.deepEqual(g.validator?.args.at(-1), "jira_get_issue,jira_search,jira_get_comments");
+  const p = f.servers[0]!.lastThreadParams();
+  assert.deepEqual(p.config[`${JIRA}.env`], { CGC_RELAY_TOKEN: g.token });
+  assert.ok(!JSON.stringify(f.servers.map((s) => s.requests)).includes("SYNTHETIC-SECRET"), "the secret never reaches Codex");
+});
+
+test("M6: a root-bound thread with Jira holds two grants; closing it revokes both", async () => {
+  const { h, broker } = host();
+  await h.start();
+  h.setJira(jiraBinding());
+  const id = await h.openThread(null, { root: "/r1", launch: jail("/r1") });
+  assert.equal(broker.live(), 2);
+  await h.closeThread(id);
+  assert.equal(broker.live(), 0);
+});
+
+test("M6: setJira(null) revokes every Jira grant at once and the next turn reopens without the server", async () => {
+  const { h, f, broker } = host();
+  await h.start();
+  h.setJira(jiraBinding());
+  const id = await h.openThread(null, null);
+  h.setJira(null);
+  assert.equal(broker.grants.filter((g) => g.secret !== null).every((g) => g.revoked), true);
+  await h.startTurn(id, "SYNTHETIC question");
+  const p = f.servers[0]!.lastThreadParams();
+  assert.equal(p.config[`${JIRA}.command`], "/usr/bin/false");
+});
+
+test("M6: setting the same Jira binding twice does not churn grants", async () => {
+  const { h, broker } = host();
+  await h.start();
+  h.setJira(jiraBinding());
+  await h.openThread(null, null);
+  const before = broker.grants.length;
+  h.setJira(jiraBinding());
+  assert.equal(broker.grants.length, before);
+  assert.equal(broker.grants.some((g) => g.revoked), false);
+});
+
+test("M6: a Jira binding that ends normally is rebound with the next turn; a violation stops everything", async () => {
+  const { h, broker, events } = host();
+  await h.start();
+  h.setJira(jiraBinding());
+  const id = await h.openThread(null, null);
+  const g = broker.grants.find((x) => x.secret !== null)!;
+  broker.emit({ type: "closed", grantId: g.id, end: "idle" });
+  await h.startTurn(id, "SYNTHETIC question");
+  assert.equal(broker.grants.filter((x) => x.secret !== null).length, 2, "a fresh Jira grant");
+  const g2 = broker.grants.filter((x) => x.secret !== null)[1]!;
+  broker.emit({ type: "closed", grantId: g2.id, end: "violation" });
+  assert.equal(h.state().state, "failed");
+  assert.ok(events.some((e: any) => e.type === "alert" && /Security check failed/.test(e.detail)));
+});
+
+test("M6: a thread whose Jira server lists a write tool fails the self-check", async () => {
+  const { h } = host({ jiraTools: ["jira_get_issue", "jira_search", "jira_get_comments", "createJiraIssue"] });
+  await h.start();
+  h.setJira(jiraBinding());
+  await assert.rejects(h.openThread(null, null));
+  assert.equal(h.state().state, "failed");
+});
+
+test("M6: live grants, not bound threads, count against the binding cap", async () => {
+  const { h, broker } = host({ maxBindings: 4 });
+  await h.start();
+  h.setJira(jiraBinding());
+  await h.openThread(null, { root: "/r1", launch: jail("/r1") });
+  await h.openThread(null, { root: "/r2", launch: jail("/r2") });
+  await h.openThread(null, { root: "/r3", launch: jail("/r3") }); // 6 would exceed 4: the oldest idle thread is closed
+  assert.ok(broker.live() <= 4);
+});
+
+test("M6: a Jira binding that ends says so in its alert, never with the secret, and the readonly binding stays", async () => {
+  const { h, broker, events } = host();
+  await h.start();
+  h.setJira(jiraBinding());
+  await h.openThread(null, bind("/r1"));
+  const g = broker.grants.find((x) => x.secret !== null)!;
+  broker.emit({ type: "closed", grantId: g.id, end: "idle" });
+  assert.equal(h.state().state, "ready");
+  assert.ok(events.some((e) => e.type === "alert" && e.detail === "The Jira tools stopped. They restart with the next message."));
+  assert.equal(broker.grants.find((x) => x.secret === null)?.revoked, false, "the readonly grant is untouched until the rebind");
+  assert.ok(!JSON.stringify(events).includes("SYNTHETIC-SECRET"));
+});
+
+test("M6: an unbound thread with Jira asks Codex for companion-jira by name; without Jira it never does", async () => {
+  const a = host();
+  await a.h.start();
+  await a.h.openThread(null, null);
+  assert.equal(srv(a.f, 0).received.some((m) => m.method === "mcpServerStatus/list" && m.params?.serverName === "companion-jira"), false);
+  const b = host();
+  await b.h.start();
+  b.h.setJira(jiraBinding());
+  await b.h.openThread(null, null);
+  assert.equal(srv(b.f, 0).received.some((m) => m.method === "mcpServerStatus/list" && m.params?.serverName === "companion-jira"), true);
+});
+
+test("M6: setJira(null) while an open is in flight revokes that open's Jira grant; the thread rebinds with the next turn", async () => {
+  let hostRef: CodexHost | null = null;
+  const { h, f, broker } = host({
+    handlers: withHandler("thread/start", (p, fake) => {
+      hostRef?.setJira(null); // the owner removes Jira after the grant, before Codex answers
+      return goodHandlers()["thread/start"]!(p, fake);
+    }),
+  });
+  hostRef = h;
+  await h.start();
+  h.setJira(jiraBinding());
+  const id = await h.openThread(null, null);
+  assert.equal(broker.live(), 0, "no Jira grant outlives setJira(null)");
+  await h.startTurn(id, "SYNTHETIC question");
+  assert.equal(f.servers[0]!.lastThreadParams().config[`${JIRA}.command`], "/usr/bin/false");
 });

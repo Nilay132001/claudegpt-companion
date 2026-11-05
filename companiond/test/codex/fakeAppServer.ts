@@ -17,6 +17,8 @@ export class FakeAppServer {
   readonly launch: CodexLaunch;
   readonly received: any[] = [];
   readonly bound = new Set<string>();
+  /** Threads whose config pointed companion-jira at the relay. */
+  readonly jiraBound = new Set<string>();
   handlers: Record<string, Handler>;
   killed = false;
   /** false: kill() only records the kill; the test calls exit() itself (a process that is slow to die). */
@@ -72,6 +74,14 @@ export class FakeAppServer {
   last(method: string): any {
     return [...this.received].reverse().find((m) => m.method === method)?.params;
   }
+  /** Every message the client sent this process, requests and notifications alike. */
+  get requests(): readonly any[] {
+    return this.received;
+  }
+  /** The params of the latest thread/start or thread/resume. */
+  lastThreadParams(): any {
+    return [...this.received].reverse().find((m) => m.method === "thread/start" || m.method === "thread/resume")?.params;
+  }
   #onLine(m: any): void {
     this.received.push(m);
     if (typeof m.method === "string" && m.id !== undefined) {
@@ -89,14 +99,23 @@ export class FakeAppServer {
 }
 
 const TOOLS = Object.fromEntries(["list_dir", "read_file", "search", "git_status", "git_diff"].map((t) => [t, { name: t }]));
+export const JIRA_TOOLS = ["jira_get_issue", "jira_search", "jira_get_comments"];
 
-export function goodHandlers(): Record<string, Handler> {
+const relayed = (c: Record<string, any>, server: string): boolean => {
+  const command = c[`mcp_servers.${server}.command`];
+  const token = c[`mcp_servers.${server}.env`]?.CGC_RELAY_TOKEN;
+  return typeof command === "string" && command !== BASE_MCP_COMMAND && typeof token === "string";
+};
+
+/** jiraTools: what companion-jira lists for a thread whose config pointed it at the relay. */
+export function goodHandlers(o: { jiraTools?: readonly string[] } = {}): Record<string, Handler> {
+  const jiraTools = Object.fromEntries((o.jiraTools ?? JIRA_TOOLS).map((t) => [t, {}]));
   const thread = (id: string, params: any, f: FakeAppServer) => {
     const c = params?.config ?? {};
-    const command = c["mcp_servers.companion-readonly.command"];
-    const token = c["mcp_servers.companion-readonly.env"]?.CGC_RELAY_TOKEN;
-    if (typeof command === "string" && command !== BASE_MCP_COMMAND && typeof token === "string") f.bound.add(id);
+    if (relayed(c, "companion-readonly")) f.bound.add(id);
     else f.bound.delete(id);
+    if (relayed(c, "companion-jira")) f.jiraBound.add(id);
+    else f.jiraBound.delete(id);
     return {
       thread: { id }, model: FAKE_MODEL, cwd: params.cwd, instructionSources: [], approvalPolicy: params.approvalPolicy,
       approvalsReviewer: "user", sandbox: { type: "readOnly", networkAccess: false },
@@ -125,7 +144,9 @@ export function goodHandlers(): Record<string, Handler> {
       data: OFF_FEATURES.map((name) => ({ name, stage: "stable", enabled: name === "unified_exec", defaultEnabled: name === "unified_exec", displayName: null, description: null, announcement: null })),
       nextCursor: null,
     }),
-    "mcpServerStatus/list": (p, f) => ({ data: [{ name: "companion-readonly", tools: p?.threadId && f.bound.has(p.threadId) ? TOOLS : {} }], nextCursor: null }),
+    "mcpServerStatus/list": (p, f) => p?.serverName === "companion-jira"
+      ? { data: [{ name: "companion-jira", tools: p?.threadId && f.jiraBound.has(p.threadId) ? jiraTools : {} }], nextCursor: null }
+      : { data: [{ name: "companion-readonly", tools: p?.threadId && f.bound.has(p.threadId) ? TOOLS : {} }], nextCursor: null },
     "thread/start": (p, f) => thread(f.next("thr"), p, f),
     "thread/resume": (p, f) => thread(p.threadId, p, f),
     "thread/unsubscribe": () => ({ status: "unsubscribed" }),
