@@ -90,6 +90,15 @@ Measured end to end (Task 10, fix round 1): after a real turn in root A, the mov
 next tool call lists only B's files, and the acceptor shows A's binding closing as `revoked` before B's
 binds.
 
+**Known gap — stale writer lock after a close (parked for M4b).** `closeThread`, and the make-room step
+that unloads the oldest idle bound thread before a new binding, only unsubscribe the thread and revoke
+its token; they do not close its process. That process lives on with the thread loaded and Codex's
+writer lock held, so reopening the thread in another root (a `thread/resume` in a different process) is
+refused ("already has an active writer", a plain refusal, not a security stop) until the old process
+exits. There is no idle close: a root process exits only by LRU eviction when a fourth root is needed,
+a move off it, `stop()` or a failure. The common case is the base process (choose a repo for an unbound
+conversation after closing it). M4b decides whether `closeThread` closes a process it leaves empty.
+
 ## 3. Components
 
 | Unit | Does |
@@ -337,8 +346,8 @@ No single layer is trusted, including the Codex sandbox (R1).
    - The offline profile (catalog generation and the surface check, §7.1.1) has no network, no keychain
      file and no keychain or trust mach services.
 
-   **Trust boundaries, outermost first.** (a) The Seatbelt literal: Codex can reach exactly one socket
-   (measured: path tricks and symlinks fail). (b) The acceptor in companiond: mutual HMAC-SHA256 over a
+   **Trust boundaries, outermost first.** (a) The Seatbelt literal: Codex can reach exactly one companion
+   socket, plus the DNS socket `mDNSResponder` (measured: path tricks and symlinks fail). (b) The acceptor in companiond: mutual HMAC-SHA256 over a
    fresh nonce, the raw token never on the wire, one-time tokens that expire seconds after `thread/start`
    and are revoked at thread end, a socket dev/ino check, 0700/0600 folders; it parses no JSON. (c) The
    validator: its own profile (no network, no exec beyond Node, no writes); every line parsed and
@@ -370,7 +379,12 @@ No single layer is trusted, including the Codex sandbox (R1).
      connection (vi-a).
    - (iii) Codex can read the login keychain file (Keychain item ACLs still apply).
    - (iv) `CODEX_HOME` stays writable to Codex apart from the two denied files; other files Codex might
-     read from it are covered only by the config-layer check (§7.1.5) and not by any write deny.
+     read from it are covered only by the config-layer check (§7.1.5) and not by any write deny. Because
+     Codex can plant links there, companiond never stages a write inside `CODEX_HOME` (final review I-1):
+     it creates the two files in its own 0700 staging folder beside `CODEX_HOME` (`O_EXCL`, no link
+     followed) and renames them in, and it opens `CODEX_HOME/tmp` without following a link before it
+     checks or chmods it; a link or other entry where one is not expected fails the start. So "Codex
+     writes only `CODEX_HOME`" is not widened through companiond's own writes.
    - (v) `codex-code-mode-host` shares Codex's profile; a V8 escape gets Codex's rights.
    - (vi) Exec cells are invisible to the guard; safety rests on the cell being a bare isolate (measured,
      and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does
@@ -395,7 +409,11 @@ No single layer is trusted, including the Codex sandbox (R1).
        once by the test; `http://` and `https://`). The Codex process tree's TCP peers were sampled with
        `lsof` about every 50 ms through all turns and 5 s after: 0 connections to that IP in ~490 samples
        (every sample saw Codex's own provider connection, so the sampler worked). Port 80 is EPERM under
-       this profile anyway.
+       this profile anyway. **Limits (a known gap):** this is sampling, not an absence proof. A sample
+       runs every ~50 ms plus `lsof`'s own run time, so a connection that opens and closes inside one gap
+       is not seen; the process list is refreshed only every 5 samples, so a short-lived child of the
+       Codex tree can be missed entirely. The gap-free check is Way 2 (it counts every connection the
+       listener receives), which covers the same code paths but on loopback only.
      - Way 2, a measurement-only control profile (itest code only: the production profile minus the
        loopback deny, plus one allow for the listener's own loopback port, because macOS refuses a
        non-root bind of 127.0.0.1:443 and a 0.0.0.0:443 listener would expose the LAN): a raw TCP
@@ -417,7 +435,10 @@ No single layer is trusted, including the Codex sandbox (R1).
      (the live surface measured `functions.exec` / `functions.wait` only).
    - (ix) The sign-in process can bind port 1455 on any local address, not only 127.0.0.1 (SBPL's
      `localhost:1455` also matches `0.0.0.0`, measured; no narrower form held), for the few minutes
-     sign-in runs.
+     sign-in runs. The restart of every process after a successful sign-in (`#afterSignIn`, plan
+     re-review N-2) is unit-tested only: the owner-only live sign-in test was skipped, so that path is not
+     measured live. The sign-in process runs the version, config, layer and code-mode checks but not the
+     `CODEX_HOME` instruction-file, feature-list or MCP-status checks (it runs no turns; M4b).
    - (x) Not measured: Codex's unified logging and `RUST_LOG` output for relay tokens (I4 scanned files
      only); the thread model is re-checked only when a turn reports one. Codex's own command sandbox (its
      `sandbox-exec` nested in this profile) was not exercised: no `commandExecution` item started.
@@ -748,7 +769,7 @@ Independent review (all accepted unless noted):
 | `apply_patch` cannot be disabled (M1 finding) | three layers (§7.1.8): decline `fileChange` — observed in M1; read-only sandbox — covers command execution, not tested against an approved patch; runtime guard — design layer, tested in M4. Re-check for a removal key on each Codex upgrade |
 | Codex's `functions.exec`, `collaboration.*`, `request_user_input` (at least; list truncated) stay listed despite flags; exec calls don't surface as items (M1 finding) | M4a: code mode is required for MCP tools on a ChatGPT login, so `functions.exec` / `functions.wait` stay; everything else is closed down by config and the generated catalog, verified offline at every start (§7.1.1). Exec cells stay invisible to the guard; the exec-cell gate measures that a cell is a bare isolate (§7.1.9 (vi)) |
 | `experimentalFeature/list` shows `unified_exec` on while `config/read` shows it off (M1 finding) | self-check warns (§7.1.5); open: find out which one Codex obeys |
-| Can `codex app-server` run under Seatbelt? (approved design, §7.1.9) | M4a, measured: yes, under the profile in §7.1.9 (signed in, network to OpenAI, code mode). macOS refuses a second `sandbox-exec` inside any profile with a rule (exit 71), so Codex cannot start the jail: companiond launches it and Codex reaches it through the relay (§2, §7.2). Codex's own command sandbox (its `sandbox-exec` nested in ours) was not exercised: no `commandExecution` item started in any run. Residual risks: §7.1.9 |
+| Can `codex app-server` run under Seatbelt? (approved design, §7.1.9) | M4a, measured: yes, under the profile in §7.1.9 (signed in, network on TCP 443 to any non-local host (§7.1.9 (ii)), code mode). macOS refuses a second `sandbox-exec` inside any profile with a rule (exit 71), so Codex cannot start the jail: companiond launches it and Codex reaches it through the relay (§2, §7.2). Codex's own command sandbox (its `sandbox-exec` nested in ours) was not exercised: no `commandExecution` item started in any run. Residual risks: §7.1.9 |
 | Seatbelt profile tied to the local Node install (M1 finding) | compute exact Node prefixes at runtime, or bundle Node (M2) |
 | Plus rate limits | small deltas |
 | SpeechTranscriber assets missing for a locale | install with progress |
