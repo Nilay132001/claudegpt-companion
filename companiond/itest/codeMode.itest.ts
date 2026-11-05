@@ -22,6 +22,7 @@ import { SERVER_NAME } from "../src/jail/mcpServer.ts";
 import { SANDBOX_EXEC } from "../src/launch/seatbelt.ts";
 import { ensureRelayDirs, relayPaths } from "../src/relay/relayPaths.ts";
 import { MARK, makeRepo, removeTempDirs, tempDir } from "../test/helpers/fixtures.ts";
+import { controlRowOk } from "../test/helpers/gateEval.ts";
 import { startSession } from "./helpers/codeModeSession.ts";
 import { freshPaths, isSignedIn, ownPaths, skipUnless } from "./helpers/companion.ts";
 import { runExecCellGate } from "./helpers/execCellGate.ts";
@@ -166,7 +167,7 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
     }
     // Without the deny the same connects reach the network stack (ECONNREFUSED: nothing listens; OK: something does):
     // the deny is what blocks them. Any other errno (unreachable, EAI, …) makes the control say nothing, so it fails.
-    for (const [k] of localRows) assert.ok(["ECONNREFUSED", "OK"].includes(control[k] ?? "missing"), `control ${k}: ${String(control[k])}`);
+    for (const [k] of localRows) assert.ok(controlRowOk(control[k]), `control ${k}: ${String(control[k])}`);
     assert.equal(login.bindLoginPort, "OK");
     for (const k of ["bindOtherPort", "loopback443", "execSh"]) assert.match(login[k] ?? "missing", DENIED, `login ${k}`);
     // login.bindLoginPortAnyAddr is recorded: measured OK while planning (SBPL's localhost:1455 also matches 0.0.0.0).

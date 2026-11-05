@@ -1,9 +1,11 @@
-// The exec-cell gate's evaluators (itest/helpers/gateEval.ts): pure, no listener, no Codex. Every case here once
+// The exec-cell gate's evaluators (test/helpers/gateEval.ts): pure, no listener, no Codex. Every case here once
 // passed a bad cell (review fix round 2), so the gate must fail closed on each.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ALLOWED_NESTED } from "../../src/codex/codeMode.ts";
-import { cellSource, EXPECTED_KEYS, evaluateCell, execOutputs, judgeAttempt, parseCellOutput } from "../../itest/helpers/gateEval.ts";
+import {
+  cellSource, controlRowOk, EXPECTED_KEYS, evaluateCell, execOutputs, judgeAttempt, MUST_BE_UNDEFINED, parseCellOutput, runAttempts, type JudgedAttempt,
+} from "../helpers/gateEval.ts";
 
 const SRC = cellSource({ port: 1, homeCanary: "/h/.c.mjs", codexCanary: "/s/c.mjs", keychain: "/h/k", relaySocket: "/s/r.sock", decoySocket: "/t/d.sock" });
 
@@ -27,8 +29,10 @@ test("a fully clean result passes", () => {
 });
 
 test("the schema is exact: a global that exists, an extra key, a missing key, a load or import row out of range", () => {
-  assert.match(evaluateCell({ ...goodCell(), typeof_fetch: "function" }).join(), /typeof_fetch: function/);
-  assert.match(evaluateCell({ ...goodCell(), applyPatch: "function" }).join(), /applyPatch: function/);
+  assert.equal(MUST_BE_UNDEFINED.length, 15);
+  for (const k of MUST_BE_UNDEFINED) {
+    for (const v of ["function", "object", ""]) assert.deepEqual(evaluateCell({ ...goodCell(), [k]: v }), [`${k}: ${v}`], `${k} = ${JSON.stringify(v)}`);
+  }
   assert.match(evaluateCell({ ...goodCell(), surprise: "x" }).join(), /unexpected key surprise/);
   const { importHttps: _, ...missing } = goodCell();
   assert.match(evaluateCell(missing).join(), /importHttps is missing/);
@@ -82,4 +86,40 @@ test("only this thread's exec output counts, never the model's message", () => {
   assert.deepEqual(execOutputs(notes, "t1", SRC), { execCalls: 1, outputs: [line(goodCell())], problems: [] });
   assert.deepEqual(judgeAttempt(notes, "t1", SRC).open, []);
   assert.match(judgeAttempt([notes[3]!], "t1", SRC).open.join(), /0 exec calls/);
+});
+
+const judged = (execCalls: number, open: string[], lines = execCalls): JudgedAttempt => ({ cell: null, execCalls, lines, open });
+function scripted(results: JudgedAttempt[]) {
+  const calls: number[] = [];
+  return { calls, run: async (i: number) => { calls.push(i); return results[i] ?? judged(0, ["ran out"]); } };
+}
+
+test("retry rule: no exec call retries; an attempt with an exec call is final; every attempt's evidence is kept", async () => {
+  const retry = scripted([judged(0, ["0 exec calls"], 0), judged(1, [])]);
+  const r1 = await runAttempts(2, retry.run);
+  assert.deepEqual(retry.calls, [0, 1]);
+  assert.deepEqual(r1.last, judged(1, []));
+  assert.deepEqual(r1.attempts, [{ execCalls: 0, lines: 0, open: ["0 exec calls"] }, { execCalls: 1, lines: 1, open: [] }]);
+
+  const final = scripted([judged(1, ["typeof_fetch: function"]), judged(1, [])]);
+  const r2 = await runAttempts(2, final.run);
+  assert.deepEqual(final.calls, [0], "an open attempt with an exec call is not retried into a pass");
+  assert.deepEqual(r2.last?.open, ["typeof_fetch: function"]);
+  assert.equal(r2.attempts.length, 1);
+
+  const twoCalls = scripted([judged(2, ["2 exec calls"]), judged(1, [])]);
+  assert.deepEqual((await runAttempts(2, twoCalls.run)).last?.open, ["2 exec calls"]);
+  assert.deepEqual(twoCalls.calls, [0]);
+
+  const never = scripted([judged(0, ["a"], 0), judged(0, ["b"], 0), judged(1, [])]);
+  const r3 = await runAttempts(2, never.run);
+  assert.deepEqual(never.calls, [0, 1], "at most `max` attempts");
+  assert.deepEqual(r3.attempts.map((a) => a.open), [["a"], ["b"]]);
+  assert.deepEqual(r3.last?.open, ["b"]);
+  assert.deepEqual(await runAttempts(0, never.run), { last: null, attempts: [] });
+});
+
+test("probe control rows: only ECONNREFUSED or OK show the connect reached the network stack", () => {
+  for (const e of ["ECONNREFUSED", "OK"]) assert.equal(controlRowOk(e), true, e);
+  for (const e of ["EPERM", "EACCES", "ETIMEDOUT", "EAI", "OTHER", "ENOENT", "", undefined]) assert.equal(controlRowOk(e), false, String(e));
 });

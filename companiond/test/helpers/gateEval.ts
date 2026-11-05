@@ -1,5 +1,6 @@
-// The exec-cell gate's pure parts (review fix rounds 1–2): the cell source, and judging one attempt from app-server
-// notifications. No I/O, so test/codex/execCellGate.test.ts runs them hermetically. Everything fails closed:
+// The exec-cell gate's pure parts (review fix rounds 1–3): the cell source, judging one attempt from app-server
+// notifications, the retry rule and the probe's control-row rule. No I/O, so test/codex/execCellGate.test.ts runs
+// them hermetically; itest/helpers/execCellGate.ts and itest/codeMode.itest.ts use them. Everything fails closed:
 //  - exactly one exec call in the attempt, with a call id, whose input is the gate's source byte for byte;
 //  - exactly one well-formed `CGC_GATE {…}` line in that call's output (a flat object of strings, no duplicate key);
 //  - that object has exactly EXPECTED_KEYS, and every value is in its allowed set.
@@ -18,7 +19,8 @@ const IMPORT_ROWS = [...URL_ROWS, ...MODULES.map((m) => `import_${m}`)];
 const LOAD_ROWS = ["loadHomeCanary", "loadCodexHomeCanary"];
 const LOAD_ALLOWED = ["refused", "no-data"];
 const TYPEOF_ROWS = GLOBALS.map((k) => `typeof_${k}`);
-const MUST_BE_UNDEFINED = [...TYPEOF_ROWS, "applyPatch", "execCommand"];
+/** Rows whose only passing value is "undefined". */
+export const MUST_BE_UNDEFINED: readonly string[] = [...TYPEOF_ROWS, "applyPatch", "execCommand"];
 /** Exactly the keys of a complete cell result: a missing or an extra key is open. */
 export const EXPECTED_KEYS: readonly string[] = [...TYPEOF_ROWS, "importBaseline", ...IMPORT_ROWS, ...LOAD_ROWS, "applyPatch", "execCommand", "toolNames"];
 const INCONCLUSIVE = "(inconclusive, not a pass)";
@@ -137,8 +139,29 @@ export function execOutputs(notifications: readonly Seen[], threadId: string, sr
   return { execCalls: calls.length, outputs, problems };
 }
 
+export interface JudgedAttempt { cell: Record<string, string> | null; execCalls: number; lines: number; open: string[] }
+/** One turn's evidence: how many exec calls and CGC_GATE lines it had, and what was open. */
+export interface AttemptEvidence { execCalls: number; lines: number; open: string[] }
+
+/** The retry rule: a new attempt only while the model made no exec call at all; an attempt with any exec call is
+ * final. Every attempt's evidence is kept. `attempt` runs one turn and judges it (the only I/O, injected). */
+export async function runAttempts(max: number, attempt: (i: number) => Promise<JudgedAttempt>): Promise<{ last: JudgedAttempt | null; attempts: AttemptEvidence[] }> {
+  const attempts: AttemptEvidence[] = [];
+  let last: JudgedAttempt | null = null;
+  for (let i = 0; i < max && (last === null || last.execCalls === 0); i++) {
+    last = await attempt(i);
+    attempts.push({ execCalls: last.execCalls, lines: last.lines, open: [...last.open] });
+  }
+  return { last, attempts };
+}
+
+/** The probe's negative control (the profile minus the loopback deny): a row passes only if the connect reached the
+ * network stack — ECONNREFUSED (nothing listens) or OK (something does). Any other errno says nothing, so it fails. */
+export const CONTROL_ALLOWED: readonly string[] = ["ECONNREFUSED", "OK"];
+export const controlRowOk = (errno: string | undefined): boolean => errno !== undefined && CONTROL_ALLOWED.includes(errno);
+
 /** One attempt: its exec call and output must be exactly the gate's, then the cell result must match the schema. */
-export function judgeAttempt(notifications: readonly Seen[], threadId: string, src: string): { cell: Record<string, string> | null; execCalls: number; lines: number; open: string[] } {
+export function judgeAttempt(notifications: readonly Seen[], threadId: string, src: string): JudgedAttempt {
   const ex = execOutputs(notifications, threadId, src);
   const parsed = parseCellOutput(ex.outputs);
   if (ex.problems.length > 0) return { cell: null, execCalls: ex.execCalls, lines: parsed.lines, open: ex.problems };

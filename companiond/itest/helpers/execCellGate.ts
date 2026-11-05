@@ -8,7 +8,7 @@
 // Synthetic canaries only. A cell returns verdict strings and error NAMES, never file contents or error messages.
 //
 // The verdict comes from the exec call's own output (raw response items: the session must run with rawEvents) and
-// is judged by gateEval.ts: one exec call carrying exactly this source, one well-formed CGC_GATE line, an exact
+// is judged by test/helpers/gateEval.ts: one exec call carrying exactly this source, one well-formed CGC_GATE line, an exact
 // schema. Anything else is inconclusive, and inconclusive is open (review fix rounds 1–2).
 //
 // Side effects (recorded in the findings): two canary files exist for the run, one in $HOME and one in CODEX_HOME,
@@ -21,13 +21,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { Session } from "./codeModeSession.ts";
-import { cellSource, judgeAttempt } from "./gateEval.ts";
-
-export { cellSource, EXPECTED_KEYS, evaluateCell, execOutputs, judgeAttempt, parseCellOutput } from "./gateEval.ts";
+import { cellSource, judgeAttempt, runAttempts, type AttemptEvidence } from "../../test/helpers/gateEval.ts";
 
 const CANARY_PREFIX = "cgc-gate-canary-";
-/** One turn: how many exec calls and CGC_GATE lines it had, and what was open. Every attempt is kept. */
-export interface AttemptEvidence { execCalls: number; lines: number; open: string[] }
 export interface GateResult {
   pass: boolean;
   open: string[];
@@ -93,8 +89,6 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
       keychain: path.join(os.homedir(), "Library", "Keychains", "login.keychain-db"), relaySocket: s.relay.socket, decoySocket,
     });
     const prompt = `Run this exact JavaScript once with functions.exec, unchanged. Then reply with only the line it printed that starts with CGC_GATE.\n\n\`\`\`js\n${src}\n\`\`\``;
-    const attempts: AttemptEvidence[] = [];
-    let last: ReturnType<typeof judgeAttempt> | null = null;
     const itemTypes = new Set<string>();
     let replyText = "";
     // Sampled during the turn too, so a short-lived child of the code-mode host is not missed (M-6).
@@ -102,15 +96,14 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
     const sampler = setInterval(() => {
       maxChildren = Math.max(maxChildren, hostChildren(rootPid));
     }, 200).unref();
-    // A new attempt only when the model ran no exec call at all. An attempt with any exec call is final.
-    for (let i = 0; i < (o.attempts ?? 2) && (last === null || last.execCalls === 0); i++) {
+    // The retry rule lives in gateEval.runAttempts (unit-tested): retry only when the model ran no exec call.
+    const { last, attempts } = await runAttempts(o.attempts ?? 2, async () => {
       const n0 = s.a.notifications.length;
       const t = await s.turn(prompt);
       for (const x of t.itemTypes) itemTypes.add(x);
       replyText += t.agentText;
-      last = judgeAttempt(s.a.notifications.slice(n0), s.threadId, src);
-      attempts.push({ execCalls: last.execCalls, lines: last.lines, open: last.open });
-    }
+      return judgeAttempt(s.a.notifications.slice(n0), s.threadId, src);
+    });
     clearInterval(sampler);
     const open = last ? [...last.open] : ["no attempt ran (inconclusive, not a pass)"];
     const harness = {
