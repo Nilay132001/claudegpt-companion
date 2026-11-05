@@ -2,14 +2,17 @@
 // CODEX_HOME, which the owner has already signed in. Never signs in, never acknowledges a security stop, never reads
 // or prints a credential, and prints short status lines only: no reply text, no transcript text, no session title,
 // no paths.
-// Usage: cd companiond && node --disable-warning=ExperimentalWarning scripts/smoke-daemon.ts [--approve <repo root>] [--include-context]
+// Usage: cd companiond && node --disable-warning=ExperimentalWarning scripts/smoke-daemon.ts [--approve <repo root>] [--session <id>] [--include-context]
 //   --approve          approves that root for this run (revoked at the end if this run added it)
+//   --session          pins that Claude session for this run instead of using the app's current selection; the
+//                      previous pin (or none) is restored at the end. The session must be listed and must sit in an
+//                      approved repo (the run checks this before anything is sent).
 //   --include-context  keeps the owner's sharing mode, so Claude context (title, items, notes) is sent. Without it the
 //                      run sets sharing to Off, so only the repository line and the fixed question leave the Mac.
 //                      In Ask mode the send is confirmed (chat.send confirmed: true): passing this flag is the owner's
 //                      confirmation for this run.
 // Whatever happens (try/finally, also on Ctrl-C / SIGTERM), the run restores the sharing mode, revokes an approval
-// it added, stops the daemon and restores the selected session's stored thread id and cursor in companion.db, so the
+// it added, restores the pin it changed, stops the daemon and restores the selected session's stored thread id and cursor in companion.db, so the
 // owner's next real question uses the same thread and sees the same preview as before. If the session already had a
 // thread, the smoke's question and reply stay in that thread's Codex history, and GPT sees them on the next question.
 // The daemon runs in its own process group, so a terminal Ctrl-C reaches only this script. A second Ctrl-C ends
@@ -30,6 +33,8 @@ const QUESTION = "Using the repository tools, name one file in this repository a
 const args = process.argv.slice(2);
 const approveAt = args.indexOf("--approve");
 const approveRoot = approveAt >= 0 ? args[approveAt + 1] : undefined;
+const sessionAt = args.indexOf("--session");
+const sessionArg = sessionAt >= 0 ? args[sessionAt + 1] : undefined;
 const includeContext = args.includes("--include-context");
 const say = (line: string) => process.stdout.write(`${line}\n`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -38,6 +43,10 @@ class SmokeError extends Error {}
 
 if (approveAt >= 0 && (!approveRoot || approveRoot.startsWith("--"))) {
   say("usage: --approve needs a repo root");
+  process.exit(1);
+}
+if (sessionAt >= 0 && (!sessionArg || sessionArg.startsWith("--"))) {
+  say("usage: --session needs a session id");
   process.exit(1);
 }
 
@@ -145,6 +154,8 @@ function restoreRows(s: Saved): void {
 let added: string | null = null;
 let restoreMode: string | null = null;
 let saved: Saved | null = null;
+/** The pin before this run changed it (`sessionId` null = follow focus); null when the run did not change the pin. */
+let prevPin: { sessionId: string | null } | null = null;
 /** Set when the run is being wound down (Ctrl-C, SIGTERM): run() makes no further daemon calls. */
 let stopping = false;
 const rpc = (method: string, params: unknown = {}): Promise<any> =>
@@ -178,7 +189,20 @@ async function run(): Promise<number> {
   say(`sharing: ${includeContext ? privacy.sharingMode : "off"} for this run`);
   await rpc("sessions.refresh");
   const snap = await rpc("sessions.snapshot");
-  const sessionId: string | null = snap.selection.sessionId;
+  let sessionId: string | null = snap.selection.sessionId;
+  if (sessionArg) {
+    if (!snap.sessions.some((s: any) => s.sessionId === sessionArg)) {
+      say("session: not listed");
+      return 1;
+    }
+    const current: string | null = snap.selection.via === "pin" ? snap.selection.sessionId : null;
+    if (current !== sessionArg) {
+      prevPin = { sessionId: current }; // set before the call, so an interrupted pin is still undone
+      await rpc("sessions.pin", { sessionId: sessionArg });
+      say("pin: set for this run");
+    }
+    sessionId = sessionArg;
+  }
   if (!sessionId) {
     say("session: none selected");
     return 1;
@@ -247,6 +271,8 @@ try {
   };
   if (restoreMode) await call("privacy.setSharingMode", { mode: restoreMode }).then(() => say("sharing: restored"), failed("sharing: NOT restored"));
   if (added) await call("privacy.revoke", { root: added }).then(() => say("approval: revoked"), failed("approval: NOT revoked"));
+  const pin = prevPin as { sessionId: string | null } | null; // set inside run(); TS narrows the module let to null
+  if (pin) await call("sessions.pin", { sessionId: pin.sessionId }).then(() => say("pin: restored"), failed("pin: NOT restored"));
   await call("daemon.shutdown").catch(() => undefined);
   await Promise.race([exited, sleep(10_000)]);
   if (!dead) child.kill();
