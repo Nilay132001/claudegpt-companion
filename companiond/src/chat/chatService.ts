@@ -242,19 +242,30 @@ export class ChatService {
 
   /** "New chat": the next question starts a new Codex thread. The old conversation stays in history. */
   async newChat(sessionId: string): Promise<void> {
-    await this.#queued(sessionId, async () => {
+    const check = () => {
       const busy = this.#sending.has(sessionId)
         || [...this.#inFlight].some((id) => this.#prepared.get(id)?.sessionId === sessionId)
         || [...this.#pending.values()].some((p) => p.sessionId === sessionId);
       const threadId = this.#d.store.getThread(sessionId);
       if (busy || (threadId !== null && this.#d.host.activeTurn(threadId) !== null)) throw new TurnBusyError();
+    };
+    check(); // refuse now: a queued send would otherwise hold this call behind it
+    await this.#queued(sessionId, async () => {
+      check();
       const o = this.#open.get(sessionId);
       if (o) await this.#close(sessionId, o);
       this.#d.store.clearThread(sessionId);
       this.#d.store.clearCursor(sessionId);
       this.#repoNotes.delete(sessionId);
       this.#subagents.delete(sessionId);
+      // An unsent prepare of the old chat must not restore the old cursor into the new one.
+      for (const [id, p] of this.#prepared) if (p.sessionId === sessionId && !this.#inFlight.has(id)) this.#prepared.delete(id);
     });
+  }
+
+  /** Test aid: how many turns have a reply buffer. */
+  answerBufferCount(): number {
+    return this.#answers.size;
   }
 
   /** Turns CodexHost no longer runs although no turn/completed came (sign-in replaced every process, the host

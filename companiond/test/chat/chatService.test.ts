@@ -500,3 +500,63 @@ test("newChat: clears thread and cursor, closes the open thread, refuses while a
   assert.notEqual(b.threadId, a.threadId);
   assert.deepEqual(chat.sent("s1").map((r) => r.question), ["again"]);
 });
+
+test("newChat drops the session's unsent prepares", async () => {
+  const { chat } = setup();
+  const stale = await chat.prepare("s1", "old");
+  const other = await chat.prepare("s2", "other");
+  await chat.newChat("s1");
+  await assert.rejects(chat.send(stale.prepareId, []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_expired");
+  assert.equal(chat.needsConfirm(other.prepareId), true); // another session's prepare is untouched
+});
+
+test("newChat refuses while a send is in flight", async () => {
+  const { chat, h } = setup();
+  let release!: () => void;
+  h.setStartGate(new Promise<void>((r) => { release = r; }));
+  const p = await chat.prepare("s1", "q");
+  const sending = chat.send(p.prepareId, []);
+  await new Promise((r) => setImmediate(r));
+  await assert.rejects(chat.newChat("s1"), (e: unknown) => e instanceof TurnBusyError);
+  release();
+  await sending;
+});
+
+test("newChat clears the repo note and the subagent tracker", async () => {
+  const { chat } = setup();
+  chat.noteRepoChange("s1", "Repository changed from /a to /r");
+  chat.noteSubagent("s1", { agentId: "a1", summary: "SYNTHETIC FIXTURE agent one", records: 3 });
+  await chat.newChat("s1");
+  const p = await chat.prepare("s1", "q");
+  assert.equal(p.repoNote, null);
+  assert.equal(p.preview?.items.some((i) => i.kind === "subagent"), false);
+});
+
+test("history: an oversized reply is cut at 64 KB", async () => {
+  const { chat, store, h } = setup();
+  const { threadId, turnId } = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  h.emit(delta(threadId, turnId, "a", "x".repeat(70 * 1024)));
+  h.emit(delta(threadId, turnId, "a", "more"));
+  h.complete(threadId, turnId);
+  assert.equal(store.turnsForThread(threadId)[0]?.answer.length, 64 * 1024);
+});
+
+test("history: foreign turns keep at most 32 reply buffers", async () => {
+  const { chat, h } = setup();
+  for (let i = 0; i < 40; i++) h.emit(delta("thr-x", `foreign-${i}`, "a", "t"));
+  assert.ok(chat.answerBufferCount() <= 32);
+});
+
+test("history: deltas that arrive before turn/start answers land in the answer", async () => {
+  const { chat, store, h } = setup();
+  let release!: () => void;
+  h.setStartGate(new Promise<void>((r) => { release = r; }));
+  const sending = chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  await new Promise((r) => setImmediate(r));
+  h.emit(delta("thr-1", "turn-1", "a", "early "));
+  release();
+  const { threadId, turnId } = await sending;
+  h.emit(delta(threadId, turnId, "a", "late"));
+  h.complete(threadId, turnId);
+  assert.equal(store.turnsForThread(threadId)[0]?.answer, "early late");
+});
