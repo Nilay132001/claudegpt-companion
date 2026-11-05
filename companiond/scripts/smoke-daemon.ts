@@ -8,10 +8,14 @@
 //                      run sets sharing to Off, so only the repository line and the fixed question leave the Mac.
 //                      In Ask mode the send is confirmed (chat.send confirmed: true): passing this flag is the owner's
 //                      confirmation for this run.
-// Whatever happens (try/finally), the run restores the sharing mode, revokes an approval it added, stops the daemon
-// and restores the selected session's stored thread id and cursor in companion.db, so the owner's next real
-// question sees the same thread and preview as before.
-// Exit 0 = turn completed, no security alert, repo unchanged. 2 = not signed in. 1 = anything else.
+// Whatever happens (try/finally, also on Ctrl-C / SIGTERM), the run restores the sharing mode, revokes an approval
+// it added, stops the daemon and restores the selected session's stored thread id and cursor in companion.db, so the
+// owner's next real question uses the same thread and sees the same preview as before. If the session already had a
+// thread, the smoke's question and reply stay in that thread's Codex history, and GPT sees them on the next question.
+// The daemon runs in its own process group, so a terminal Ctrl-C reaches only this script. A second Ctrl-C ends
+// the script at once; the daemon then shuts down when its stdin closes.
+// Exit 0 = turn completed, no security alert, repo unchanged, everything restored. 2 = not signed in. 1 = anything
+// else, including a failed restore.
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -32,22 +36,49 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 class SmokeError extends Error {}
 
+if (approveAt >= 0 && (!approveRoot || approveRoot.startsWith("--"))) {
+  say("usage: --approve needs a repo root");
+  process.exit(1);
+}
+
+// Ctrl-C / SIGTERM rejects this promise; run() is raced against it so the finally below still restores everything.
+let onSignal: (name: string) => void = () => undefined;
+const interrupted = new Promise<never>((_, rej) => {
+  onSignal = (name) => rej(new SmokeError(`interrupted (${name})`));
+});
+interrupted.catch(() => undefined);
+process.once("SIGINT", () => onSignal("SIGINT"));
+process.once("SIGTERM", () => onSignal("SIGTERM"));
+
 const main = fileURLToPath(new URL("../src/daemon/main.ts", import.meta.url));
 // stderr is dropped: the daemon writes short codes there, but the smoke output stays status-only.
-const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", main], { stdio: ["pipe", "pipe", "ignore"] });
+// detached: its own process group, so a terminal Ctrl-C does not reach it; the finally below shuts it down.
+const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", main], { stdio: ["pipe", "pipe", "ignore"], detached: true });
 const lb = new LineBuffer();
 const waiters = new Map<number, (m: any) => void>();
 const events: any[] = [];
 let dead = false;
-const exited = new Promise<void>((res) => child.on("exit", () => {
+let markExited: () => void = () => undefined;
+const exited = new Promise<void>((res) => {
+  markExited = res;
+});
+const onGone = () => {
   dead = true;
   for (const w of waiters.values()) w({ error: { code: "exited" } });
-  res();
-}));
+  markExited();
+};
+child.on("exit", onGone);
+child.on("error", onGone); // spawn failed: there will be no exit event
+child.stdin.on("error", () => undefined); // EPIPE when the daemon dies mid-write; its exit event ends the waiters
 child.stdout.on("data", (c: Buffer) => {
   for (const l of lb.push(c)) {
-    const m = JSON.parse(l);
-    if (m.id !== undefined) waiters.get(m.id)?.(m);
+    let m: any;
+    try {
+      m = JSON.parse(l);
+    } catch {
+      continue; // not a protocol line; the daemon writes only JSON on stdout
+    }
+    if (m?.id !== undefined) waiters.get(m.id)?.(m);
     else events.push(m);
   }
 });
@@ -100,7 +131,11 @@ function restoreRows(s: Saved): void {
     if (s.cursor) db.prepare("INSERT INTO cursors (session_id, uuid, updated_at) VALUES (?, ?, ?)").run(s.sessionId, String(s.cursor.uuid), Number(s.cursor.updated_at));
     db.exec("COMMIT");
   } catch (e) {
-    db.exec("ROLLBACK");
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // BEGIN itself failed: nothing to roll back; report the original error.
+    }
     throw e;
   } finally {
     db.close();
@@ -110,54 +145,59 @@ function restoreRows(s: Saved): void {
 let added: string | null = null;
 let restoreMode: string | null = null;
 let saved: Saved | null = null;
+/** Set when the run is being wound down (Ctrl-C, SIGTERM): run() makes no further daemon calls. */
+let stopping = false;
+const rpc = (method: string, params: unknown = {}): Promise<any> =>
+  stopping ? Promise.reject(new SmokeError(`${method}: stopped`)) : call(method, params);
 
 async function run(): Promise<number> {
-  await call("daemon.hello", { protocolVersion: 1 });
-  let host = await call("host.status");
+  await rpc("daemon.hello", { protocolVersion: 1 });
+  let host = await rpc("host.status");
   for (let i = 0; i < 240 && (host.state === "starting" || host.state === "stopped"); i++) {
     await sleep(500);
-    host = await call("host.status");
+    host = await rpc("host.status");
   }
   const security = host.state === "failed" && String(host.detail).startsWith("Security check failed");
   say(`host: ${host.state}${security ? " (security check failed; not acknowledged by this script)" : ""}`);
   if (host.state !== "ready") return 1;
-  const auth = (await call("auth.status")).state;
+  const auth = (await rpc("auth.status")).state;
   say(`auth: ${auth}`);
   if (auth !== "signed_in") return 2;
 
-  const privacy = await call("privacy.get");
+  const privacy = await rpc("privacy.get");
   if (approveRoot) {
     const root = fs.realpathSync.native(path.resolve(approveRoot));
     const known = privacy.approvals.some((a: any) => a.root === root);
-    if (!known) added = (await call("privacy.approve", { root, includeWorktrees: true })).root;
+    if (!known) added = (await rpc("privacy.approve", { root, includeWorktrees: true })).root;
     say(`approval: ${known ? "already approved" : "added for this run"}`);
   }
   if (!includeContext && privacy.sharingMode !== "off") {
     restoreMode = privacy.sharingMode;
-    await call("privacy.setSharingMode", { mode: "off" });
+    await rpc("privacy.setSharingMode", { mode: "off" });
   }
   say(`sharing: ${includeContext ? privacy.sharingMode : "off"} for this run`);
-  await call("sessions.refresh");
-  const snap = await call("sessions.snapshot");
+  await rpc("sessions.refresh");
+  const snap = await rpc("sessions.snapshot");
   const sessionId: string | null = snap.selection.sessionId;
   if (!sessionId) {
     say("session: none selected");
     return 1;
   }
   saved = saveRows(sessionId);
-  const wt = await call("sessions.worktree", { sessionId });
+  const wt = await rpc("sessions.worktree", { sessionId });
   const root: string | null = wt?.kind === "resolved" ? wt.root : null;
   const before = root ? gitState(root) : null;
 
-  const p = await call("chat.prepare", { sessionId, question: QUESTION });
+  const p = await rpc("chat.prepare", { sessionId, question: QUESTION });
   say(`repo: ${p.repo.state} | mode: ${p.mode} | items: ${p.preview?.items.length ?? 0} | bytes: ${p.preview?.bytes ?? 0} | notes: ${p.preview?.notes.length ?? 0}`);
   // Ask mode (only with --include-context) needs confirmed: true; the flag is the owner's confirmation for this run.
-  const { turnId } = await call("chat.send", { prepareId: p.prepareId, removeItemIds: [], confirmed: p.needsConfirm === true });
+  const { turnId } = await rpc("chat.send", { prepareId: p.prepareId, removeItemIds: [], confirmed: p.needsConfirm === true });
   let done: any = null;
-  for (let i = 0; i < 600 && !done; i++) {
+  for (let i = 0; i < 600 && !done && !stopping; i++) {
     await sleep(500);
     done = events.find((e) => e.method === "chat.turnCompleted" && e.params.turnId === turnId);
   }
+  if (stopping) throw new SmokeError("stopped");
   const reply = events.filter((e) => e.method === "chat.delta" && e.params.turnId === turnId).map((e) => e.params.text).join("");
   const tools = events.filter((e) => e.method === "chat.item" && e.params.turnId === turnId && e.params.phase === "completed" && e.params.item.type === "mcpToolCall").length;
   const alerts = events.filter((e) => e.method === "security.alert").map((e) => e.params.kind);
@@ -168,14 +208,24 @@ async function run(): Promise<number> {
 }
 
 let code = 1;
+const running = run();
+running.catch(() => undefined); // after an interrupt its rejection is not awaited by the race
 try {
-  code = await run();
+  code = await Promise.race([running, interrupted]);
 } catch (e) {
   say(`error: ${e instanceof SmokeError ? e.message : e instanceof Error ? e.name : "unknown"}`);
   code = 1;
 } finally {
-  if (restoreMode) await call("privacy.setSharingMode", { mode: restoreMode }).then(() => say("sharing: restored"), () => say("sharing: NOT restored"));
-  if (added) await call("privacy.revoke", { root: added }).then(() => say("approval: revoked"), () => say("approval: NOT revoked"));
+  // After an interrupt, let the call in flight finish (bounded) so an approval or mode change it made is known
+  // (added, restoreMode) and undone below; run() makes no further calls.
+  stopping = true;
+  await Promise.race([running.catch(() => undefined), sleep(15_000)]);
+  const failed = (line: string) => () => {
+    say(line);
+    code = 1;
+  };
+  if (restoreMode) await call("privacy.setSharingMode", { mode: restoreMode }).then(() => say("sharing: restored"), failed("sharing: NOT restored"));
+  if (added) await call("privacy.revoke", { root: added }).then(() => say("approval: revoked"), failed("approval: NOT revoked"));
   await call("daemon.shutdown").catch(() => undefined);
   await Promise.race([exited, sleep(10_000)]);
   if (!dead) child.kill();

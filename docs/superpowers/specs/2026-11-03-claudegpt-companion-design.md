@@ -599,12 +599,15 @@ output before it reaches Codex.
     *M4b:* Ask confirms every send, because the session title is always sent outside Off; the preview shows
     the title as it will be sent.
   - *Automatic* — sends the delta without asking.
-- **Confirm and stale prepares (M4b).** `chat.send` takes `confirmed`. In Ask mode, or when the daemon does
-  not know the prepare and the mode is Ask, a send without `confirmed: true` is refused with
-  `confirmRequired` (1011) before anything is sent, and the prepare stays usable. Send re-checks the sharing
-  mode (and revokes) right before the turn starts; if either changed since the preview, it refuses with
-  `prepareStale` (1010) and the app prepares again, so switching to Off before pressing Send sends nothing
-  from the session. A prepare is used up only when its turn starts: after `hostBusy` (1009), `turnBusy` or
+- **Confirm and stale prepares (M4b).** `chat.send` takes `confirmed`. When the prepare was made in Ask, or
+  the daemon does not know the prepare and the current mode is Ask, a send without `confirmed: true` is
+  refused with `confirmRequired` (1011) before anything is sent, and the prepare stays usable. This check
+  runs first. Send then re-checks the sharing mode, at its start and again right before the turn starts; if
+  the mode changed since the prepare, it refuses with `prepareStale` (1010) and the app prepares again, so
+  switching to Off before pressing Send sends nothing from the session. An approval change is not checked
+  against the prepare: the repository line is re-read at send, a revoked root is refused at bind time
+  (`isApproved`), and a revoke while the send is in progress (before its turn starts) also ends it with
+  `prepareStale`. An added approval never makes a prepare stale. A prepare is used up only when its turn starts: after `hostBusy` (1009), `turnBusy` or
   `hostNotReady` the same prepare can be sent again until it expires (10 min).
 - **Cursor (M4b).** The cursor advances to the newest record in the previewed delta, including transcript
   items the user removed: removed transcript items are not offered again (the user saw and declined them).
@@ -656,7 +659,8 @@ message bodies or tokens.
   - Ask mode: every prepare needs the preview sheet (title as sent, repo line, notes, items with remove
     toggles); Send passes `confirmed: true`. Without it the daemon refuses with `confirmRequired` (1011)
     and the same prepare can be confirmed and sent (§7.5).
-  - `prepareStale` (1010): sharing or an approval changed since the preview; prepare again (and re-confirm).
+  - `prepareStale` (1010): the sharing mode changed since the preview, or an approval was revoked while the
+    send was in progress; prepare again (and re-confirm).
     `hostBusy` (1009, "Too many … busy"): shown as "try again later"; the same prepared message can be sent
     again, as after `turnBusy` and `hostNotReady`.
   - A "Security check failed" stop stays until the owner presses Acknowledge
