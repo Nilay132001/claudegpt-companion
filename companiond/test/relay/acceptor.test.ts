@@ -1,6 +1,6 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
@@ -264,6 +264,18 @@ test("a validator that crashes or exits with an unknown code ends the binding as
   }
 });
 
+test("a jail that cannot spawn plus a validator spawn that throws reports error and never signals the process group (review 7)", async () => {
+  // Detached = its own process group, so a kill(0) regression kills only the child, never the test runner.
+  const child = spawn(process.execPath, [fileURLToPath(new URL("./pidlessChild.ts", import.meta.url))], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (c: Buffer) => { out += c.toString("utf8"); });
+  const exit = new Promise<{ code: number | null; signal: string | null }>((r) => child.on("exit", (code, signal) => r({ code, signal })));
+  const res = await Promise.race([exit, sleep(15_000).then(() => "timeout" as const)]);
+  if (res === "timeout") process.kill(-(child.pid as number), "SIGKILL");
+  assert.deepEqual(res, { code: 0, signal: null });
+  assert.equal(out.trim(), "RESULT error");
+});
+
 test("a grant revoked between the proof match and the bind is never bound (review 1)", async () => {
   const { a, events, rp } = await start();
   const g = a.grant(jail());
@@ -284,7 +296,8 @@ test("a grant revoked between the proof match and the bind is never bound (revie
     assert.equal(a.counts.grants, 0, "the grant is matched");
     g.revoke();
     const c = await pending;
-    await c.closed;
+    // Bounded: if the grant were bound, the connection would stay open and this must fail, not hang.
+    assert.notEqual(await Promise.race([c.closed.then(() => "closed"), sleep(2000).then(() => "open")]), "open", "the connection was closed");
   } finally {
     net.Socket.prototype.write = realWrite;
   }

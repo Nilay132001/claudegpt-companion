@@ -57,6 +57,14 @@ async function removeStaleSocket(p: string): Promise<void> {
   fs.unlinkSync(p);
 }
 
+/** SIGKILLs a child that is running. A child whose spawn failed has no pid yet, and kill() on it would signal pid 0:
+ * companiond's own process group. Returns whether a signal was sent. */
+function killChild(p: ChildProcess): boolean {
+  if (p.pid === undefined || p.exitCode !== null || p.signalCode !== null) return false;
+  p.kill("SIGKILL");
+  return true;
+}
+
 export class RelayAcceptor implements RelayBroker {
   #o: AcceptorOptions;
   #server: net.Server | null = null;
@@ -217,8 +225,9 @@ export class RelayAcceptor implements RelayBroker {
         }
         // pause() does not stop libuv reads, so a client that sent bytes before the validator's OK would leave them
         // in companiond's buffer. The real relay sends nothing before OK: anything here is a violation (M-8).
-        if (err || s.readableLength > 0 || !this.#inodeOk()) {
-          const replaced = !err && !this.#inodeOk();
+        const inodeOk = this.#inodeOk();
+        if (err || s.readableLength > 0 || !inodeOk) {
+          const replaced = !err && !inodeOk;
           s.destroy();
           this.#emit({ type: "closed", grantId: g.id, end: err ? "dropped" : "violation" });
           if (replaced) this.#replaced();
@@ -249,7 +258,10 @@ export class RelayAcceptor implements RelayBroker {
       s.destroy();
       jail?.stdin?.destroy();
       jail?.stdout?.destroy();
-      jail?.kill("SIGKILL");
+      if (jail) {
+        jail.on("error", () => {}); // a failed spawn reports on a later tick; unhandled, that would crash companiond
+        killChild(jail);
+      }
       this.#emit({ type: "closed", grantId: g.id, end: "error" });
     };
     // spawn() can throw (a bad argument, no fds left): that must end this one binding, not the acceptor.
@@ -282,25 +294,20 @@ export class RelayAcceptor implements RelayBroker {
       this.#bound.delete(g.id);
       this.#emit({ type: "closed", grantId: g.id, end: b.revoked ? "revoked" : e });
     };
-    const alive = (p: ChildProcess) => p.exitCode === null && p.signalCode === null;
-    jail.on("error", () => {
-      if (alive(validator)) validator.kill("SIGKILL");
-    });
+    jail.on("error", () => killChild(validator));
     jail.on("exit", () => {
       // A jail that exits on a clean EOF is normal: the validator sees its stdout end and exits on its own.
       // Only a validator that is still there after a short grace period is killed.
       setTimeout(() => {
-        if (!alive(validator)) return;
-        killedAfterJail = true;
-        validator.kill("SIGKILL");
+        if (killChild(validator)) killedAfterJail = true;
       }, 2000).unref();
     });
     validator.on("error", () => {
-      if (alive(jail)) jail.kill("SIGKILL");
+      killChild(jail);
       end("error");
     });
     validator.on("exit", (code) => {
-      if (alive(jail)) jail.kill("SIGKILL");
+      killChild(jail);
       // A signal death or an unknown code is how an attack on the parser looks: never a silent rebind (I-2).
       const mapped = code !== null ? END_BY_EXIT.get(code) : undefined;
       end(mapped ?? (killedAfterJail ? "jail" : "violation"));
@@ -319,8 +326,8 @@ export class RelayAcceptor implements RelayBroker {
     const b = this.#bound.get(id);
     if (!b) return;
     b.revoked = true;
-    b.validator.kill("SIGKILL");
-    b.jail.kill("SIGKILL");
+    killChild(b.validator);
+    killChild(b.jail);
   }
 
   #inodeOk(): boolean {
