@@ -87,7 +87,7 @@ class FakeHost implements DaemonHost {
   }
 }
 
-function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: string) => void; mode?: "off" | "ask" | "automatic" } = {}) {
+function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: string) => void; mode?: "off" | "ask" | "automatic"; inspectable?: boolean } = {}) {
   const store = Store.memory();
   const root = tempDir(); // an approved synthetic root (the bridge resolves the session to it)
   store.putApproval({ root, commonDir: `${root}/.git`, includeWorktrees: false, approvedAt: 1 });
@@ -103,7 +103,7 @@ function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: strin
     on: (l) => { bridgeListeners.add(l); return () => { bridgeListeners.delete(l); }; },
   };
   const host = o.host ?? new DisabledHost("off");
-  const privacy = new Privacy(store, { inspect: async () => { throw new Error("nope"); } }, tempDir());
+  const privacy = new Privacy(store, { inspect: async (dir) => { if (!o.inspectable) throw new Error("nope"); return { toplevel: dir, gitDir: `${dir}/.git`, commonDir: `${dir}/.git` }; } }, tempDir());
   const chat = new ChatService({
     host, bridge, store, sharingMode: () => privacy.sharingMode(), isApproved: privacy.isApproved,
     launchFor: async (r) => ({ command: "/usr/bin/sandbox-exec", args: ["-p", r], env: {}, cwd: r }),
@@ -304,6 +304,53 @@ test("revoke: a thread whose reply is stuck keeps its grant only until the deadl
   assert.equal(host.starts, 1);
   assert.equal(host.state().state, "ready");
   assert.ok(logs.includes("revoke_forced_restart"));
+});
+
+test("an unknown prepare in Ask mode is refused without confirmation (fails closed)", async () => {
+  const x = deps({ host: new FakeHost() });
+  const h = buildHandlers(x.d);
+  await assert.rejects(h["chat.send"]!({ prepareId: "evicted-or-never-made", removeItemIds: [] }), (e: any) => toDaemonError(e).code === ErrorCodes.confirmRequired);
+  // with the flag it reaches ChatService, which reports the prepare as expired
+  await assert.rejects(h["chat.send"]!({ prepareId: "evicted-or-never-made", removeItemIds: [], confirmed: true }), (e: any) => toDaemonError(e).code === ErrorCodes.prepareExpired);
+});
+
+test("revoke: a new thread opened in the window does not trigger the restart; the threads that were stuck closing do not either", async () => {
+  const host = new FakeHost();
+  const logs: string[] = [];
+  const x = deps({ host, log: (c) => logs.push(c), revokeDeadlineMs: 40, inspectable: true });
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
+  const realClose = host.closeThread.bind(host);
+  host.closeThread = async () => { throw new TurnBusyError(); };
+  assert.equal(((await h["privacy.revoke"]!({ root: x.root })) as any).pendingClose, 1);
+  // the stuck reply ends and its thread closes; the owner approves again and a new thread opens on that root
+  host.closeThread = realClose;
+  await x.d.chat.closeSession("s1");
+  await h["privacy.approve"]!({ root: x.root, includeWorktrees: false });
+  host.openThread = async () => "thr-other";
+  const p2: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p2.prepareId, removeItemIds: [], confirmed: true });
+  assert.deepEqual(x.d.chat.boundThreadIds(), ["thr-other"]);
+  await new Promise((res) => setTimeout(res, 120));
+  assert.equal(host.starts, 0);
+  assert.deepEqual(logs, []);
+});
+
+test("revoke: the timer does not stop or start a host that is not ready", async () => {
+  const host = new FakeHost();
+  const logs: string[] = [];
+  const x = deps({ host, log: (c) => logs.push(c), revokeDeadlineMs: 20 });
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
+  host.closeThread = async () => { throw new TurnBusyError(); };
+  await h["privacy.revoke"]!({ root: x.root });
+  host.set({ state: "starting" });
+  await new Promise((res) => setTimeout(res, 80));
+  assert.equal(host.starts, 0);
+  assert.equal(host.state().state, "starting");
+  assert.deepEqual(logs, ["revoke_restart_skipped"]);
 });
 
 test("revoke: no restart when the threads closed", async () => {

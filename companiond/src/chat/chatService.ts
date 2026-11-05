@@ -249,8 +249,19 @@ export class ChatService {
   }
 
   /** Root-bound threads still open (a deferred close waits for its turn to end). */
-  boundOpenCount(): number {
-    return [...this.#open.values()].filter((o) => o.root !== null).length;
+  boundThreadIds(): string[] {
+    return [...this.#open.values()].filter((o) => o.root !== null).map((o) => o.threadId);
+  }
+
+  /** True while a thread this run opened is still open. */
+  isOpen(threadId: string): boolean {
+    for (const o of this.#open.values()) if (o.threadId === threadId) return true;
+    return false;
+  }
+
+  /** Whether the prepare needs the owner's confirmation: null when the prepare is unknown (expired or never made). */
+  needsConfirm(prepareId: string): boolean | null {
+    return this.#prepared.get(prepareId)?.needsConfirm ?? null;
   }
 
   /** Sessions this run opened a thread for. */
