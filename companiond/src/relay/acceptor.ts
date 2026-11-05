@@ -218,6 +218,8 @@ export class RelayAcceptor implements RelayBroker {
       this.#matched.set(g.id, mark);
       s.write(`${proof(g.token, nonce, "reader")}\n`, (err) => {
         this.#matched.delete(g.id);
+        const secret = g.secret;
+        g.secret = null; // every path below but the bind drops the grant; the bind gets the secret back
         if (mark.revoked) {
           // Revoked (or the socket replaced) between the match and the bind: never bind it.
           s.destroy();
@@ -234,7 +236,7 @@ export class RelayAcceptor implements RelayBroker {
           if (replaced) this.#replaced();
           return;
         }
-        this.#bind(s, g);
+        this.#bind(s, g, secret);
       });
     };
     s.on("data", onData);
@@ -253,7 +255,7 @@ export class RelayAcceptor implements RelayBroker {
     return hit;
   }
 
-  #bind(s: net.Socket, g: Grant): void {
+  #bind(s: net.Socket, g: Grant, secret: string | null): void {
     const l = g.launch;
     const fail = (jail?: ChildProcess): void => {
       s.destroy();
@@ -266,9 +268,7 @@ export class RelayAcceptor implements RelayBroker {
       this.#emit({ type: "closed", grantId: g.id, end: "error" });
     };
     // spawn() can throw (a bad argument, no fds left): that must end this one binding, not the acceptor.
-    // The secret leaves the grant before the spawn: companiond holds it no longer than this call needs.
-    const secret = g.secret;
-    g.secret = null;
+    // The secret left the grant at the match callback: companiond holds it no longer than this call needs.
     let jail: ChildProcess;
     try {
       jail = spawn(l.command, l.args, { env: l.env, cwd: l.cwd, stdio: secret === null ? ["pipe", "pipe", "ignore"] : ["pipe", "pipe", "ignore", "pipe"] });
@@ -330,6 +330,8 @@ export class RelayAcceptor implements RelayBroker {
   }
 
   #revoke(id: string): void {
+    const g = this.#grants.get(id);
+    if (g) g.secret = null; // a dead grant keeps no secret (final review)
     this.#grants.delete(id);
     const m = this.#matched.get(id);
     if (m) m.revoked = true;
@@ -354,7 +356,11 @@ export class RelayAcceptor implements RelayBroker {
    * restored between two checks is not detected (spec residual risk). */
   #sweep(): void {
     const now = Date.now();
-    for (const [id, g] of this.#grants) if (g.expires <= now) this.#grants.delete(id);
+    for (const [id, g] of this.#grants) {
+      if (g.expires > now) continue;
+      g.secret = null; // a dead grant keeps no secret
+      this.#grants.delete(id);
+    }
     if (this.#server && !this.#inodeOk()) this.#replaced();
   }
 

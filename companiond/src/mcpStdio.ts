@@ -2,6 +2,10 @@
 import type { Readable, Writable } from "node:stream";
 import { LineBuffer } from "./lineBuffer.ts";
 
+/** MCP protocol versions both servers answer initialize with (the newest first). Here, not in src/jail/, so that
+ * companion-jira, which holds the token, loads no jail code (final review M-3). */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
 type Json = Record<string, unknown>;
 const MAX_LINE_BYTES = 1024 * 1024;
 const rpcError = (id: unknown, code: number, message: string): Json => ({ jsonrpc: "2.0", id, error: { code, message } });

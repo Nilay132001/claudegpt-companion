@@ -9,15 +9,17 @@ import { discoverToolchain } from "../src/launch/toolchain.ts";
 
 const on = process.env.COMPANION_ITEST === "1" && process.platform === "darwin";
 
-test("companion-jira profile: https to a public host works; port 80, loopback, home reads and writes fail", { skip: !on }, () => {
+test("companion-jira profile: https to a public host works; port 80, loopback, home reads and writes fail", { skip: !on }, (t) => {
   const tc = discoverToolchain();
   const probe = fileURLToPath(new URL("./fixtures/netProbe.ts", import.meta.url));
   // The probe lives under companiond/itest, inside the profile's code read rule (codeDir).
   const r = spawnSync("/usr/bin/sandbox-exec", ["-p", buildJiraProfile(tc), tc.nodePath, "--use-bundled-ca", probe], { env: { PATH: "/usr/bin:/bin", OPENSSL_CONF: "/dev/null" }, encoding: "utf8", timeout: 30_000 });
   const out = JSON.parse(r.stdout.trim());
+  t.diagnostic(`probe ${JSON.stringify(out)}`);
   assert.match(out.https, /^status [23]\d\d$/, JSON.stringify(out));
-  assert.notEqual(out.port80, "ok");
-  assert.notEqual(out.loopback443, "ok");
-  assert.notEqual(out.readHome, "ok");
-  assert.notEqual(out.writeTmp, "ok");
+  // EPERM, not just "not ok": the profile denied each one, so a network or disk failure cannot pass for a denial.
+  assert.equal(out.port80, "EPERM", JSON.stringify(out));
+  assert.equal(out.loopback443, "EPERM", JSON.stringify(out));
+  assert.equal(out.readHome, "EPERM", JSON.stringify(out));
+  assert.equal(out.writeTmp, "EPERM", JSON.stringify(out));
 });

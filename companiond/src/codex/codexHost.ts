@@ -343,8 +343,9 @@ export class CodexHost {
   async openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
     const open = (): Promise<string> => {
       // Every open runs one at a time, bound or not: the acceptor sees at most two handshakes from us at once (one
-      // thread's readonly and Jira relays), under its maxPending of 4 (I-3), and a move that closes a process (#leaveProcess) can never kill it under another open in flight on it,
-      // the base process included (Task 10 review I2).
+      // thread's readonly and Jira relays), under its maxPending of 4 (I-3), and a move that closes a process
+      // (#leaveProcess) can never kill it under another open in flight on it, the base process included (Task 10
+      // review I2).
       const run = this.#bindQueue.then(() => this.#openThread(threadId, binding));
       this.#bindQueue = run.catch(() => undefined);
       return run;

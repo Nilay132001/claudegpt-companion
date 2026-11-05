@@ -1,12 +1,12 @@
 // companion-readonly: MCP over newline-delimited JSON-RPC on stdio (spec §3, §7.2).
 import type { Readable, Writable } from "node:stream";
-import { serveLines } from "../mcpStdio.ts";
+import { serveLines, SUPPORTED_PROTOCOL_VERSIONS } from "../mcpStdio.ts";
 import { runTool, type JailContext } from "./tools.ts";
 
+export { SUPPORTED_PROTOCOL_VERSIONS };
 export const SERVER_NAME = "companion-readonly";
 export const TOOL_NAMES = ["list_dir", "read_file", "search", "git_status", "git_diff"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 export type ServerState = { kind: "ready"; ctx: JailContext } | { kind: "refused"; reason: string };
 
