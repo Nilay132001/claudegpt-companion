@@ -29,5 +29,18 @@ expect_fail "fetch-node rejects a tarball with the wrong checksum" "checksum mis
   env COMPANION_NODE_TARBALL="$work/fake.tar.gz" bash scripts/fetch-node.sh "$work/out"
 [ ! -e "$work/out/node" ] || { echo "FAIL: fetch-node left files after a bad checksum"; fail=1; }
 
+# notarize.sh refuses anything but an owner-configured Developer ID run (R4). Never run with real values here.
+expect_fail "notarize refuses an ad-hoc identity" "COMPANION_SIGN_IDENTITY" \
+  env -u COMPANION_SIGN_IDENTITY -u COMPANION_NOTARY_PROFILE bash scripts/notarize.sh "$work/x.dmg"
+expect_fail "notarize needs a notary profile" "COMPANION_NOTARY_PROFILE" \
+  env -u COMPANION_NOTARY_PROFILE COMPANION_SIGN_IDENTITY="SYNTHETIC FIXTURE identity" bash scripts/notarize.sh "$work/x.dmg"
+expect_fail "notarize needs a DMG" "usage:" \
+  env COMPANION_SIGN_IDENTITY="SYNTHETIC FIXTURE identity" COMPANION_NOTARY_PROFILE="synthetic-profile" bash scripts/notarize.sh
+expect_fail "notarize needs an existing DMG" "no such DMG" \
+  env COMPANION_SIGN_IDENTITY="SYNTHETIC FIXTURE identity" COMPANION_NOTARY_PROFILE="synthetic-profile" bash scripts/notarize.sh "$work/missing.dmg"
+# package-app.sh needs a built app.
+expect_fail "package-app needs a built app" "build the app first" \
+  env COMPANION_APP="$work/none.app" bash scripts/package-app.sh
+
 [ $fail -eq 0 ] && echo "test-packaging: OK"
 exit $fail
