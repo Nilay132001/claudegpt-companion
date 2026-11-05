@@ -12,6 +12,8 @@ extension AppModel {
         guard let api, !loadedChats.contains(sid) else { return }
         loadedChats.insert(sid)
         let gen = generation, token = chatTokens[sid, default: 0]
+        loadingChats.insert(sid)
+        defer { loadingChats.remove(sid) }
         do {
             let turns = try await api.historyTurns(sessionId: sid).turns
             guard generation == gen, chatTokens[sid, default: 0] == token, !Task.isCancelled else { return }
@@ -61,6 +63,9 @@ extension AppModel {
         do { history = try await api.historyList() } catch { errorMessage = Self.describe(error) }
     }
 
+    /// True while the selected session's stored chat is being read.
+    public var isLoadingCurrentChat: Bool { selectedSessionId.map { loadingChats.contains($0) } ?? false }
+
     public func openPastChat(_ summary: ChatSummary) async {
         guard let api else { return }
         pastToken += 1
@@ -75,6 +80,14 @@ extension AppModel {
         } catch {
             errorMessage = Self.describe(error)
         }
+    }
+
+    /// A stored chat as Markdown for the clipboard, without opening it.
+    public func chatMarkdown(_ summary: ChatSummary) async -> String? {
+        guard let api, let turns = try? await api.historyTurns(threadId: summary.threadId).turns else { return nil }
+        var c = Conversation()
+        c.restore(turns)
+        return CopyFormat.conversation(c.messages, contexts: [:], title: summary.sessionTitle ?? summary.firstQuestion, includeContext: false)
     }
 
     public func closePastChat() {

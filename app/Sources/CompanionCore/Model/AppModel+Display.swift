@@ -123,3 +123,134 @@ extension PendingPreview {
         return s
     }
 }
+
+// MARK: Status line (M8)
+
+/// One notice for the status line. The view shows the first and pages through the rest.
+public struct StatusItem: Identifiable, Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case securityAlert(SecurityAlert)
+        case repoUnavailable(approvableRoot: String?)
+        case desktopRecords, focusMoved, pinnedMissing, threadReplaced, syncProblem, repoChanged
+    }
+    public enum Tone: Equatable, Sendable { case danger, warning, info }
+    public let kind: Kind
+    public let text: String
+    public let tone: Tone
+    /// Title of the one action, if any (Approve…, Switch, Follow Claude).
+    public let actionTitle: String?
+    /// False for notices that stay until their cause goes away.
+    public let dismissible: Bool
+    public var id: String {
+        switch kind {
+        case .securityAlert(let a): "alert|" + a.id
+        case .repoUnavailable: "repoUnavailable"
+        case .desktopRecords: "desktopRecords"
+        case .focusMoved: "focusMoved"
+        case .pinnedMissing: "pinnedMissing"
+        case .threadReplaced: "threadReplaced"
+        case .syncProblem: "syncProblem"
+        case .repoChanged: "repoChanged"
+        }
+    }
+}
+
+extension AppModel {
+    /// Everything that needs attention, highest priority first: security alerts, repository unavailable, Claude's
+    /// records unreadable, focus moved, kept session missing, thread replaced, sync problem, repository changed.
+    public var statusItems: [StatusItem] {
+        var out: [StatusItem] = alerts.reversed().map {
+            StatusItem(kind: .securityAlert($0), text: $0.bannerText, tone: .danger, actionTitle: nil, dismissible: true)
+        }
+        if let u = unavailableRepo {
+            out.append(StatusItem(kind: .repoUnavailable(approvableRoot: u.approvableRoot), text: u.detail, tone: .warning,
+                                  actionTitle: u.approvableRoot == nil ? nil : "Approve…", dismissible: false))
+        }
+        if let msg = snapshot?.desktopRecordsError {
+            out.append(StatusItem(kind: .desktopRecords, text: msg, tone: .warning, actionTitle: nil, dismissible: false))
+        }
+        if let moved = focusMovedTitle {
+            out.append(StatusItem(kind: .focusMoved, text: "Claude is now on “\(moved)”", tone: .info, actionTitle: "Switch", dismissible: false))
+        }
+        if snapshot?.selection.pinnedMissing == true {
+            out.append(StatusItem(kind: .pinnedMissing, text: "The session you kept is no longer listed.", tone: .warning,
+                                  actionTitle: "Follow Claude", dismissible: false))
+        }
+        if let notice = currentThreadNotice {
+            out.append(StatusItem(kind: .threadReplaced, text: notice, tone: .warning, actionTitle: nil, dismissible: true))
+        }
+        if let msg = syncError {
+            out.append(StatusItem(kind: .syncProblem, text: "Can't read Claude's transcript: \(msg)", tone: .warning, actionTitle: nil, dismissible: true))
+        }
+        if let banner = currentRepoBanner {
+            out.append(StatusItem(kind: .repoChanged, text: banner, tone: .info, actionTitle: nil, dismissible: true))
+        }
+        return out
+    }
+
+    public func dismiss(status item: StatusItem) {
+        switch item.kind {
+        case .securityAlert(let a): dismiss(alert: a)
+        case .threadReplaced: dismissThreadNotice()
+        case .syncProblem: dismissSyncError()
+        case .repoChanged: dismissRepoBanner()
+        case .repoUnavailable, .desktopRecords, .focusMoved, .pinnedMissing: break
+        }
+    }
+
+    /// The selection and transcript state in plain words, e.g. "Following Claude's focused session · transcript up to date".
+    public var followSummary: String {
+        guard let s = snapshot?.selection, s.sessionId != nil else { return "No Claude session selected" }
+        let who = s.via == "pin" ? "Kept on this session" : "Following Claude's focused session"
+        guard let id = selectedSessionId, let sync = syncs[id] else { return who + " · checking the transcript" }
+        switch sync.state {
+        case "live":
+            let n = sync.stats?.malformedLines ?? 0
+            return who + (n > 0 ? " · transcript up to date (\(n) unreadable line\(n == 1 ? "" : "s") skipped)" : " · transcript up to date")
+        case "missing": return who + " · transcript not found"
+        default: return who + " · transcript not tracked"
+        }
+    }
+
+    public var isKeepingSession: Bool { snapshot?.selection.via == "pin" }
+}
+
+// MARK: Context sent (M8)
+
+public enum ContextSummary {
+    /// "412 B", "3.1 KB".
+    public static func size(_ bytes: Int) -> String {
+        bytes < 1024 ? "\(bytes) B" : String(format: "%.1f KB", Double(bytes) / 1024)
+    }
+
+    /// The collapsed "Context sent" line for a stored turn.
+    public static func line(_ r: TurnRecord) -> String {
+        if r.mode == .off { return "No session context · Off" }
+        if r.items.isEmpty { return "Context: question only" }
+        let n = r.items.count
+        return "Context sent · \(n) item\(n == 1 ? "" : "s") · \(size(r.contextBlock.utf8.count))"
+    }
+}
+
+// MARK: History list (M8)
+
+public struct HistorySection: Equatable, Sendable, Identifiable {
+    public let title: String
+    public let chats: [ChatSummary]
+    public var id: String { title }
+}
+
+public enum HistorySections {
+    /// Filters by `query` (session title or first question, case-insensitive) and groups into Today / Earlier,
+    /// newest first. Empty sections are left out.
+    public static func group(_ chats: [ChatSummary], query: String, now: Date = Date(), calendar: Calendar = .current) -> [HistorySection] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let shown = chats.filter { c in
+            q.isEmpty || (c.sessionTitle ?? "").localizedCaseInsensitiveContains(q) || c.firstQuestion.localizedCaseInsensitiveContains(q)
+        }.sorted { $0.lastAt > $1.lastAt }
+        let start = calendar.startOfDay(for: now).timeIntervalSince1970 * 1000
+        let today = shown.filter { $0.lastAt >= start }
+        let earlier = shown.filter { $0.lastAt < start }
+        return [HistorySection(title: "Today", chats: today), HistorySection(title: "Earlier", chats: earlier)].filter { !$0.chats.isEmpty }
+    }
+}

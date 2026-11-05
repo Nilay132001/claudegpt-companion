@@ -19,6 +19,15 @@ struct CompanionApp: App {
                 Button("Refresh Sessions") { Task { await delegate.model.refresh() } }
                     .keyboardShortcut("r", modifiers: .command)
             }
+            CommandGroup(replacing: .newItem) {
+                Button("New Chat") { Task { await delegate.model.newChat() } }
+                    .keyboardShortcut("k", modifiers: .command)
+                    .disabled(delegate.model.gate != .ready || delegate.model.isAnswering)
+            }
+            CommandGroup(after: .pasteboard) {
+                Button("Copy Conversation") { Design.copy(delegate.model.conversationMarkdown(includeContext: false)) }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+            }
         }
     }
 }

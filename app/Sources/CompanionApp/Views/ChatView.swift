@@ -3,21 +3,19 @@ import SwiftUI
 
 struct ChatView: View {
     @Environment(AppModel.self) private var model
+    let messages: [ChatMessage]
+    let readOnly: Bool
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    if model.currentMessages.isEmpty {
-                        Text("Ask GPT about what Claude is doing in this session. GPT can read the repository but never changes it.")
-                            .font(.callout).foregroundStyle(.secondary).padding(.top, 20)
-                    }
-                    ForEach(model.currentMessages) { m in MessageView(message: m).id(m.id) }
+                    ForEach(messages) { m in MessageView(message: m).id(m.id) }
                 }
                 .padding(10)
             }
-            .onChange(of: model.currentMessages.last?.text) {
-                if let id = model.currentMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+            .onChange(of: messages.last?.text) {
+                if let id = messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
             }
         }
     }

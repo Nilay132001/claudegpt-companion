@@ -52,6 +52,8 @@ public final class AppModel {
     public internal(set) var records: [String: TurnRecord] = [:]
     public internal(set) var history: HistoryList?
     public internal(set) var pastChat: PastChat?
+    /// Sessions whose stored chat is being read (the view shows a loading state instead of the empty state).
+    public internal(set) var loadingChats: Set<String> = []
     public var draft = ""
     public var preview: PendingPreview?
     public var sentView: SentView?

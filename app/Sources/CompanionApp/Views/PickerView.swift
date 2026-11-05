@@ -10,12 +10,22 @@ struct PickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search sessions", text: $query).textFieldStyle(.roundedBorder)
-            Button("Follow Claude focus") { Task { await model.followFocus(); close() } }.buttonStyle(.link)
-            List {
-                section("Busy", groups?.busy)
-                section("Idle", groups?.idle)
-                section("Recent", groups?.recent)
-                if !query.isEmpty { section("Older", groups?.older) }
+            Button("Follow Claude's focused session") { Task { await model.followFocus(); close() } }.buttonStyle(.link)
+            Group {
+                if groups == nil {
+                    VStack(spacing: Design.Space.s) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading sessions…").font(.callout).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        section("Busy", groups?.busy)
+                        section("Idle", groups?.idle)
+                        section("Recent", groups?.recent)
+                        if !query.isEmpty { section("Older", groups?.older) }
+                    }
+                }
             }
             .frame(width: 320, height: 380)
         }
@@ -34,8 +44,8 @@ struct PickerView: View {
                         Task { await model.pin(s.sessionId); close() }
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(s.title).lineLimit(1)
-                            Text(s.locationLine).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Text(verbatim: s.title).lineLimit(1)
+                            Text(verbatim: s.locationLine).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                         }
                     }
                     .buttonStyle(.plain)

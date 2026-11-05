@@ -10,7 +10,21 @@ import SwiftUI
     let window: WindowCoordinator
     private var observers: [NSObjectProtocol] = []
 
+    #if DEBUG
+    static let demo: DemoDaemon? = DemoFlags.scene.map { DemoDaemon(scene: $0) }
+    #endif
+
     override init() {
+        #if DEBUG
+        if let demo = Self.demo {
+            model = AppModel(connector: demo.connector)
+            let status = WindowStatus()
+            windowStatus = status
+            window = WindowCoordinator(status: status)
+            super.init()
+            return
+        }
+        #endif
         model = AppModel(connector: DaemonLocator.live(
             env: ProcessInfo.processInfo.environment,
             configuredNode: { UserDefaults.standard.string(forKey: "nodePath") },
@@ -38,9 +52,28 @@ import SwiftUI
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.window.retryFollowIfNeeded() }
         })
+        #if DEBUG
+        switch ProcessInfo.processInfo.environment["COMPANION_DEMO_APPEARANCE"] {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
+        DemoShot.scheduleIfAsked()
+        #endif
         apply(model.settings, byUser: false)
         window.show()
-        Task { await model.start() }
+        Task {
+            await model.start()
+            #if DEBUG
+            if let demo = Self.demo {
+                demo.afterStart()
+                if let q = demo.autoQuestion {
+                    model.draft = q
+                    await model.submitDraft()
+                }
+            }
+            #endif
+        }
     }
 
     private func apply(_ s: UISettings, byUser: Bool) {

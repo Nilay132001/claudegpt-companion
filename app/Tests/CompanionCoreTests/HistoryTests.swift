@@ -228,3 +228,17 @@ import Testing
         #expect(m.pastChat != nil)
     }
 }
+
+@MainActor @Suite struct ChatMarkdownTests {
+    @Test func copiesAStoredChatWithoutOpeningIt() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", sessionTitle: "SYNTHETIC FIXTURE one",
+                                   question: "q1", answer: "a1", sentAt: 1)]
+        let m = AppModel(connector: { d.connection })
+        await m.start()
+        let md = await m.chatMarkdown(ChatSummary(sessionId: "s1", threadId: "t1", sessionTitle: "SYNTHETIC FIXTURE one",
+                                                  firstQuestion: "q1", turns: 1, startedAt: 1, lastAt: 1))
+        #expect(md == "# GPT chat — SYNTHETIC FIXTURE one\n\n## You\nq1\n\n## GPT\na1\n")
+        #expect(m.pastChat == nil)
+    }
+}
