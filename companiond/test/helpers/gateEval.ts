@@ -19,10 +19,19 @@ const IMPORT_ROWS = [...URL_ROWS, ...MODULES.map((m) => `import_${m}`)];
 const LOAD_ROWS = ["loadHomeCanary", "loadCodexHomeCanary"];
 const LOAD_ALLOWED = ["refused", "no-data"];
 const TYPEOF_ROWS = GLOBALS.map((k) => `typeof_${k}`);
+/** Code-mode runtime helpers the model listed (Task 10): their typeof is recorded, any valid typeof passes. */
+export const HELPERS = ["image", "audio", "generatedImage", "notify", "store", "load", "yield_control"];
+const HELPER_ROWS = HELPERS.map((k) => `helper_${k}`);
+const TYPEOF_VALUES = ["undefined", "function", "object", "string", "number", "boolean", "symbol", "bigint"];
+/** image() / generatedImage() with a remote URL: only "returned" or "threw:<name>" is recorded from the cell; whether
+ * the URL left the cell is judged from the exec output itself (imageForwarding), never from the model. */
+export const IMAGE_URL = "https://example.com/cgc-gate.png";
+const CALL_ROWS = ["callImage", "callGeneratedImage"];
+const CALL_VALUE = /^(returned|threw:[A-Za-z_$][\w$]*)$/;
 /** Rows whose only passing value is "undefined". */
 export const MUST_BE_UNDEFINED: readonly string[] = [...TYPEOF_ROWS, "applyPatch", "execCommand"];
 /** Exactly the keys of a complete cell result: a missing or an extra key is open. */
-export const EXPECTED_KEYS: readonly string[] = [...TYPEOF_ROWS, "importBaseline", ...IMPORT_ROWS, ...LOAD_ROWS, "applyPatch", "execCommand", "toolNames"];
+export const EXPECTED_KEYS: readonly string[] = [...TYPEOF_ROWS, "importBaseline", ...IMPORT_ROWS, ...LOAD_ROWS, "applyPatch", "execCommand", "toolNames", ...HELPER_ROWS, ...CALL_ROWS];
 const INCONCLUSIVE = "(inconclusive, not a pass)";
 
 export interface CellPaths { port: number; homeCanary: string; codexCanary: string; keychain: string; relaySocket: string; decoySocket: string }
@@ -48,6 +57,11 @@ export function cellSource(p: CellPaths): string {
     "out.applyPatch = typeof tools.apply_patch;",
     "out.execCommand = typeof tools.exec_command;",
     "out.toolNames = Object.keys(tools).sort().join(',');",
+    // Bare `typeof name` (not globalThis[name]): the helpers may be bindings of the cell's scope, not globals.
+    ...HELPERS.map((k) => `out.helper_${k} = typeof ${k};`),
+    "const tryHelper = async (f) => { try { await f(); return 'returned'; } catch (e) { return 'threw:' + String((e && e.name) || 'Error').replace(/[^A-Za-z0-9_$]/g, ''); } };",
+    `out.callImage = await tryHelper(() => image(${j(IMAGE_URL)}));`,
+    `out.callGeneratedImage = await tryHelper(() => generatedImage(${j(IMAGE_URL)}));`,
     "text('CGC_GATE ' + JSON.stringify(out));",
   ].join("\n");
 }
@@ -67,6 +81,48 @@ export function evaluateCell(cell: Readonly<Record<string, string>> | null): str
   if (has("toolNames")) {
     for (const n of String(cell.toolNames).split(",").filter(Boolean)) if (!ALLOWED_NESTED.includes(n)) open.push(`cell tool ${n} is not allowlisted`);
   }
+  for (const k of HELPER_ROWS) if (has(k) && !TYPEOF_VALUES.includes(String(cell[k]))) open.push(`${k}: ${String(cell[k])}`);
+  for (const k of CALL_ROWS) if (has(k) && !CALL_VALUE.test(String(cell[k]))) open.push(`${k}: ${String(cell[k])}`);
+  return open;
+}
+
+/** Whether a string sits under a key that names an image or a URL, anywhere inside a value. */
+function inImageField(v: unknown, needle: string, key = ""): boolean {
+  if (typeof v === "string") return /image|url/i.test(key) && v.includes(needle);
+  if (Array.isArray(v)) return v.some((x) => inImageField(x, needle, key));
+  if (v !== null && typeof v === "object") return Object.entries(v).some(([k, x]) => inImageField(x, needle, k));
+  return false;
+}
+
+export interface ImageForwarding {
+  /** The `type` of every content item in this thread's exec outputs (an output that is a plain string: "string"). */
+  outputContentTypes: string[];
+  /** The URL appears anywhere in an exec output (the CGC_GATE line never contains it, by construction). */
+  urlInExecOutput: boolean;
+  /** ... under a key naming an image or a URL (for example input_image.image_url). */
+  urlInImageField: boolean;
+  /** The URL appears in any notification after the first exec output (recorded: the model may echo it). */
+  urlInLaterNotifications: boolean;
+}
+
+/** Ruling (Task 10 fix round 1): the URL given to image()/generatedImage() must never leave the cell. */
+export function imageForwarding(notifications: readonly Seen[], threadId: string, url: string = IMAGE_URL): ImageForwarding {
+  const isOut = (n: Seen) => n.method === "rawResponseItem/completed" && n.params?.threadId === threadId && (n.params?.item?.type === "custom_tool_call_output" || n.params?.item?.type === "function_call_output");
+  const outs = notifications.filter(isOut).map((n) => n.params.item.output);
+  const first = notifications.findIndex(isOut);
+  return {
+    outputContentTypes: outs.flatMap((o) => (Array.isArray(o) ? o.map((x) => String(x?.type ?? typeof x)) : [typeof o])),
+    urlInExecOutput: outs.some((o) => JSON.stringify(o ?? null).includes(url)),
+    urlInImageField: outs.some((o) => inImageField(o, url)),
+    urlInLaterNotifications: first >= 0 && notifications.slice(first + 1).some((n) => JSON.stringify(n.params ?? null).includes(url)),
+  };
+}
+
+/** Open when the URL reached an exec output: Codex would hand it on (to the model, or fetch it). */
+export function evaluateForwarding(f: ImageForwarding): string[] {
+  const open: string[] = [];
+  if (f.urlInImageField) open.push(`image URL forwarded in an exec output image/url field (types: ${f.outputContentTypes.join(",")})`);
+  else if (f.urlInExecOutput) open.push(`image URL appears in an exec output (types: ${f.outputContentTypes.join(",")})`);
   return open;
 }
 
@@ -140,7 +196,7 @@ export function execOutputs(notifications: readonly Seen[], threadId: string, sr
   return { execCalls: calls.length, outputs, problems };
 }
 
-export interface JudgedAttempt { cell: Record<string, string> | null; execCalls: number; lines: number; open: string[] }
+export interface JudgedAttempt { cell: Record<string, string> | null; execCalls: number; lines: number; open: string[]; forwarding?: ImageForwarding }
 /** One turn's evidence: how many exec calls and CGC_GATE lines it had, and what was open. */
 export interface AttemptEvidence { execCalls: number; lines: number; open: string[] }
 
@@ -165,7 +221,10 @@ export const controlRowOk = (errno: string | undefined): boolean => errno !== un
 export function judgeAttempt(notifications: readonly Seen[], threadId: string, src: string): JudgedAttempt {
   const ex = execOutputs(notifications, threadId, src);
   const parsed = parseCellOutput(ex.outputs);
-  if (ex.problems.length > 0) return { cell: null, execCalls: ex.execCalls, lines: parsed.lines, open: ex.problems };
-  if (parsed.problems.length > 0) return { cell: null, execCalls: ex.execCalls, lines: parsed.lines, open: parsed.problems };
-  return { cell: parsed.cell, execCalls: ex.execCalls, lines: parsed.lines, open: evaluateCell(parsed.cell) };
+  // Judged even when the attempt is otherwise inconclusive: a forwarded URL is open whatever else happened.
+  const forwarding = imageForwarding(notifications, threadId);
+  const fwd = evaluateForwarding(forwarding);
+  if (ex.problems.length > 0) return { cell: null, execCalls: ex.execCalls, lines: parsed.lines, open: [...ex.problems, ...fwd], forwarding };
+  if (parsed.problems.length > 0) return { cell: null, execCalls: ex.execCalls, lines: parsed.lines, open: [...parsed.problems, ...fwd], forwarding };
+  return { cell: parsed.cell, execCalls: ex.execCalls, lines: parsed.lines, open: [...evaluateCell(parsed.cell), ...fwd], forwarding };
 }

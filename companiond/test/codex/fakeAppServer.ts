@@ -19,6 +19,8 @@ export class FakeAppServer {
   readonly bound = new Set<string>();
   handlers: Record<string, Handler>;
   killed = false;
+  /** false: kill() only records the kill; the test calls exit() itself (a process that is slow to die). */
+  exitOnKill = true;
   #toClient = new PassThrough();
   #fromClient = new PassThrough();
   #lb = new LineBuffer();
@@ -43,7 +45,7 @@ export class FakeAppServer {
       transport: { input: this.#toClient, output: this.#fromClient, stderr: null },
       kill: () => {
         this.killed = true;
-        this.exit("killed");
+        if (this.exitOnKill) this.exit("killed");
       },
       onExit: (cb) => {
         this.#onExit = cb;

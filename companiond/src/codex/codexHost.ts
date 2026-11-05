@@ -88,6 +88,8 @@ export interface CodexHostOptions {
   timeoutMs?: number;
   tokenTtlMs?: number;
   loginTimeoutMs?: number;
+  /** How long a thread move waits for the old process to exit before the host fails (default 10 s). */
+  exitTimeoutMs?: number;
   /** Only for labelled measurements: allows a launch that is not under sandbox-exec (spec §7.1.9). */
   measurementOnly?: boolean;
 }
@@ -101,7 +103,8 @@ const REBIND_WINDOW_MS = 10 * 60_000;
 
 /** checked: settles when the process's self-check has passed (or rejects when it failed). Nothing uses a process
  * before that, even when it is already in #procs (review fix 3). */
-interface Proc { key: string; rpc: RpcClient; kill: () => void; threads: Set<string>; lastUsed: number; closing: boolean; checked: Promise<void> }
+/** exited: settles when the process has exited (a thread move waits for it, see #leaveProcess). */
+interface Proc { key: string; rpc: RpcClient; kill: () => void; threads: Set<string>; lastUsed: number; closing: boolean; checked: Promise<void>; exited: Promise<void> }
 /** turn ids remembered per thread for a turn/completed that beats the turn/start reply; older ones are dropped. */
 const MAX_FINISHED = 16;
 interface ThreadState {
@@ -221,7 +224,7 @@ export class CodexHost {
   }
 
   async auth(): Promise<AuthState> {
-    const r = obj(await this.#base().rpc.request("account/read", { refreshToken: false }));
+    const r = obj(await (await this.#base()).rpc.request("account/read", { refreshToken: false }));
     const acct = obj(r?.account);
     if (!acct) return { state: "signed_out" };
     if (acct.type === "chatgpt") return { state: "signed_in", planType: str(acct.planType) };
@@ -340,7 +343,8 @@ export class CodexHost {
     if (loaded && loaded.rootKey === rootKey && !loaded.needsRebind && !loaded.proc.rpc.isClosed) return loaded.threadId;
     if (loaded) {
       if (loaded.activeTurn) throw new TurnBusyError();
-      await this.#unload(loaded);
+      if (loaded.rootKey !== rootKey && !loaded.proc.rpc.isClosed) await this.#leaveProcess(loaded);
+      else await this.#unload(loaded);
     }
     let grant: RelayGrant | null = null;
     let t: ThreadState | null = null;
@@ -445,10 +449,18 @@ export class CodexHost {
     await t.proc.rpc.request("turn/interrupt", { threadId, turnId: t.activeTurn });
   }
 
-  #base(): Proc {
-    const p = this.#procs.get(BASE);
-    if (this.#state.state !== "ready" || !p) throw new HostNotReadyError();
-    return p;
+  /** The base process, spawned again on demand when a thread move closed it. A failed spawn or self-check fails the
+   * host, as at start. */
+  async #base(): Promise<Proc> {
+    this.#requireReady();
+    try {
+      const p = await this.#proc(BASE);
+      this.#requireReady();
+      return p;
+    } catch (e) {
+      if (!(e instanceof HostNotReadyError) && this.#state.state === "ready") this.#fail(e);
+      throw e;
+    }
   }
 
   #requireReady(): void {
@@ -535,12 +547,19 @@ export class CodexHost {
       settle = { ok, fail };
     });
     checked.catch(() => undefined); // the spawning caller gets the error itself; waiters get it through `checked`
-    const proc: Proc = { key, rpc, kill: () => s.kill(), threads: new Set(), lastUsed: ++this.#clock, closing: false, checked };
+    let markExited: () => void = () => undefined;
+    const exited = new Promise<void>((ok) => {
+      markExited = ok;
+    });
+    const proc: Proc = { key, rpc, kill: () => s.kill(), threads: new Set(), lastUsed: ++this.#clock, closing: false, checked, exited };
     rpc.onNotification((m, p) => {
       guard.onNotification(m, p);
       this.#onNotification(m, p);
     });
-    s.onExit((detail) => rpc?.close(detail));
+    s.onExit((detail) => {
+      markExited();
+      rpc?.close(detail);
+    });
     rpc.onClose(() => this.#onClosed(proc));
     this.#procs.set(key, proc);
     try {
@@ -590,6 +609,37 @@ export class CodexHost {
     }
     this.#close(idle);
     this.#procs.delete(idle.key);
+  }
+
+  /** A thread moving to another root (measured on 0.166.0: after a real turn, thread/unsubscribe leaves the thread
+   * loaded and its writer lock held, so thread/resume elsewhere is refused until the old process exits). Every
+   * thread on the old process is unloaded as eviction does (tokens revoked before unsubscribe), then the process is
+   * closed and its exit awaited before the caller resumes. A busy sibling refuses the move and changes nothing. */
+  async #leaveProcess(t: ThreadState): Promise<void> {
+    const p = t.proc;
+    const others = [...p.threads].flatMap((id) => {
+      const s = this.#threads.get(id);
+      return s && s !== t ? [s] : [];
+    });
+    if (others.some((s) => s.activeTurn)) throw new HostBusyError("Another conversation in this repository is busy. Wait for its reply to finish.");
+    // Each #unload drops its thread synchronously before it awaits, so no sibling can start a turn after this point.
+    await Promise.all([t, ...others].map((s) => this.#unload(s).catch(() => undefined)));
+    this.#close(p);
+    if (this.#procs.get(p.key) === p) this.#procs.delete(p.key);
+    let timer: NodeJS.Timeout | undefined;
+    const exited = await Promise.race([
+      p.exited.then(() => true),
+      new Promise<boolean>((ok) => {
+        timer = setTimeout(() => ok(false), this.#o.exitTimeoutMs ?? 10_000);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!exited) {
+      const e = new Error("Codex did not stop");
+      e.name = "CodexExitTimeout";
+      this.#fail(e);
+      throw e;
+    }
   }
 
   async #unload(t: ThreadState): Promise<void> {

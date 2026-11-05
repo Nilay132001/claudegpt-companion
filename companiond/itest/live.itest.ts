@@ -156,6 +156,8 @@ test("resume after a real turn rebinds the thread to another root", { skip }, as
   const live = await liveHost(t);
   if (!live) return;
   const { c, events } = live;
+  const broker: string[] = []; // "bound:<grant>" / "closed:<end>:<grant>", in order
+  c.acceptor.on((e) => broker.push(e.type === "bound" ? `bound:${e.grantId}` : e.type === "closed" ? `closed:${e.end}:${e.grantId}` : e.type));
   try {
     const rootA = makeRepo({ "only-in-a.txt": "" });
     const rootB = makeRepo({ "only-in-b.txt": "" });
@@ -166,10 +168,21 @@ test("resume after a real turn rebinds the thread to another root", { skip }, as
     assert.ok(r1.reply.includes("only-in-a"), "first turn did not list root A");
     assert.deepEqual(r1.alerts, []);
     assert.ok(r1.toolCalls.includes("list_dir:completed"));
-    await c.host.openThread(id, { root: rootB, launch: await buildReadonlyLaunch({ root: rootB }) }); // unsubscribe + resume in B's process
+    // Unsubscribe, revoke, close A's process and wait for its exit, then resume in B's process (codexHost #leaveProcess).
+    await c.host.openThread(id, { root: rootB, launch: await buildReadonlyLaunch({ root: rootB }) });
     const r2 = await ask(c.host, events, id, `${LIST} Call it again now; do not reuse an earlier answer.`);
-    console.log(JSON.stringify({ second: { sawB: r2.reply.includes("only-in-b"), alerts: r2.alerts, toolCalls: r2.toolCalls } }));
+    console.log(JSON.stringify({ second: { sawA: r2.reply.includes("only-in-a"), sawB: r2.reply.includes("only-in-b"), alerts: r2.alerts, toolCalls: r2.toolCalls, status: r2.status }, broker: broker.map((b) => b.replace(/:[^:]+$/, "")) }));
     assert.ok(r2.reply.includes("only-in-b"));
+    assert.equal(r2.reply.includes("only-in-a"), false, "the resumed thread still reached root A");
+    assert.ok(r2.toolCalls.includes("list_dir:completed"));
+    // A's grant closes as revoked before B's grant binds.
+    const bounds = broker.filter((b) => b.startsWith("bound:"));
+    assert.equal(bounds.length, 2, "one binding per root");
+    const grantA = String(bounds[0]).slice("bound:".length);
+    const revokedA = broker.indexOf(`closed:revoked:${grantA}`);
+    assert.ok(revokedA >= 0, "A's binding closed as revoked");
+    assert.ok(revokedA < broker.indexOf(String(bounds[1])), "A's binding closed before B's bound");
+    assert.equal(c.host.state().state, "ready");
   } finally {
     await c.close();
   }

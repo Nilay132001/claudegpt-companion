@@ -62,20 +62,33 @@ mic, speech, with XCTest/Swift Testing once full Xcode is installed (D1).
 
 **Root binding (F8) — option B (M4a, owner ruling (b), review I1).** One app-server per approved root
 (cap 3, idle LRU close) plus a base process for sign-in and for threads with no root. A thread moves
-between processes only after `thread/unsubscribe` in the old one, so no thread is loaded twice.
+between processes only after it is unsubscribed and the old process has exited (below), so no thread is
+loaded twice.
 `companion-readonly` is no longer Codex's child: Codex execs the relay, and companiond launches the jail
 (`buildReadonlyLaunch`, unchanged) per binding, outside Codex's sandbox. Each `thread/start` /
 `thread/resume` passes a per-thread `config` override that points `companion-readonly` at the relay with
 that thread's one-time token in its env; a thread with no root gets an inert override. *M1 finding (kept
 for the record):* option A (one process, per-thread `COMPANION_ROOT`) worked for two threads, but with
 the relay a token in one process's env could be read by another root's threads (§7.1.9 residual (i)),
-so each root gets its own process. **Measured (M4a, Task 10) — open:** on 0.166.0, after a real turn
-`thread/unsubscribe` answers `unsubscribed`, but the old process keeps the thread loaded and holds its
-writer lock (`CODEX_HOME/thread-writer-locks/`) for at least 20 s with no `thread/closed`; `thread/resume`
-in the new root's process is refused ("already has an active writer") until the old process exits, and
-then succeeds. So "unsubscribe, then resume elsewhere" does not move a used thread; how a thread moves
-between roots needs a ruling before M4b. The refusal is a plain error: the host stays up and nothing
-else is bound.
+so each root gets its own process.
+
+**Moving a thread between roots (M4a, Task 10, controller ruling).** Measured on 0.166.0: after a real
+turn `thread/unsubscribe` answers `unsubscribed`, but the old process keeps the thread loaded and holds
+its writer lock (`CODEX_HOME/thread-writer-locks/`) for at least 20 s with no `thread/closed`;
+`thread/resume` in another process is refused ("already has an active writer") until the old process
+exits. So a move closes the old process:
+- if any other thread on the old process has a turn running, the move is refused (`HostBusyError`) and
+  nothing changes;
+- otherwise the moving thread and every other thread on the old process are unloaded as eviction does
+  (each token revoked before its `thread/unsubscribe`), the process is closed and removed, and its exit is
+  awaited (at most 10 s; a process that does not exit fails the host) before `thread/resume` in the new
+  root's process. The base process is closed the same way when the move starts from it, and is spawned
+  again on demand (`auth()`, an unbound thread). A root's process is spawned again when one of its threads
+  is next opened.
+
+Measured end to end (Task 10, fix round 1): after a real turn in root A, the move to root B resumes, the
+next tool call lists only B's files, and the acceptor shows A's binding closing as `revoked` before B's
+binds.
 
 ## 3. Components
 
@@ -362,8 +375,12 @@ No single layer is trusted, including the Codex sandbox (R1).
      and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does
      produce an item. The cell runtime offers helpers that are not Codex tools (the model listed `text`,
      `image`, `audio`, `generatedImage`, `store`, `load`, `notify`, `setTimeout`, `clearTimeout`,
-     `yield_control`, `exit`); the gate measured `load` of the canaries as no-data, and did not measure
-     `image` / `notify`.
+     `yield_control`, `exit`). Measured by the gate (Task 10 fix round 1, two runs): `image`, `audio`,
+     `generatedImage`, `notify`, `store`, `load` and `yield_control` are all functions; `load` of the
+     canaries gives no data; `image("https://example.com/…")` and `generatedImage` with the same URL both
+     throw (`Error`); the exec output then holds only `input_text` items, and the URL appears neither in
+     the exec output nor in any later notification; no loopback or decoy hit. Not measured: `audio`,
+     `notify` and `store` beyond their type, and `image` with a `data:` URL or another argument shape.
    - (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files
      in App Support (out of scope: same uid). The handshake is not bound to the channel: a same-uid process
      that swaps the socket and restores it between two dev/ino checks (each accept, before each hand-off,
@@ -381,12 +398,11 @@ No single layer is trusted, including the Codex sandbox (R1).
      real turn each, no file under App Support (CODEX_HOME rollouts, logs and sqlite, `run/`, `bin/`)
      held either token; files named auth, credential, keyring or keychain were not opened.
 
-   **§7.1.9 measured (2026-11-05, Task 10): `CODEX_SEATBELT_MEASURED` stays `"stopped"`.** Codex runs
-   under the profile above; the self-check suite, the profile probe, the sign-in profile, tool calls
-   through the relay, the attack prompts, interrupt during a tool call, the token scan and the exec-cell
-   gate (three runs) all passed. Moving a used thread to another root's process failed in both runs (§2):
-   Codex 0.166.0 keeps the writer lock after `thread/unsubscribe`. Chat stays off until that has a ruling
-   and the live suite passes in full. Evidence: findings doc, "M4 Codex measurements", "Relay and
+   **§7.1.9 measured (2026-11-05, Task 10): `CODEX_SEATBELT_MEASURED = "ok"`.** Codex runs under the
+   profile above. The self-check suite, the profile probe, the sign-in profile, tool calls through the
+   relay, the attack prompts, interrupt during a tool call, moving a thread to another root (after the
+   §2 fix), the token scan and the exec-cell gate with the runtime-helper rows all passed; only the
+   owner-only sign-in test was skipped. Evidence: findings doc, "M4 Codex measurements", "Relay and
    code mode (Task 8)" and "End to end with the relay and code mode (Task 10)".
 
 ### 7.2 `companion-readonly` jail
@@ -661,7 +677,7 @@ watcher failure.
 | M1 | **Protocol and platform spike** (throwaway code, written findings): per-thread root binding (A vs B), exact flag keys incl. `view_image` and `web_search`, `experimentalFeature/list` + `config/read` self-check, `enabled_tools` hiding a fake `write_file`, server-request reply shapes, thread `cwd` vs `AGENTS.md`, `sandbox-exec` profile on macOS 27, `cliSessionId` change on disk | **done 2026-11-04**: findings doc updated; §2 option A chosen |
 | M2 | `SafeGit` + `companion-readonly` jail under Seatbelt + §12.1 unit suite | suite green locally and in CI: a `companiond-macos` job on `macos-26` runs the Seatbelt tests (they skip on Linux); if the runner has no `sandbox-exec`, they are local-only and the README says so |
 | M3 | SessionBridge, tail, parser, WorktreeResolver + terminal/test-failure extraction + §12.2 suite | suite green |
-| M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "stopped" (§2: moving a used thread between root processes is open)* |
+| M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "ok"* |
 | M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release** |
 | M6 | Jira via Atlassian MCP, read-only allowlist enforced by self-check | self-check proves no write tool is visible |
 | M7 | Packaging, install guide, signing notes | clean install on this Mac |
@@ -687,7 +703,7 @@ Independent review (all accepted unless noted):
 - **F6** thread `cwd` is an empty folder (§7.1.2). **F7** real-Codex integration tests (§12.1).
 - **F8** root binding decided by spike: option A (M1); option B with unsubscribe before resume stays
   the fallback until `thread/resume` with the override is tested in M4 (§2). *M4a:* option B is the
-  design (owner ruling (b)); moving a used thread between processes is open (§2, measured). **F9** per-type replies (§7.1.4).
+  design (owner ruling (b)); a thread moves by closing its old process first (§2, measured). **F9** per-type replies (§7.1.4).
 - **F10** sessionId check, `cliSessionId` change, pid start time + entrypoint, move into other repo (§6).
 - **F11** write trap via Seatbelt (§12.4). **F12** spike first (M1); signed bundle in M4 (§9, §14).
 - **F13** `RegisterEventHotKey` (§7.8). **F14** cut `find_symbol`, per-session sharing override and the

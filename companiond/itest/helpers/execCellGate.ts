@@ -21,7 +21,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { Session } from "./codeModeSession.ts";
-import { cellSource, judgeAttempt, runAttempts, type AttemptEvidence } from "../../test/helpers/gateEval.ts";
+import { cellSource, judgeAttempt, runAttempts, type AttemptEvidence, type ImageForwarding } from "../../test/helpers/gateEval.ts";
 
 const CANARY_PREFIX = "cgc-gate-canary-";
 export interface GateResult {
@@ -29,7 +29,7 @@ export interface GateResult {
   open: string[];
   cell: Record<string, string> | null;
   /** harness.attempts: every attempt's evidence, earlier ones included. */
-  harness: Record<string, number | boolean | AttemptEvidence[] | AttemptShape[]>;
+  harness: Record<string, number | boolean | AttemptEvidence[] | AttemptShape[] | ImageForwarding[]>;
 }
 /** Measurement aid only: event shapes per attempt, never content. */
 export interface AttemptShape { status: string; reply: string; events: Record<string, number>; inputDiff: unknown[] }
@@ -114,6 +114,9 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
     // Shapes only (method, item type/name, keys, thread match), never content: the raw-event shape is unmeasured, and
     // an attempt that found no exec call must show whether the model skipped the cell or the parser missed it.
     const shapes: AttemptShape[] = [];
+    // Per attempt: what the exec output held for image()/generatedImage() (content types, URL booleans). The open
+    // rows from it are already in each attempt's `open` (gateEval.evaluateForwarding).
+    const imageForwarding: ImageForwarding[] = [];
     const { last, attempts } = await runAttempts(o.attempts ?? 2, async () => {
       const n0 = s.a.notifications.length;
       const t = await s.turn(prompt);
@@ -140,13 +143,16 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
           return { inputLen: inp.length, srcLen: src.length, firstDiff: i === inp.length && i === src.length ? null : i, input: inp.slice(Math.max(0, i - 40), i + 40), src: src.slice(Math.max(0, i - 40), i + 40) };
         });
       shapes.push({ status: t.status, reply: t.agentText.split(secret).join("<SECRET>").slice(0, 300), events, inputDiff });
-      return judgeAttempt(s.a.notifications.slice(n0), s.threadId, src);
+      const judged = judgeAttempt(s.a.notifications.slice(n0), s.threadId, src);
+      if (judged.forwarding) imageForwarding.push(judged.forwarding);
+      return judged;
     });
     clearInterval(sampler);
     const open = last ? [...last.open] : ["no attempt ran (inconclusive, not a pass)"];
     const harness = {
       attempts,
       shapes,
+      imageForwarding,
       loopbackHits,
       decoyHits,
       newRefusedConnections: count("refused") + count("socketReplaced") - before.refused,

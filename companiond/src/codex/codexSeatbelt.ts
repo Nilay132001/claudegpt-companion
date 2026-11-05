@@ -40,8 +40,8 @@ export const LOGIN_RULES: readonly string[] = [
  * prompt-input still run without them). */
 const KEYCHAIN_MACH = /SecurityServer|securityd|trustd/;
 
-/** Set in Task 10, and only on measured success of the end-to-end suites and the exec-cell gate. */
-export const CODEX_SEATBELT_MEASURED: "ok" | "stopped" = "stopped";
+/** Set in Task 10 on measured success of the end-to-end suites and the exec-cell gate (findings: "M4 Codex measurements"). */
+export const CODEX_SEATBELT_MEASURED: "ok" | "stopped" = "ok";
 
 export const DNS_SOCKET = "/private/var/run/mDNSResponder";
 /** Review I5: no local service on 443 (loopback, and in measurement 0.0.0.0, :: and the Mac's own addresses). */

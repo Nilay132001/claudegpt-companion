@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ALLOWED_NESTED } from "../../src/codex/codeMode.ts";
 import {
-  cellSource, controlRowOk, EXPECTED_KEYS, evaluateCell, execOutputs, judgeAttempt, MUST_BE_UNDEFINED, parseCellOutput, runAttempts, type JudgedAttempt,
+  cellSource, controlRowOk, evaluateCell, evaluateForwarding, EXPECTED_KEYS, execOutputs, HELPERS, IMAGE_URL, imageForwarding, judgeAttempt, MUST_BE_UNDEFINED, parseCellOutput, runAttempts, type JudgedAttempt,
 } from "../helpers/gateEval.ts";
 
 const SRC = cellSource({ port: 1, homeCanary: "/h/.c.mjs", codexCanary: "/s/c.mjs", keychain: "/h/k", relaySocket: "/s/r.sock", decoySocket: "/t/d.sock" });
@@ -12,11 +12,12 @@ const SRC = cellSource({ port: 1, homeCanary: "/h/.c.mjs", codexCanary: "/s/c.mj
 function goodCell(): Record<string, string> {
   const c: Record<string, string> = {};
   for (const k of EXPECTED_KEYS) {
-    c[k] = k.startsWith("typeof_") || k === "applyPatch" || k === "execCommand" ? "undefined" : k.startsWith("import") ? "refused:TypeError" : k.startsWith("load") ? "refused" : "";
+    c[k] = k.startsWith("typeof_") || k === "applyPatch" || k === "execCommand" ? "undefined" : k.startsWith("import") ? "refused:TypeError" : k.startsWith("load") ? "refused" : k.startsWith("helper_") ? "function" : k.startsWith("call") ? "threw:TypeError" : "";
   }
   c.toolNames = ALLOWED_NESTED.join(",");
   return c;
 }
+const NO_FORWARDING = { outputContentTypes: ["input_text"], urlInExecOutput: false, urlInImageField: false, urlInLaterNotifications: false };
 const line = (c: unknown) => `CGC_GATE ${JSON.stringify(c)}`;
 const raw = (item: unknown, threadId = "t1") => ({ method: "rawResponseItem/completed", params: { threadId, item } });
 const call = (id: unknown, input: unknown = SRC) => raw({ type: "custom_tool_call", name: "exec", call_id: id, input });
@@ -25,7 +26,47 @@ const output = (id: unknown, out: unknown, threadId = "t1") => raw({ type: "cust
 test("a fully clean result passes", () => {
   assert.deepEqual(evaluateCell(goodCell()), []);
   const j = judgeAttempt([call("c1"), output("c1", [{ type: "input_text", text: line(goodCell()) }])], "t1", SRC);
-  assert.deepEqual(j, { cell: goodCell(), execCalls: 1, lines: 1, open: [] });
+  assert.deepEqual(j, { cell: goodCell(), execCalls: 1, lines: 1, open: [], forwarding: NO_FORWARDING });
+});
+
+test("runtime helpers: the cell records each typeof and calls image/generatedImage with the remote URL", () => {
+  for (const k of HELPERS) assert.ok(SRC.includes(`out.helper_${k} = typeof ${k};`), k);
+  assert.ok(SRC.includes(`image(${JSON.stringify(IMAGE_URL)})`));
+  assert.ok(SRC.includes(`generatedImage(${JSON.stringify(IMAGE_URL)})`));
+  // Recorded rows: any typeof value passes, and the calls pass as "returned" or "threw:<name>".
+  for (const v of ["function", "undefined", "object"]) assert.deepEqual(evaluateCell({ ...goodCell(), helper_image: v }), []);
+  for (const v of ["returned", "threw:TypeError", "threw:Error"]) assert.deepEqual(evaluateCell({ ...goodCell(), callImage: v, callGeneratedImage: v }), []);
+  // Anything else is open: a value smuggled into the row, or a missing row.
+  assert.match(evaluateCell({ ...goodCell(), helper_notify: "yes" }).join(), /helper_notify: yes/);
+  assert.match(evaluateCell({ ...goodCell(), callImage: "returned https://x" }).join(), /callImage: returned/);
+  assert.match(evaluateCell({ ...goodCell(), callGeneratedImage: "threw:" }).join(), /callGeneratedImage/);
+  const { helper_load: _, ...missing } = goodCell();
+  assert.match(evaluateCell(missing).join(), /helper_load is missing/);
+});
+
+test("image URL forwarding: open when the URL reaches an exec output, recorded when it only appears later", () => {
+  const text = { type: "input_text", text: line(goodCell()) };
+  const img = { type: "input_image", image_url: IMAGE_URL };
+  const clean = [call("c1"), output("c1", [text])];
+  assert.deepEqual(imageForwarding(clean, "t1"), NO_FORWARDING);
+  assert.deepEqual(evaluateForwarding(imageForwarding(clean, "t1")), []);
+  // Forwarded as an image item: open, with the content types named.
+  const fwd = judgeAttempt([call("c1"), output("c1", [text, img])], "t1", SRC);
+  assert.deepEqual(fwd.forwarding, { outputContentTypes: ["input_text", "input_image"], urlInExecOutput: true, urlInImageField: true, urlInLaterNotifications: false });
+  assert.match(fwd.open.join(), /image URL forwarded in an exec output image\/url field \(types: input_text,input_image\)/);
+  // In the output but not under an image/url key: still open.
+  const plain = judgeAttempt([call("c1"), output("c1", [text, { type: "input_text", text: `see ${IMAGE_URL}` }])], "t1", SRC);
+  assert.match(plain.open.join(), /image URL appears in an exec output/);
+  // A forwarded URL is open even when the attempt is otherwise inconclusive.
+  assert.match(judgeAttempt([call("c1"), call("c2"), output("c1", [img])], "t1", SRC).open.join(), /image URL forwarded/);
+  // Another thread's output does not count; a later echo (for example in the model's reply) is recorded, not open.
+  assert.equal(imageForwarding([call("c1"), output("c1", [img], "t2")], "t1").urlInExecOutput, false);
+  const echoed = [...clean, raw({ type: "message", role: "assistant", content: [{ type: "output_text", text: IMAGE_URL }] })];
+  assert.equal(imageForwarding(echoed, "t1").urlInLaterNotifications, true);
+  assert.deepEqual(judgeAttempt(echoed, "t1", SRC).open, []);
+  // The exec call's own input (the cell source) holds the URL and never counts.
+  assert.equal(SRC.includes(IMAGE_URL), true);
+  assert.equal(imageForwarding([call("c1")], "t1").urlInExecOutput, false);
 });
 
 test("the schema is exact: a global that exists, an extra key, a missing key, a load or import row out of range", () => {

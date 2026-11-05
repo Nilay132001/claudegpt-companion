@@ -26,7 +26,7 @@ const okPrepare = (paths: AppPaths) => (): PreparedCodeMode => {
 const detail = (s: HostState) => (s.state === "failed" ? s.detail : "");
 const LOGIN_PROFILE = "(version 1) ; sign-in";
 
-function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; maxProcesses?: number; maxBindings?: number; unsandboxed?: boolean; measurementOnly?: boolean; prepare?: (paths: AppPaths) => () => PreparedCodeMode } = {}) {
+function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; maxProcesses?: number; maxBindings?: number; exitTimeoutMs?: number; unsandboxed?: boolean; measurementOnly?: boolean; prepare?: (paths: AppPaths) => () => PreparedCodeMode } = {}) {
   const paths = o.paths ?? ensureAppDirs(appPaths(tempDir()));
   const f = fakeSpawn(o.handlers);
   const broker = new FakeBroker();
@@ -34,7 +34,7 @@ function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; m
   const env = { CODEX_HOME: paths.codexHome };
   const h = new CodexHost({
     paths, codexVersion: "0.166.0", pinnedVersion: "0.166.0", allowlist: COMPANION_ALLOWLIST, spawn: f.spawn, broker, relayBinary: RELAY,
-    prepare: (o.prepare ?? okPrepare)(paths), maxProcesses: o.maxProcesses, maxBindings: o.maxBindings, measurementOnly: o.measurementOnly,
+    prepare: (o.prepare ?? okPrepare)(paths), maxProcesses: o.maxProcesses, maxBindings: o.maxBindings, exitTimeoutMs: o.exitTimeoutMs, measurementOnly: o.measurementOnly,
     makeLaunch: () => (o.unsandboxed
       ? { command: "/fake/codex", args: ["app-server"], env, cwd: paths.emptyCwd }
       : { command: SANDBOX_EXEC, args: ["-p", "(version 1)", "/fake/codex", "app-server"], env, cwd: paths.emptyCwd }),
@@ -122,17 +122,92 @@ test("a bound thread runs in its root's own process, with the relay command and 
   assert.equal(broker.grants.length, 2, "no token for a thread without a root");
 });
 
-test("moving a thread to another root: unsubscribe, revoke, resume in that root's process with a new token", async () => {
+test("moving a thread to another root: unsubscribe, revoke, close the old process, resume in that root's process with a new token", async () => {
   const { h, f, broker } = host();
   await h.start();
   const t = await h.openThread(null, bind("/r1"));
   await h.openThread(t, bind("/r2"));
   assert.equal(broker.grants[0]?.revoked, true);
   assert.deepEqual(srv(f, 1).last("thread/unsubscribe"), { threadId: t });
+  assert.equal(srv(f, 1).killed, true, "the old root's process is closed (0.166.0 keeps the writer lock after unsubscribe)");
   const r = srv(f, 2).last("thread/resume");
   assert.equal(r.threadId, t);
   assert.equal(r.config[`${SRV}.env`].CGC_RELAY_TOKEN, broker.grants[1]?.token);
   assert.deepEqual(broker.grants[1]?.launch, jail("/r2"));
+  assert.equal(h.state().state, "ready");
+});
+
+test("root move: no thread/resume before the old process has exited; its other threads are unloaded and their grants revoked", async () => {
+  const { h, f, broker } = host();
+  await h.start();
+  const moving = await h.openThread(null, bind("/r1"));
+  const sibling = await h.openThread(null, bind("/r1"));
+  const old = srv(f, 1);
+  old.exitOnKill = false; // a process that is slow to die
+  let done = false;
+  const move = h.openThread(moving, bind("/r2")).then(() => {
+    done = true;
+  });
+  await tick(20);
+  assert.equal(old.killed, true);
+  assert.deepEqual(old.methods().filter((m) => m === "thread/unsubscribe").length, 2);
+  assert.deepEqual(old.received.filter((m) => m.method === "thread/unsubscribe").map((m) => m.params.threadId).sort(), [moving, sibling].sort());
+  assert.equal(broker.grants[0]?.revoked, true);
+  assert.equal(broker.grants[1]?.revoked, true, "the sibling's grant is revoked too");
+  assert.equal(f.servers.slice(2).some((s) => s.methods().includes("thread/resume")), false, "no resume before the old process exits");
+  assert.equal(done, false);
+  old.exit("killed");
+  await move;
+  const r2 = f.servers.find((s) => s.methods().includes("thread/resume"));
+  assert.equal(r2?.last("thread/resume").threadId, moving);
+  await assert.rejects(h.startTurn(sibling, "x"), /not open/);
+  // The old root's process is spawned again on demand.
+  const n = f.servers.length;
+  await h.openThread(sibling, bind("/r1"));
+  assert.equal(f.servers.length, n + 1);
+  assert.equal(f.servers[n]?.last("thread/resume").threadId, sibling);
+  assert.equal(h.state().state, "ready");
+});
+
+test("root move: a busy sibling on the old process refuses with HostBusyError and changes nothing", async () => {
+  const { h, f, broker } = host();
+  await h.start();
+  const moving = await h.openThread(null, bind("/r1"));
+  const sibling = await h.openThread(null, bind("/r1"));
+  await h.startTurn(sibling, "busy");
+  const servers = f.servers.length;
+  await assert.rejects(h.openThread(moving, bind("/r2")), HostBusyError);
+  assert.equal(srv(f, 1).killed, false);
+  assert.equal(srv(f, 1).methods().includes("thread/unsubscribe"), false);
+  assert.equal(broker.grants.length, 2, "no grant for the target root");
+  assert.equal(broker.grants.some((g) => g.revoked), false);
+  assert.equal(f.servers.length, servers, "no process for the target root");
+  assert.notEqual(h.activeTurn(sibling), null);
+  await h.startTurn(moving, "still open"); // the moving thread is still loaded where it was
+  assert.equal(h.state().state, "ready");
+});
+
+test("root move: an old process that does not exit in time fails the host; nothing is resumed", async () => {
+  const { h, f } = host({ exitTimeoutMs: 50 });
+  await h.start();
+  const t = await h.openThread(null, bind("/r1"));
+  srv(f, 1).exitOnKill = false;
+  await assert.rejects(h.openThread(t, bind("/r2")), /Codex did not stop/);
+  assert.equal(h.state().state, "failed");
+  assert.equal(f.servers.some((s) => s.methods().includes("thread/resume")), false);
+});
+
+test("root move from the base process closes it; auth() spawns a new base on demand", async () => {
+  const { h, f } = host();
+  await h.start();
+  const t = await h.openThread(null, null); // in the base process
+  await h.openThread(t, bind("/r1"));
+  assert.equal(srv(f, 0).killed, true);
+  assert.equal(srv(f, 1).last("thread/resume").threadId, t);
+  assert.deepEqual(await h.auth(), { state: "signed_in", planType: "plus" });
+  assert.equal(f.servers.length, 3, "a new base process");
+  assert.ok(srv(f, 2).methods().includes("account/read"));
+  assert.equal(h.state().state, "ready");
 });
 
 test("a thread response that fails a check fails the host: instruction files, an unchecked model, extra tools", async () => {
