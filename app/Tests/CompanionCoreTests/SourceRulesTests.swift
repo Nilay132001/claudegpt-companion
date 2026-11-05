@@ -22,9 +22,23 @@ import Testing
 
     @Test func neverTouchesClaudeDataOrCredentials() {
         let banned = ["/.claude", ".claude/", "claude-code-sessions", "messagingSocketPath", ".key\"",
-                      "Application Support/Claude", "SecItem", "kSecClass", "auth.json"]
+                      "Application Support/Claude", "auth.json"]
         for f in Self.swiftFiles() {
             for b in banned { #expect(!f.text.contains(b), "\(f.name) contains \(b)") }
+            if f.name != "JiraKeychain.swift" {
+                for b in ["SecItem", "kSecClass"] { #expect(!f.text.contains(b), "\(f.name) contains \(b)") }
+            }
+        }
+    }
+
+    @Test func keychainOnlyForTheAppsOwnJiraItem() {
+        let files = Self.swiftFiles().filter { $0.text.contains("SecItem") || $0.text.contains("kSecClass") }
+        #expect(files.map(\.name) == ["JiraKeychain.swift"])
+        if let k = files.first {
+            #expect(k.text.contains("\"ClaudeGPT Companion Jira\""))
+            #expect(!k.text.contains("kSecClassInternetPassword"))
+            #expect(!k.text.contains("Codex"))
+            #expect(!k.text.contains("Claude Code"))
         }
     }
 

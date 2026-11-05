@@ -14,7 +14,7 @@ import SwiftUI
         model = AppModel(connector: DaemonLocator.live(
             env: ProcessInfo.processInfo.environment,
             configuredNode: { UserDefaults.standard.string(forKey: "nodePath") },
-            resourceURL: Bundle.main.resourceURL))
+            resourceURL: Bundle.main.resourceURL), jiraStore: KeychainJiraStore())
         let status = WindowStatus()
         windowStatus = status
         window = WindowCoordinator(status: status)

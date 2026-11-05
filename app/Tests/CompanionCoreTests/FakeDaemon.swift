@@ -134,4 +134,27 @@ import Foundation
         calls.append("settings.set:\(key)")
         stored[key] = value
     }
+
+    var jiraConfigured: JiraCredentials?
+    var jiraConfigureError: DaemonError?
+    var jiraCheckResult = JiraCheckResult(ok: true, detail: "Connected. GPT can read Jira.")
+    func jiraStatus() async throws -> JiraStatus {
+        calls.append("jira.status")
+        return JiraStatus(configured: jiraConfigured != nil, site: jiraConfigured?.site, email: jiraConfigured?.email)
+    }
+    func jiraConfigure(_ c: JiraCredentials) async throws -> JiraStatus {
+        calls.append("jira.configure")
+        if let e = jiraConfigureError { throw e }
+        jiraConfigured = c
+        return try await jiraStatus()
+    }
+    func jiraClear() async throws -> JiraStatus {
+        calls.append("jira.clear")
+        jiraConfigured = nil
+        return try await jiraStatus()
+    }
+    func jiraCheck() async throws -> JiraCheckResult {
+        calls.append("jira.check")
+        return jiraCheckResult
+    }
 }

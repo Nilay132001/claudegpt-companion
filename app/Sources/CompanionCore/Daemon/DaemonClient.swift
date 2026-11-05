@@ -143,4 +143,10 @@ extension DaemonClient: DaemonAPI {
     public func settingsSet(_ key: String, _ value: String) async throws {
         _ = try await call("settings.set", .object(["key": .string(key), "value": .string(value)]), as: Empty.self)
     }
+    public func jiraStatus() async throws -> JiraStatus { try await call("jira.status", as: JiraStatus.self) }
+    public func jiraConfigure(_ c: JiraCredentials) async throws -> JiraStatus {
+        try await call("jira.configure", .object(["site": .string(c.site), "email": .string(c.email), "token": .string(c.token)]), as: JiraStatus.self)
+    }
+    public func jiraClear() async throws -> JiraStatus { try await call("jira.clear", as: JiraStatus.self) }
+    public func jiraCheck() async throws -> JiraCheckResult { try await call("jira.check", as: JiraCheckResult.self) }
 }

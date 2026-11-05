@@ -30,6 +30,26 @@ public enum DaemonErrorCode {
     public static let stopped = -1
 }
 
+public struct JiraStatus: Decodable, Sendable, Equatable {
+    public let configured: Bool
+    public let site: String?
+    public let email: String?
+    public init(configured: Bool, site: String?, email: String?) {
+        self.configured = configured
+        self.site = site
+        self.email = email
+    }
+}
+
+public struct JiraCheckResult: Decodable, Sendable, Equatable {
+    public let ok: Bool
+    public let detail: String
+    public init(ok: Bool, detail: String) {
+        self.ok = ok
+        self.detail = detail
+    }
+}
+
 public struct DaemonError: Error, Sendable, Equatable {
     public let code: Int
     public let message: String

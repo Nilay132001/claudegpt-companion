@@ -26,6 +26,11 @@ public protocol DaemonAPI: Sendable {
     func chatSent(sessionId: String) async throws -> [SentRecord]
     func settingsGet(_ key: String) async throws -> String?
     func settingsSet(_ key: String, _ value: String) async throws
+    func jiraStatus() async throws -> JiraStatus
+    /// Sends the credential once; companiond keeps it in memory only (owner ruling B).
+    func jiraConfigure(_ c: JiraCredentials) async throws -> JiraStatus
+    func jiraClear() async throws -> JiraStatus
+    func jiraCheck() async throws -> JiraCheckResult
 }
 
 /// Daemon input limits (M4b handlers): strings are capped in UTF-16 units.
