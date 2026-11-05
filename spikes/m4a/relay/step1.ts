@@ -136,6 +136,8 @@ async function runTurn(h: Host, threadId: string, text: string, opts: { timeoutM
       const completed = mine.filter((n) => n.method === "item/completed").map((n) => n.params?.item);
       return {
         status: String(done.params?.turn?.status),
+        // The turn's error text (Codex/OpenAI wording, not a credential); cut short and passed through clean().
+        error: done.params?.turn?.error ? String(done.params.turn.error.message ?? JSON.stringify(done.params.turn.error)).slice(0, 300) : undefined,
         turnId,
         agentText: completed.filter((i) => i?.type === "agentMessage").map((i) => String(i?.text ?? "")).join("\n"),
         itemTypes: [...new Set(mine.filter((n) => n.method === "item/started").map((n) => String(n.params?.item?.type)))],
@@ -238,7 +240,13 @@ async function main(): Promise<void> {
   const profile = variants[profileName] as string;
 
   // ---- Items 3 + 4: a short turn on a persisted thread, then thread/resume in a new app-server ----------------
-  const threadParams = { cwd: paths.emptyCwd, sandbox: "read-only", approvalPolicy: "untrusted" };
+  // STEP1_MODEL pins thread/start's model (direct-tools probe: the bundled catalog marks every model code_mode_only
+  // except gpt-5.5, whose tool_mode is null). Unset = the account default, as in the recorded Step 1 run.
+  const threadParams = {
+    cwd: paths.emptyCwd, sandbox: "read-only", approvalPolicy: "untrusted",
+    ...(process.env.STEP1_MODEL ? { model: process.env.STEP1_MODEL } : {}),
+  };
+  out.model = process.env.STEP1_MODEL ?? "account default";
   let threadId = "";
   // STEP1_ONLY=tools skips items 3–4 (local iteration on items 5–6 only; the recorded run does not set it).
   if (process.env.STEP1_ONLY !== "tools") {
@@ -299,6 +307,17 @@ async function main(): Promise<void> {
     { name: "production", profile, toml: productionToml, token: T.tool },
     { name: "diagnosticCodeModeHost", profile: profile + codeModeHostRule, toml: hostOnToml, token: T.toolHost },
   ];
+  // STEP1_DIRECT_CATALOG=<catalog json>: LABELLED PROBE. Copies that catalog into CODEX_HOME (Codex can read its own
+  // home) and points model_catalog_json at it, with the production config and profile otherwise (code mode stays off).
+  // Only this variant runs; the copy and the config are removed/restored at the end.
+  const probeCatalog = path.join(paths.codexHome, "probe-catalog.json");
+  if (process.env.STEP1_DIRECT_CATALOG) {
+    fs.copyFileSync(process.env.STEP1_DIRECT_CATALOG, probeCatalog);
+    toolVariants.splice(0, toolVariants.length, {
+      name: "probeDirectCatalog", profile, token: T.tool,
+      toml: `model_catalog_json = ${JSON.stringify(probeCatalog)}\n${productionToml}`,
+    });
+  }
   let toolVariant: (typeof toolVariants)[number] | null = null;
   out.item5 = {};
   for (const v of toolVariants) {
@@ -310,13 +329,21 @@ async function main(): Promise<void> {
     const h = await startHost(v.profile, install, paths);
     const item5: Record<string, any> = {};
     try {
+      if (!out.accountModels) {
+        try {
+          const ml: any = await h.a.rpc.request("model/list", {});
+          out.accountModels = (ml?.data ?? []).map((m: any) => String(m?.model ?? m?.id));
+        } catch (e) { out.accountModels = `model/list failed: ${errName(e)}`; }
+      }
       const ts: any = await h.a.rpc.request("thread/start", { ...threadParams, ephemeral: true, config: bind(v.token) });
       const tid = String(ts?.thread?.id ?? "");
       item5.threadStartCheck = checkThreadResponse(ts, paths.emptyCwd);
+      item5.threadModel = String(ts?.model ?? ts?.thread?.model ?? "?");
       const st: any = await h.a.rpc.request("mcpServerStatus/list", { threadId: tid, serverName: SERVER_NAME });
       item5.mcpStatusCheck = checkMcpStatus((st?.data ?? []).filter((e: any) => e?.name === SERVER_NAME), COMPANION_ALLOWLIST, "thread");
       const turn = await runTurn(h, tid, toolPrompt);
       item5.turnStatus = turn.status;
+      if ((turn as any).error) item5.turnError = (turn as any).error;
       item5.mcpCalls = turn.mcpCalls;
       item5.itemTypes = turn.itemTypes;
       item5.replyHasFixtureFile = turn.agentText.includes(FIXTURE_FILE);
@@ -394,5 +421,6 @@ try {
 } finally {
   for (const k of kids) if (k.exitCode === null) k.kill("SIGKILL");
   writeCodexConfig(appPaths(os.homedir()).codexHome, buildCodexConfigToml()); // never leave a diagnostic config behind
+  try { fs.unlinkSync(path.join(appPaths(os.homedir()).codexHome, "probe-catalog.json")); } catch {}
   removeTempDirs();
 }
