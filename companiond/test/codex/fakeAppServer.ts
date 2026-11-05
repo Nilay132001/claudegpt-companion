@@ -86,11 +86,16 @@ export class FakeAppServer {
     this.received.push(m);
     if (typeof m.method === "string" && m.id !== undefined) {
       const h = this.handlers[m.method];
+      const ok = (result: unknown) => this.#toClient.write(JSON.stringify({ id: m.id, result }) + "\n");
+      const fail = (e: any) => this.#toClient.write(JSON.stringify({ id: m.id, error: { code: e?.code ?? -32000, message: e?.message ?? "fake error" } }) + "\n");
       try {
         if (!h) throw { code: -32601, message: `fake: no handler for ${m.method}` };
-        this.#toClient.write(JSON.stringify({ id: m.id, result: h(m.params, this) }) + "\n");
+        const r = h(m.params, this);
+        // A handler may answer later (a promise), as Codex does while a relay connects during thread/start.
+        if (r instanceof Promise) r.then(ok, fail);
+        else ok(r);
       } catch (e: any) {
-        this.#toClient.write(JSON.stringify({ id: m.id, error: { code: e?.code ?? -32000, message: e?.message ?? "fake error" } }) + "\n");
+        fail(e);
       }
     } else if (m.id !== undefined && m.method === undefined) {
       this.#answers.get(m.id)?.(m);

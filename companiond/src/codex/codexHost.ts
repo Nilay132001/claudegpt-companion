@@ -155,10 +155,9 @@ export class CodexHost {
   #byGrant = new Map<string, string>();
   /** M6: kept (secret included) so that an ended binding can be granted again at the next turn. */
   #jira: JiraBinding | null = null;
-  /** Bumped by every setJira change; an open that granted under an older generation drops its Jira grant. */
+  /** Bumped by every setJira change; an open that granted under an older generation drops its Jira grant once
+   * thread/start returns (final review I-1). */
   #jiraGen = 0;
-  /** Jira grants of opens still in flight (not yet in #threads): setJira revokes them too. */
-  #pendingJira = new Set<RelayGrant>();
   #models: readonly string[] = [];
   #protected: Readonly<Record<string, string>> = {};
   #rebinds = new Map<string, number[]>();
@@ -227,9 +226,12 @@ export class CodexHost {
     this.#securityStopped = null;
   }
 
-  /** M6: binds (or, with null, unbinds) companion-jira for every thread. A change ends every Jira binding now, open
-   * or in flight; each thread reopens with (or without) the server at its next turn. A running turn keeps going. The
-   * same binding again changes nothing. */
+  /** M6: binds (or, with null, unbinds) companion-jira for every thread. A change ends every stored thread's Jira
+   * binding now; each thread reopens with (or without) the server at its next turn. A running turn keeps going. The
+   * same binding again changes nothing. An open still in flight keeps its Jira grant until thread/start returns
+   * (final review I-1): its relay connects during thread/start, and a token revoked under it would reach the
+   * acceptor as unknown, a latched security stop. The open then revokes that grant and marks the thread for a
+   * rebind, and no model turn can run before that. */
   setJira(j: JiraBinding | null): void {
     const same = (a: JiraBinding | null, b: JiraBinding | null): boolean =>
       a === b || (a !== null && b !== null && a.secret === b.secret &&
@@ -237,8 +239,6 @@ export class CodexHost {
     if (same(this.#jira, j)) return;
     this.#jira = j;
     this.#jiraGen++;
-    for (const g of this.#pendingJira) g.revoke();
-    this.#pendingJira.clear();
     for (const t of this.#threads.values()) {
       this.#dropJiraGrant(t);
       t.needsRebind = true;
@@ -342,8 +342,8 @@ export class CodexHost {
 
   async openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
     const open = (): Promise<string> => {
-      // Every open runs one at a time, bound or not: the acceptor never sees more than one handshake from us at once
-      // (I-3), and a move that closes a process (#leaveProcess) can never kill it under another open in flight on it,
+      // Every open runs one at a time, bound or not: the acceptor sees at most two handshakes from us at once (one
+      // thread's readonly and Jira relays), under its maxPending of 4 (I-3), and a move that closes a process (#leaveProcess) can never kill it under another open in flight on it,
       // the base process included (Task 10 review I2).
       const run = this.#bindQueue.then(() => this.#openThread(threadId, binding));
       this.#bindQueue = run.catch(() => undefined);
@@ -396,8 +396,9 @@ export class CodexHost {
     let asking = false;
     let requested = false;
     try {
-      const needed = (binding ? 1 : 0) + (this.#jira ? 1 : 0);
-      if (needed > 0) await this.#makeRoomForBinding(needed);
+      const needs = (): number => (binding ? 1 : 0) + (this.#jira ? 1 : 0);
+      let reserved = needs();
+      if (reserved > 0) await this.#makeRoomForBinding(reserved);
       const proc = await this.#proc(rootKey);
       this.#requireProtected();
       // Codex re-reads config per thread: a layer file added since the process started must fail here (N-4).
@@ -408,11 +409,16 @@ export class CodexHost {
         checkCodeModeConfig(cfg, [], path.join(this.#o.paths.codexHome, CATALOG_FILE)),
       );
       if (cfgCheck.failures.length > 0) throw new SecurityCheckError(cfgCheck.failures.join("; "));
+      // Final review M-2: a setJira during the awaits above may have added the Jira grant. Room is made again for the
+      // new count; no await separates the last check from the grants, so the cap holds exactly.
+      for (let n = needs(); n > reserved; n = needs()) {
+        await this.#makeRoomForBinding(n);
+        reserved = n;
+      }
       grant = binding ? this.#o.broker.grant(binding.launch) : null;
       const jira = this.#jira;
       const jiraGen = this.#jiraGen;
       jiraGrant = jira ? this.#o.broker.grant(jira.launch, { validator: jira.validator, secret: jira.secret }) : null;
-      if (jiraGrant) this.#pendingJira.add(jiraGrant);
       const cwd = this.#o.paths.emptyCwd;
       const params: Record<string, unknown> = {
         cwd,
@@ -436,9 +442,9 @@ export class CodexHost {
       // Final review m5: a resume must answer for the thread it was asked for, never store state under another id.
       if (threadId && id !== threadId) throw new SecurityCheckError("app-server resumed a different thread");
       // setJira ran while Codex answered (to null, to another binding, or from null to a binding): any grant made
-      // here is revoked and the thread rebinds with the current binding at its next turn (fix M-1).
+      // here is revoked now that its relay has finished connecting (final review I-1), and the thread rebinds with
+      // the current binding at its next turn (fix M-1).
       const jiraChanged = jiraGen !== this.#jiraGen;
-      if (jiraGrant) this.#pendingJira.delete(jiraGrant);
       if (jiraChanged && jiraGrant) {
         jiraGrant.revoke();
         jiraGrant = null;
@@ -477,7 +483,6 @@ export class CodexHost {
       // thread/resume itself (no thread loaded, for example an unknown thread id) is passed to the caller instead.
       grant?.revoke();
       jiraGrant?.revoke();
-      if (jiraGrant) this.#pendingJira.delete(jiraGrant);
       if (t) {
         if (this.#threads.get(t.threadId) === t) this.#threads.delete(t.threadId);
         t.proc.threads.delete(t.threadId);
