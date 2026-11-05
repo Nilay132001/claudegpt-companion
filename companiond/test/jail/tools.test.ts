@@ -5,7 +5,8 @@ import path from "node:path";
 import { SafeGit } from "../../src/git/safeGit.ts";
 import { NOT_AVAILABLE } from "../../src/jail/containedPath.ts";
 import { runTool, type JailContext } from "../../src/jail/tools.ts";
-import { fixtureGit, makeRepo, put, removeTempDirs, tempDir, testGitPath } from "../helpers/fixtures.ts";
+import { redactToolOutput } from "../../src/jail/redact.ts";
+import { fixtureGit, makeRepo, pemBody, put, removeTempDirs, tempDir, testGitPath } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
 
@@ -75,6 +76,24 @@ test("every tool's success path goes through redact", async () => {
     assert.equal(r.isError, false, `${name}: ${r.text}`);
     assert.ok(r.text.startsWith("[[REDACTED-MARKER]]"), `${name}: ${r.text.slice(0, 60)}`);
   }
+});
+
+test("a paged read_file that starts inside a private key shows none of the key body", async () => {
+  const { ctx: base, repo } = await fixture();
+  const ctx: JailContext = { ...base, redact: redactToolOutput };
+  const body = pemBody(25, 7);
+  const header = ["-----BEGIN ", "RSA PRIVATE KEY-----"].join("");
+  const footer = ["-----END ", "RSA PRIVATE KEY-----"].join("");
+  put(repo, "deploy/settings.yaml", ["name: synthetic", "key: |", `  ${header}`, ...body.map((l) => `  ${l}`), `  ${footer}`, "after: plain"].join("\n"));
+  // Line 1 is the fixture mark; the header is line 4, so line 10 is mid-body.
+  const r = await runTool(ctx, "read_file", { path: "deploy/settings.yaml", start_line: 10, end_line: 40 });
+  assert.equal(r.isError, false);
+  const lines = r.text.split("\n");
+  const bodyLines = lines.slice(0, body.length - 5);
+  for (const l of bodyLines) assert.match(l, /^\d+\t {2}\[REDACTED:private-key\]$/, l);
+  assert.match(lines.at(-2) ?? "", /^\d+\t {2}\[REDACTED:private-key\]$/, "lone END line");
+  assert.match(lines.at(-1) ?? "", /^\d+\tafter: plain$/);
+  assert.doesNotMatch(r.text, /[A-Za-z0-9+/]{20,}/);
 });
 
 test("read_file rejects bad ranges and a missing path by input, not by file", async () => {
