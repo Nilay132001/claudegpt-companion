@@ -164,11 +164,9 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
     ]) {
       assert.match(out[k] ?? "missing", DENIED, k);
     }
-    // Without the deny the same connects are not refused by Seatbelt (ECONNREFUSED or OK): the deny is what blocks them.
-    for (const [k] of localRows) {
-      assert.ok(control[k] !== undefined, `control ${k}`);
-      assert.doesNotMatch(control[k] ?? "", DENIED, `control ${k}`);
-    }
+    // Without the deny the same connects reach the network stack (ECONNREFUSED: nothing listens; OK: something does):
+    // the deny is what blocks them. Any other errno (unreachable, EAI, …) makes the control say nothing, so it fails.
+    for (const [k] of localRows) assert.ok(["ECONNREFUSED", "OK"].includes(control[k] ?? "missing"), `control ${k}: ${String(control[k])}`);
     assert.equal(login.bindLoginPort, "OK");
     for (const k of ["bindOtherPort", "loopback443", "execSh"]) assert.match(login[k] ?? "missing", DENIED, `login ${k}`);
     // login.bindLoginPortAnyAddr is recorded: measured OK while planning (SBPL's localhost:1455 also matches 0.0.0.0).
