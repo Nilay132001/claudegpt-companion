@@ -35,7 +35,7 @@ patterns=(
   'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.'           # JWTs
   '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'             # email addresses
 )
-allow_email='noreply@anthropic\.com|git@github\.com'
+allow_email='noreply@anthropic\.com|git@github\.com|@example\.invalid|user@x\.atlassian\.net'
 files=$(echo "$tracked" | grep -v -E '^scripts/check-repo\.sh$|package-lock\.json$' || true)
 for p in "${patterns[@]}"; do
   hits=$(echo "$files" | xargs grep -I -n -E -e "$p" 2>/dev/null | grep -v -E "$allow_email" || true)
