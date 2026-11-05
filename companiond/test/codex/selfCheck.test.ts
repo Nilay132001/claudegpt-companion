@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { OFF_FEATURES } from "../../src/codex/config.ts";
-import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
+import { COMPANION_ALLOWLIST, toolAllowlist } from "../../src/codex/serverRequests.ts";
+import { JIRA_SERVER_NAME, JIRA_TOOL_NAMES } from "../../src/jira/tools.ts";
+import { TOOL_NAMES } from "../../src/jail/mcpServer.ts";
 import {
   checkCodeModeConfig, checkCodexHome, checkCompanionCwd, checkConfigLayers, checkConfigRead, checkFeatureList, checkThreadModel, checkMcpStatus, checkThreadResponse, checkVersion,
   mergeChecks, versionFromUserAgent, type FsProbe,
@@ -78,11 +80,13 @@ test("CODEX_HOME must not hold global instruction files", () => {
   assert.equal(checkCodexHome("/h", fakeFs([path.join("/h", "AGENTS.md")])).failures.length, 1);
 });
 
+const READONLY_ONLY = new Set(["companion-readonly"]); // a root-bound thread without Jira
+
 test("MCP status: subset per process, exact per bound thread", () => {
   const base = [{ name: "companion-readonly", tools: {} }];
   assert.deepEqual(checkMcpStatus(base, COMPANION_ALLOWLIST, "process").failures, []);
-  assert.match(checkMcpStatus(base, COMPANION_ALLOWLIST, "thread").failures.join(), /missing/);
-  assert.deepEqual(checkMcpStatus([{ name: "companion-readonly", tools: TOOLS }], COMPANION_ALLOWLIST, "thread").failures, []);
+  assert.match(checkMcpStatus(base, COMPANION_ALLOWLIST, "thread", READONLY_ONLY).failures.join(), /missing/);
+  assert.deepEqual(checkMcpStatus([{ name: "companion-readonly", tools: TOOLS }], COMPANION_ALLOWLIST, "thread", READONLY_ONLY).failures, []);
   const extra = [{ name: "companion-readonly", tools: { ...TOOLS, write_file: {} } }];
   assert.match(checkMcpStatus(extra, COMPANION_ALLOWLIST, "process").failures.join(), /write_file/);
   assert.match(checkMcpStatus([{ name: "other", tools: {} }], COMPANION_ALLOWLIST, "process").failures.join(), /other/);
@@ -133,4 +137,30 @@ test("config layers: only the user layer at CODEX_HOME/config.toml and the syste
   assert.match(checkConfigLayers({ layers: [...ok.layers, layer("managed", "/s/codex-home/managed_config.toml")] }, "/s/codex-home").failures.join(), /managed config layer/);
   assert.match(checkConfigLayers({ layers: [layer("system", "/etc/codex/config.toml")] }, "/s/codex-home").failures.join(), /no user config layer/);
   assert.equal(checkConfigLayers({}, "/s/codex-home").failures.length, 1);
+});
+
+const entry = (name: string, tools: readonly string[]) => ({ name, tools: Object.fromEntries(tools.map((t) => [t, {}])) });
+
+test("M6: a bound Jira thread must list exactly the three Jira tools; an unbound readonly server may list none", () => {
+  const ok = checkMcpStatus([entry("companion-readonly", []), entry(JIRA_SERVER_NAME, JIRA_TOOL_NAMES)], COMPANION_ALLOWLIST, "thread", new Set([JIRA_SERVER_NAME]));
+  assert.deepEqual(ok.failures, []);
+  const missing = checkMcpStatus([entry(JIRA_SERVER_NAME, ["jira_search"])], COMPANION_ALLOWLIST, "thread", new Set([JIRA_SERVER_NAME]));
+  assert.ok(missing.failures.some((f) => f.includes("companion-jira/jira_get_issue is missing")));
+  const both = checkMcpStatus([entry("companion-readonly", TOOL_NAMES), entry(JIRA_SERVER_NAME, JIRA_TOOL_NAMES)], COMPANION_ALLOWLIST, "thread");
+  assert.deepEqual(both.failures, []);
+});
+
+test("M6: no write tool is visible — an extra or write-shaped tool on any server fails the self-check", () => {
+  for (const scope of ["process", "thread"] as const) {
+    const r = checkMcpStatus([entry(JIRA_SERVER_NAME, [...JIRA_TOOL_NAMES, "createJiraIssue"])], COMPANION_ALLOWLIST, scope, new Set([JIRA_SERVER_NAME]));
+    assert.ok(r.failures.some((f) => f.includes("companion-jira/createJiraIssue is not allowlisted")), scope);
+    assert.ok(r.failures.some((f) => f.includes("companion-jira/createJiraIssue looks like a write tool")), scope);
+  }
+  // Even an allowlist that wrongly contained a write tool is caught (defence in depth).
+  const bad = toolAllowlist({ [JIRA_SERVER_NAME]: [...JIRA_TOOL_NAMES, "addCommentToJiraIssue"] });
+  const r = checkMcpStatus([entry(JIRA_SERVER_NAME, [...JIRA_TOOL_NAMES, "addCommentToJiraIssue"])], bad, "thread");
+  assert.ok(r.failures.some((f) => f.includes("looks like a write tool")));
+  // Atlassian's remote server is never allowlisted.
+  const remote = checkMcpStatus([entry("atlassian", ["getJiraIssue"])], COMPANION_ALLOWLIST, "process");
+  assert.ok(remote.failures.some((f) => f.includes("MCP server atlassian is not allowlisted")));
 });

@@ -14,14 +14,18 @@ import os from "node:os";
 import path from "node:path";
 import { AppDirError, ensurePrivateDir, type AppPaths } from "../app/appPaths.ts";
 import { SERVER_NAME, TOOL_NAMES } from "../jail/mcpServer.ts";
+import { JIRA_SERVER_NAME, JIRA_TOOL_NAMES } from "../jira/tools.ts";
 import type { CodexInstall } from "./codexInstall.ts";
 import { buildCodexLaunch, buildOfflineCodexLaunch, type CodexLaunch, type RelayEndpoint } from "./codexSeatbelt.ts";
 import { buildCodexConfigToml, CATALOG_FILE, CODEX_PROTECTED_FILES, OFF_FEATURES, tomlString, writeCodexConfig, writeCodexHomeFile } from "./config.ts";
 import type { CheckResult } from "./selfCheck.ts";
 
 export const ALLOWED_TOP_LEVEL: readonly string[] = ["functions.exec", "functions.wait"];
-export const NESTED_PREFIX = `mcp__${SERVER_NAME.replaceAll("-", "_")}__`;
-export const ALLOWED_NESTED: readonly string[] = TOOL_NAMES.map((t) => `${NESTED_PREFIX}${t}`);
+const nestedPrefix = (server: string): string => `mcp__${server.replaceAll("-", "_")}__`;
+export const NESTED_PREFIX = nestedPrefix(SERVER_NAME);
+export const READONLY_NESTED: readonly string[] = TOOL_NAMES.map((t) => `${NESTED_PREFIX}${t}`);
+export const JIRA_NESTED: readonly string[] = JIRA_TOOL_NAMES.map((t) => `${nestedPrefix(JIRA_SERVER_NAME)}${t}`);
+export const ALLOWED_NESTED: readonly string[] = [...READONLY_NESTED, ...JIRA_NESTED];
 
 export class CodeModeError extends Error {
   constructor(message: string) {

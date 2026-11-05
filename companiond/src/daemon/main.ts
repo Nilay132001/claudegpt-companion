@@ -8,7 +8,9 @@ import { ChatService } from "../chat/chatService.ts";
 import { defaultClaudePaths } from "../claude/paths.ts";
 import { CodexInstallError } from "../codex/codexInstall.ts";
 import { CODEX_SEATBELT_MEASURED } from "../codex/codexSeatbelt.ts";
-import { createCompanionCodex } from "../codex/companionCodex.ts";
+import { createCompanionCodex, jiraBindingFactory } from "../codex/companionCodex.ts";
+import { buildJiraLaunch } from "../jira/jiraProfile.ts";
+import { JiraService, spawnCheck } from "../jira/jiraService.ts";
 import { buildReadonlyLaunch } from "../launch/seatbelt.ts";
 import { discoverToolchain, type Toolchain } from "../launch/toolchain.ts";
 import { Privacy, safeGitInspector } from "../privacy/privacy.ts";
@@ -18,7 +20,7 @@ import { DisabledHost } from "./disabledHost.ts";
 import { buildHandlers, toDaemonError, wireEvents, type DaemonHost } from "./handlers.ts";
 import { DaemonServer } from "./server.ts";
 
-const VERSION = "0.4.0";
+const VERSION = "0.6.0";
 const log = (code: string) => process.stderr.write(`companiond: ${code}\n`);
 const errName = (e: unknown) => (e instanceof Error ? e.name : "error");
 
@@ -101,7 +103,13 @@ const chat = new ChatService({
   },
 });
 
-const deps = { host, bridge, chat, privacy, store, version: VERSION, shutdown: () => void shutdown() };
+// The Jira credential lives only in this object's memory. With no toolchain it is kept but nothing is bound or checked.
+const jira = new JiraService({
+  host,
+  binding: toolchain ? jiraBindingFactory(toolchain) : null,
+  runCheck: toolchain ? (secret) => spawnCheck(buildJiraLaunch(toolchain!, ["--check"]), secret) : null,
+});
+const deps = { host, bridge, chat, privacy, store, jira, version: VERSION, shutdown: () => void shutdown() };
 const server = new DaemonServer(process.stdin, process.stdout, buildHandlers(deps), toDaemonError, () => void shutdown());
 wireEvents(deps, (m, p) => server.notify(m, p));
 bridge.start();

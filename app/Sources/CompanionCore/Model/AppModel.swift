@@ -52,6 +52,9 @@ public final class AppModel {
     public var preview: PendingPreview?
     public var sentView: SentView?
     public var errorMessage: String?
+    public internal(set) var jira: JiraStatus?
+    public internal(set) var jiraNote: String?
+    @ObservationIgnored let jiraStore: any JiraSecretStore
 
     /// `byUser` is true only for a change made in this run (setSetting), false when settings are loaded from companiond.
     @ObservationIgnored public var onSettingsChanged: ((UISettings, _ byUser: Bool) -> Void)?
@@ -69,11 +72,13 @@ public final class AppModel {
     /// Events with no session id for a turn no conversation owns yet (chat.send has not answered). Replayed on attach.
     @ObservationIgnored private var unrouted: [String: [TurnEvent]] = [:]
 
-    public init(connector: @escaping Connector) {
+    public init(connector: @escaping Connector, jiraStore: any JiraSecretStore = NoJiraStore()) {
         self.connector = connector
+        self.jiraStore = jiraStore
     }
 
     private var api: (any DaemonAPI)? { current?.api }
+    var currentAPI: (any DaemonAPI)? { current?.api }
 
     // MARK: Lifecycle
 
@@ -108,6 +113,7 @@ public final class AppModel {
             settings = await UISettings.load { try await c.api.settingsGet($0) }
             onSettingsChanged?(settings, false)
             apply(snapshot: try await c.api.sessionsSnapshot())
+            await loadJira(c.api)
             if host.isReady { await loadAuth() }
         } catch {
             errorMessage = Self.describe(error)

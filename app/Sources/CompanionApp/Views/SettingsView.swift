@@ -15,6 +15,7 @@ struct SettingsView: View {
         TabView {
             AccountSettings().tabItem { Label("Account", systemImage: "person.crop.circle") }
             PrivacySettings().tabItem { Label("Privacy", systemImage: "hand.raised") }
+            JiraSettings().tabItem { Label("Jira", systemImage: "list.bullet.rectangle") }
             SpeechSettings().tabItem { Label("Speech", systemImage: "speaker.wave.2") }
             WindowSettings().tabItem { Label("Window", systemImage: "sidebar.left") }
             AdvancedSettings().tabItem { Label("Advanced", systemImage: "gearshape.2") }

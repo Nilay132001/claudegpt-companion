@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { EXCLUDED_TOOL_NAMESPACES } from "./config.ts";
+import { isWriteShapedTool } from "../jira/tools.ts";
 import type { ToolAllowlist } from "./serverRequests.ts";
 
 export interface CheckResult { failures: string[]; warnings: string[] }
@@ -166,23 +167,26 @@ export function checkCodexHome(codexHome: string, fsx: FsProbe = nodeFsProbe): C
   return r;
 }
 
-export function checkMcpStatus(entries: readonly unknown[], allow: ToolAllowlist, scope: "process" | "thread"): CheckResult {
+/** scope "thread": every server in `bound` (default: every allowlisted server) must be running and list exactly its
+ * allowlist. Both scopes: every listed tool must be allowlisted and none may look like a write tool (M6). */
+export function checkMcpStatus(entries: readonly unknown[], allow: ToolAllowlist, scope: "process" | "thread", bound: ReadonlySet<string> = new Set(allow.keys())): CheckResult {
   const r = empty();
   const seen = new Set<string>();
   for (const raw of entries) {
     const e = obj(raw);
     const name = typeof e?.name === "string" ? e.name : "<unnamed>";
     seen.add(name);
+    const tools = Object.keys(obj(e?.tools) ?? {});
+    for (const t of tools) if (isWriteShapedTool(t)) r.failures.push(`MCP tool ${name}/${t} looks like a write tool`);
     const allowed = allow.get(name);
     if (!allowed) {
       r.failures.push(`MCP server ${name} is not allowlisted`);
       continue;
     }
-    const tools = Object.keys(obj(e?.tools) ?? {});
     for (const t of tools) if (!allowed.has(t)) r.failures.push(`MCP tool ${name}/${t} is not allowlisted`);
-    if (scope === "thread") for (const t of allowed) if (!tools.includes(t)) r.failures.push(`MCP tool ${name}/${t} is missing`);
+    if (scope === "thread" && bound.has(name)) for (const t of allowed) if (!tools.includes(t)) r.failures.push(`MCP tool ${name}/${t} is missing`);
   }
-  if (scope === "thread") for (const s of allow.keys()) if (!seen.has(s)) r.failures.push(`MCP server ${s} is not running for this thread`);
+  if (scope === "thread") for (const s of bound) if (!seen.has(s)) r.failures.push(`MCP server ${s} is not running for this thread`);
   return r;
 }
 

@@ -16,6 +16,14 @@ const decide = (method: string, params: unknown, lookup = none) => decideServerR
 const ACCEPT = { result: { action: "accept", content: null, _meta: null } };
 const DECLINE = { result: { action: "decline", content: null, _meta: null } };
 
+test("M6: a tool-call approval for a Jira read tool is accepted; any other Jira tool or Atlassian's server is declined", () => {
+  const ask = (serverName: string, tool: string) => elicitation({ serverName }, { [APPROVAL_KIND_KEY]: APPROVAL_KIND_MCP_TOOL_CALL, tool_name: tool });
+  assert.equal(decide("mcpServer/elicitation/request", ask("companion-jira", "jira_search")).outcome, "accepted");
+  assert.equal(decide("mcpServer/elicitation/request", ask("companion-jira", "createJiraIssue")).outcome, "declined");
+  assert.equal(decide("mcpServer/elicitation/request", ask("atlassian", "getJiraIssue")).outcome, "declined");
+  assert.equal(decide("mcpServer/elicitation/request", { threadId: "t", serverName: "companion-jira", mode: "url", url: "https://example.invalid" }).outcome, "declined");
+});
+
 test("command and file-change approvals are declined with an alert", () => {
   for (const m of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]) {
     const d = decide(m, { threadId: "t1", turnId: "u1", itemId: "i1" });

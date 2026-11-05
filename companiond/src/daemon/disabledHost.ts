@@ -15,6 +15,7 @@ export class DisabledHost {
   }
   async stop(): Promise<void> {}
   clearSecurityStop(): void {}
+  setJira(_j: unknown): void {}
   async auth(): Promise<AuthState> {
     throw new HostNotReadyError();
   }

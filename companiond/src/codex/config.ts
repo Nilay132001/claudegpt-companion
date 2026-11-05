@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { AppDirError, ensurePrivateDir } from "../app/appPaths.ts";
 import { SERVER_NAME, TOOL_NAMES } from "../jail/mcpServer.ts";
+import { JIRA_SERVER_NAME, JIRA_TOOL_NAMES } from "../jira/tools.ts";
 
 export const REQUIRED_OFF_FEATURES: readonly string[] = [
   "shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
@@ -79,6 +80,13 @@ export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES, code
     `command = ${tomlString(BASE_MCP_COMMAND)}`,
     "args = []",
     `enabled_tools = ${tomlValue([...TOOL_NAMES])}`,
+    "",
+    // M6 (owner ruling B): inert like companion-readonly; a thread's override points it at the relay only while the
+    // owner has Jira set up. Atlassian's remote MCP is never configured.
+    `[mcp_servers.${tomlKey(JIRA_SERVER_NAME)}]`,
+    `command = ${tomlString(BASE_MCP_COMMAND)}`,
+    "args = []",
+    `enabled_tools = ${tomlValue([...JIRA_TOOL_NAMES])}`,
     "",
   ].join("\n");
 }

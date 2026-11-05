@@ -346,6 +346,41 @@ test("the socket is checked at accept: a swap between connect and accept is repo
   s.destroy();
 });
 
+const INIT = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } };
+
+test("a grant's secret reaches the server on fd 3 only; never in its argv or env (M6)", async () => {
+  const { a, rp } = await start();
+  const secret = "SYNTHETIC-SECRET-LINE";
+  const launch = jail("echo-fd3");
+  const g = a.grant(launch, { secret: `${secret}\n` });
+  const c = await connectRelay(rp.socket, g.token);
+  c.send(INIT);
+  assert.ok(await c.reply(1));
+  c.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "read_file", arguments: {} } });
+  const r = await c.reply(2);
+  assert.equal(r?.result?.content?.[0]?.text, `SYNTHETIC FIXTURE fd3=${secret}`);
+  assert.ok(!JSON.stringify(launch).includes(secret));
+  c.end();
+});
+
+test("a grant's own validator is used: a Jira grant allows only the Jira tools (M6)", async () => {
+  const { a, rp, events } = await start();
+  const jiraValidator: LaunchSpec = { ...validator(), args: [VALIDATOR, "jira_get_issue,jira_search,jira_get_comments"] };
+  const ok = a.grant(jail("tools-jira"), { validator: jiraValidator });
+  const c = await connectRelay(rp.socket, ok.token);
+  c.send(INIT);
+  assert.ok(await c.reply(1));
+  c.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "jira_search", arguments: {} } });
+  assert.equal((await c.reply(2))?.result?.isError, false);
+  c.end();
+  const bad = a.grant(jail("tools-jira"), { validator: jiraValidator });
+  const c2 = await connectRelay(rp.socket, bad.token);
+  c2.send(INIT);
+  assert.ok(await c2.reply(1));
+  c2.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "read_file", arguments: {} } }); // a companion-readonly tool on the Jira binding
+  assert.ok(await until(() => has(events, "closed", "violation")));
+});
+
 test("a spawn that throws ends that binding with error, kills the jail and leaves the acceptor working (review 6)", async () => {
   const dir = tempDir("cgc-acc-");
   const pidFile = `${dir}/jail.pid`;

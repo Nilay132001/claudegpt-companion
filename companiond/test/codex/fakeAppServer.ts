@@ -7,7 +7,7 @@ import type { CodexLaunch } from "../../src/codex/codexSeatbelt.ts";
 import { BASE_MCP_COMMAND, CATALOG_FILE, CODE_MODE_OFF_FEATURES, EXCLUDED_TOOL_NAMESPACES, OFF_FEATURES } from "../../src/codex/config.ts";
 import type { SpawnedServer, SpawnFn } from "../../src/codex/spawn.ts";
 import type { LaunchSpec } from "../../src/launch/seatbelt.ts";
-import type { BrokerEvent, RelayBroker, RelayGrant } from "../../src/relay/broker.ts";
+import type { BrokerEvent, GrantOptions, RelayBroker, RelayGrant } from "../../src/relay/broker.ts";
 import { newToken } from "../../src/relay/handshake.ts";
 
 export type Handler = (params: any, fake: FakeAppServer) => unknown;
@@ -17,6 +17,8 @@ export class FakeAppServer {
   readonly launch: CodexLaunch;
   readonly received: any[] = [];
   readonly bound = new Set<string>();
+  /** Threads whose config pointed companion-jira at the relay. */
+  readonly jiraBound = new Set<string>();
   handlers: Record<string, Handler>;
   killed = false;
   /** false: kill() only records the kill; the test calls exit() itself (a process that is slow to die). */
@@ -72,15 +74,28 @@ export class FakeAppServer {
   last(method: string): any {
     return [...this.received].reverse().find((m) => m.method === method)?.params;
   }
+  /** Every message the client sent this process, requests and notifications alike. */
+  get requests(): readonly any[] {
+    return this.received;
+  }
+  /** The params of the latest thread/start or thread/resume. */
+  lastThreadParams(): any {
+    return [...this.received].reverse().find((m) => m.method === "thread/start" || m.method === "thread/resume")?.params;
+  }
   #onLine(m: any): void {
     this.received.push(m);
     if (typeof m.method === "string" && m.id !== undefined) {
       const h = this.handlers[m.method];
+      const ok = (result: unknown) => this.#toClient.write(JSON.stringify({ id: m.id, result }) + "\n");
+      const fail = (e: any) => this.#toClient.write(JSON.stringify({ id: m.id, error: { code: e?.code ?? -32000, message: e?.message ?? "fake error" } }) + "\n");
       try {
         if (!h) throw { code: -32601, message: `fake: no handler for ${m.method}` };
-        this.#toClient.write(JSON.stringify({ id: m.id, result: h(m.params, this) }) + "\n");
+        const r = h(m.params, this);
+        // A handler may answer later (a promise), as Codex does while a relay connects during thread/start.
+        if (r instanceof Promise) r.then(ok, fail);
+        else ok(r);
       } catch (e: any) {
-        this.#toClient.write(JSON.stringify({ id: m.id, error: { code: e?.code ?? -32000, message: e?.message ?? "fake error" } }) + "\n");
+        fail(e);
       }
     } else if (m.id !== undefined && m.method === undefined) {
       this.#answers.get(m.id)?.(m);
@@ -89,14 +104,23 @@ export class FakeAppServer {
 }
 
 const TOOLS = Object.fromEntries(["list_dir", "read_file", "search", "git_status", "git_diff"].map((t) => [t, { name: t }]));
+export const JIRA_TOOLS = ["jira_get_issue", "jira_search", "jira_get_comments"];
 
-export function goodHandlers(): Record<string, Handler> {
+const relayed = (c: Record<string, any>, server: string): boolean => {
+  const command = c[`mcp_servers.${server}.command`];
+  const token = c[`mcp_servers.${server}.env`]?.CGC_RELAY_TOKEN;
+  return typeof command === "string" && command !== BASE_MCP_COMMAND && typeof token === "string";
+};
+
+/** jiraTools: what companion-jira lists for a thread whose config pointed it at the relay. */
+export function goodHandlers(o: { jiraTools?: readonly string[] } = {}): Record<string, Handler> {
+  const jiraTools = Object.fromEntries((o.jiraTools ?? JIRA_TOOLS).map((t) => [t, {}]));
   const thread = (id: string, params: any, f: FakeAppServer) => {
     const c = params?.config ?? {};
-    const command = c["mcp_servers.companion-readonly.command"];
-    const token = c["mcp_servers.companion-readonly.env"]?.CGC_RELAY_TOKEN;
-    if (typeof command === "string" && command !== BASE_MCP_COMMAND && typeof token === "string") f.bound.add(id);
+    if (relayed(c, "companion-readonly")) f.bound.add(id);
     else f.bound.delete(id);
+    if (relayed(c, "companion-jira")) f.jiraBound.add(id);
+    else f.jiraBound.delete(id);
     return {
       thread: { id }, model: FAKE_MODEL, cwd: params.cwd, instructionSources: [], approvalPolicy: params.approvalPolicy,
       approvalsReviewer: "user", sandbox: { type: "readOnly", networkAccess: false },
@@ -125,7 +149,9 @@ export function goodHandlers(): Record<string, Handler> {
       data: OFF_FEATURES.map((name) => ({ name, stage: "stable", enabled: name === "unified_exec", defaultEnabled: name === "unified_exec", displayName: null, description: null, announcement: null })),
       nextCursor: null,
     }),
-    "mcpServerStatus/list": (p, f) => ({ data: [{ name: "companion-readonly", tools: p?.threadId && f.bound.has(p.threadId) ? TOOLS : {} }], nextCursor: null }),
+    "mcpServerStatus/list": (p, f) => p?.serverName === "companion-jira"
+      ? { data: [{ name: "companion-jira", tools: p?.threadId && f.jiraBound.has(p.threadId) ? jiraTools : {} }], nextCursor: null }
+      : { data: [{ name: "companion-readonly", tools: p?.threadId && f.bound.has(p.threadId) ? TOOLS : {} }], nextCursor: null },
     "thread/start": (p, f) => thread(f.next("thr"), p, f),
     "thread/resume": (p, f) => thread(p.threadId, p, f),
     "thread/unsubscribe": () => ({ status: "unsubscribed" }),
@@ -148,7 +174,7 @@ export function fakeSpawn(handlers: () => Record<string, Handler> = goodHandlers
   };
 }
 
-export interface FakeGrant { id: string; token: string; launch: LaunchSpec; ttl: number | null; revoked: boolean }
+export interface FakeGrant { id: string; token: string; launch: LaunchSpec; validator: LaunchSpec | null; secret: string | null; ttl: number | null; revoked: boolean }
 
 /** Records grants; tests emit broker events by hand. Like the real acceptor, more than `maxLive` live grants is a
  * refused connection, and an unhealthy broker must be restarted. */
@@ -171,8 +197,8 @@ export class FakeBroker implements RelayBroker {
   live(): number {
     return this.grants.filter((g) => !g.revoked).length;
   }
-  grant(launch: LaunchSpec): RelayGrant {
-    const g: FakeGrant = { id: `g${this.grants.length + 1}`, token: newToken(), launch, ttl: null, revoked: false };
+  grant(launch: LaunchSpec, o: GrantOptions = {}): RelayGrant {
+    const g: FakeGrant = { id: `g${this.grants.length + 1}`, token: newToken(), launch, validator: o.validator ?? null, secret: o.secret ?? null, ttl: null, revoked: false };
     this.grants.push(g);
     if (this.live() > this.maxLive) this.emit({ type: "refused", reason: "too many connections" });
     return {

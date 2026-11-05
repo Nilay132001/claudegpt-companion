@@ -41,6 +41,15 @@ test("mcpToolCall on another tool or server interrupts", () => {
   }
 });
 
+test("M6: a Jira read tool passes the guard; a Jira write tool interrupts", () => {
+  const ok = setup();
+  ok.started({ type: "mcpToolCall", id: "j1", server: "companion-jira", tool: "jira_get_issue", status: "inProgress" });
+  assert.deepEqual(ok.interrupts, []);
+  const bad = setup();
+  bad.started({ type: "mcpToolCall", id: "j2", server: "companion-jira", tool: "createJiraIssue" });
+  assert.deepEqual(bad.interrupts, ["t1/u1"]);
+});
+
 test("an item without a type, and item/completed, are checked too", () => {
   const { g, interrupts } = setup();
   g.onNotification("item/completed", { threadId: "t1", turnId: "u2", item: { id: "z" }, completedAtMs: 1 });

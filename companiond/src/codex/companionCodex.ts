@@ -12,7 +12,9 @@ import { buildRelay } from "../relay/relayBuild.ts";
 import { ensureRelayDirs, relayPaths } from "../relay/relayPaths.ts";
 import { buildValidatorLaunch } from "../relay/validatorProfile.ts";
 import { LIVE_SURFACE_CHECK, liveRunner, prepareCodeMode } from "./codeMode.ts";
-import { CodexHost, type CodexHostOptions } from "./codexHost.ts";
+import { buildJiraLaunch } from "../jira/jiraProfile.ts";
+import { JIRA_TOOL_NAMES } from "../jira/tools.ts";
+import { CodexHost, type CodexHostOptions, type JiraBinding } from "./codexHost.ts";
 import { findCodex, PINNED_CODEX_VERSION, type CodexInstall } from "./codexInstall.ts";
 import { buildCodexLaunch, type RelayEndpoint } from "./codexSeatbelt.ts";
 import { COMPANION_ALLOWLIST } from "./serverRequests.ts";
@@ -28,6 +30,13 @@ export async function startCompanionRelay(paths: AppPaths, tc: Toolchain): Promi
   const acceptor = new RelayAcceptor({ socketPath: rp.socket, validator: buildValidatorLaunch(tc, TOOL_NAMES) });
   await acceptor.start();
   return { acceptor, relay: { binary: rp.binary, socket: rp.socket } };
+}
+
+/** The Jira binding for a credential: companion-jira's launch, its tool validator and the secret (for fd 3). */
+export function jiraBindingFactory(tc: Toolchain): (secret: string) => JiraBinding {
+  const launch = buildJiraLaunch(tc);
+  const validator = buildValidatorLaunch(tc, JIRA_TOOL_NAMES);
+  return (secret) => ({ launch, validator, secret });
 }
 
 /** The production CodexHost options for a broker. */

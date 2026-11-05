@@ -58,7 +58,7 @@ test("app-server under the production profile: config/read shows the code-mode c
       configLayers: checkConfigLayers(cfg, paths.codexHome).failures,
       codeMode: checkCodeModeConfig(cfg, features?.data ?? [], path.join(paths.codexHome, CATALOG_FILE)).failures,
       featureList: checkFeatureList(features?.data ?? [], OFF_FEATURES, "0.166.0").failures,
-      boundTools: checkMcpStatus((st?.data ?? []).filter((e: any) => e?.name === SERVER_NAME), COMPANION_ALLOWLIST, "thread").failures,
+      boundTools: checkMcpStatus((st?.data ?? []).filter((e: any) => e?.name === SERVER_NAME), COMPANION_ALLOWLIST, "thread", new Set([SERVER_NAME])).failures,
       broker: s.brokerEvents.map((e) => e.type),
       threadModel: s.threadModel,
       threadModelChecked: s.threadModel !== null && s.models.includes(s.threadModel),

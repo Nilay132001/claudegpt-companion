@@ -41,6 +41,10 @@ enum DaemonITest {
             try await client.settingsSet(k, v)
             #expect(try await client.settingsGet(k) == v, "\(k)")
         }
+        // Jira: status, configure, clear. No jira.check (it would use the network). SYNTHETIC FIXTURE credentials.
+        #expect(try await client.jiraStatus().configured == false)
+        #expect(try await client.jiraConfigure(synthetic) == JiraStatus(configured: true, site: synthetic.site, email: synthetic.email))
+        #expect(try await client.jiraClear().configured == false)
         try await client.shutdown()
         var sawDisconnect = false
         for await e in client.events where e == .disconnected { sawDisconnect = true }

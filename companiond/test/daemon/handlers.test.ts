@@ -2,11 +2,12 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import type { BridgeEvent } from "../../src/bridge/sessionBridge.ts";
 import { ChatService } from "../../src/chat/chatService.ts";
-import { HostBusyError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
+import { HostBusyError, TurnBusyError, type HostEvent, type HostState, type JiraBinding } from "../../src/codex/codexHost.ts";
+import { JiraService } from "../../src/jira/jiraService.ts";
 import { RpcError } from "../../src/codex/rpc.ts";
 import { DisabledHost } from "../../src/daemon/disabledHost.ts";
 import { ABANDONED_STATUS, buildHandlers, toDaemonError, wireEvents, type DaemonBridge, type DaemonDeps, type DaemonHost } from "../../src/daemon/handlers.ts";
-import { DAEMON_PROTOCOL_VERSION, ErrorCodes } from "../../src/daemon/protocol.ts";
+import { DAEMON_PROTOCOL_VERSION, ErrorCodes, METHODS } from "../../src/daemon/protocol.ts";
 import { Privacy } from "../../src/privacy/privacy.ts";
 import { Store } from "../../src/store/store.ts";
 import { resolved, session } from "../helpers/m4b.ts";
@@ -56,6 +57,10 @@ class FakeHost implements DaemonHost {
   clearSecurityStop(): void {
     this.cleared++;
     this.latched = null;
+  }
+  jira: JiraBinding | null = null;
+  setJira(j: JiraBinding | null): void {
+    this.jira = j;
   }
   async auth() {
     return { state: "signed_in" as const, planType: null };
@@ -114,7 +119,12 @@ function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: strin
   });
   let shut = 0;
   if (o.mode) privacy.setSharingMode(o.mode);
-  const d: DaemonDeps = { host, bridge, chat, privacy, store, version: "0.4.0", shutdown: () => { shut++; }, revokeDeadlineMs: o.revokeDeadlineMs, log: o.log ?? (() => undefined) };
+  const jira = new JiraService({
+    host,
+    binding: (secret) => ({ launch: { command: "/x", args: [], env: {}, cwd: "/" }, validator: { command: "/v", args: [], env: {}, cwd: "/" }, secret }),
+    runCheck: async () => ({ ok: true }),
+  });
+  const d: DaemonDeps = { host, bridge, chat, privacy, store, jira, version: "0.4.0", shutdown: () => { shut++; }, revokeDeadlineMs: o.revokeDeadlineMs, log: o.log ?? (() => undefined) };
   return { d, store, pins, root, root2, order, emitBridge: (e: BridgeEvent) => bridgeListeners.forEach((l) => l(e)), shut: () => shut };
 }
 
@@ -422,6 +432,30 @@ test("revoke: an unknown root removes nothing and closes nothing", async () => {
   await new Promise((res) => setTimeout(res, 80));
   assert.equal(host.starts, 0);
   assert.deepEqual(logs, []);
+});
+
+test("M6: jira.configure/status/clear/check; the token never comes back, not even in an error", async () => {
+  const host = new FakeHost();
+  const h = buildHandlers(deps({ host }).d);
+  const status = await h["jira.status"]!({});
+  assert.deepEqual(status, { configured: false, site: null, email: null });
+  const token = "SYNTHETIC-TOKEN-0123456789abcdef";
+  const st = await h["jira.configure"]!({ site: "example-synthetic.atlassian.net", email: "someone@example.invalid", token });
+  assert.deepEqual(st, { configured: true, site: "example-synthetic.atlassian.net", email: "someone@example.invalid" });
+  assert.ok(host.jira !== null);
+  await assert.rejects(h["jira.configure"]!({ site: "evil.com", email: "someone@example.invalid", token }), (e: any) => {
+    assert.equal(e.code, -32602);
+    assert.ok(!e.message.includes(token) && !e.message.includes("evil.com"));
+    return true;
+  });
+  await assert.rejects(h["jira.configure"]!({ site: "example-synthetic.atlassian.net", email: "someone@example.invalid", token: "short" }), (e: any) => e.code === -32602 && !e.message.includes("short"));
+  assert.deepEqual(await h["jira.check"]!({}), { ok: true, detail: "Connected. GPT can read Jira." });
+  assert.deepEqual(await h["jira.clear"]!({}), { configured: false, site: null, email: null });
+  assert.equal(host.jira, null);
+});
+
+test("M6: protocol lists the jira methods", () => {
+  for (const m of ["jira.status", "jira.configure", "jira.clear", "jira.check"]) assert.ok((METHODS as readonly string[]).includes(m), m);
 });
 
 test("shutdown calls the deps", async () => {

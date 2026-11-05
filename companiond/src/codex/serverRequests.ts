@@ -1,5 +1,6 @@
 // One reply per app-server request type (spec §7.1.4). Shapes from the Codex 0.166.0 generated types.
 import { SERVER_NAME, TOOL_NAMES } from "../jail/mcpServer.ts";
+import { JIRA_SERVER_NAME, JIRA_TOOL_NAMES } from "../jira/tools.ts";
 import type { RpcErrorBody, ServerReply } from "./rpc.ts";
 
 export type ToolAllowlist = ReadonlyMap<string, ReadonlySet<string>>;
@@ -19,7 +20,7 @@ export const CALL_ID_KEYS: readonly string[] = ["call_id", "callId"];
 export function toolAllowlist(entries: Record<string, readonly string[]>): ToolAllowlist {
   return new Map(Object.entries(entries).map(([s, tools]) => [s, new Set(tools)]));
 }
-export const COMPANION_ALLOWLIST: ToolAllowlist = toolAllowlist({ [SERVER_NAME]: TOOL_NAMES });
+export const COMPANION_ALLOWLIST: ToolAllowlist = toolAllowlist({ [SERVER_NAME]: TOOL_NAMES, [JIRA_SERVER_NAME]: JIRA_TOOL_NAMES });
 
 const obj = (v: unknown): Record<string, unknown> | null =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;

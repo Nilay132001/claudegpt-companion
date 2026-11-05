@@ -10,6 +10,12 @@ import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
 
+test("M6: config.toml defines companion-jira inert, with exactly the three Jira tools enabled, and no Atlassian server", () => {
+  const toml = buildCodexConfigToml();
+  assert.ok(toml.includes('[mcp_servers.companion-jira]\ncommand = "/usr/bin/false"\nargs = []\nenabled_tools = ["jira_get_issue", "jira_search", "jira_get_comments"]'));
+  assert.ok(!/atlassian|https?:\/\//i.test(toml));
+});
+
 test("TOML strings escape quotes, backslashes and control characters", () => {
   assert.equal(tomlString('a"b\\c\nd'), '"a\\"b\\\\c\\u000ad"');
   assert.equal(tomlValue({ A: "x", "b.c": ["1", true, 2] }), '{ A = "x", "b.c" = ["1", true, 2] }');
