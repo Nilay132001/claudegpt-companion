@@ -13,6 +13,12 @@ rm -rf "$out"
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
 cp "$bin_dir/CompanionApp" "$out/Contents/MacOS/CompanionApp"
 cp app/bundle/Info.plist "$out/Contents/Info.plist"
+# companiond (M5, ruling 1): sources + production dependencies, run with the user's Node >= 24.
+res="$out/Contents/Resources/companiond"
+mkdir -p "$res"
+cp companiond/package.json companiond/package-lock.json "$res/"
+cp -R companiond/src "$res/src"
+(cd "$res" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
 plutil -lint "$out/Contents/Info.plist"
 
 codesign --force --options runtime --timestamp=none \
@@ -20,6 +26,9 @@ codesign --force --options runtime --timestamp=none \
 
 # Verification
 codesign --verify --strict --verbose=2 "$out"
+test -f "$out/Contents/Resources/companiond/src/lineBuffer.ts"
+test -d "$out/Contents/Resources/companiond/node_modules/@openai/codex"
+test -f "$out/Contents/Resources/companiond/src/daemon/main.ts"
 # Capture first, then grep: `codesign | grep -q` can fail under pipefail when grep exits early (SIGPIPE).
 ents="$(codesign -d --entitlements - --xml "$out" 2>/dev/null)"
 grep -q "com.apple.security.device.audio-input" <<<"$ents"
