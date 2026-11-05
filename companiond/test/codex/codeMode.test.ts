@@ -57,6 +57,8 @@ test("the surface parser reads every additional_tools item and refuses tools und
 
 test("the surface must be exactly exec and wait, with only the jail tools nested", () => {
   assert.deepEqual(checkToolSurface("m", { top: ["functions.wait", "functions.exec"], nested: [...ALLOWED_NESTED] }).failures, []);
+  assert.ok(ALLOWED_NESTED.includes("mcp__companion_jira__jira_search"));
+  assert.match(checkToolSurface("m", { top: ["functions.exec", "functions.wait"], nested: ["mcp__companion_jira__createJiraIssue"] }).failures.join(), /createJiraIssue/);
   assert.match(checkToolSurface("m", { top: ["functions.exec", "functions.wait"], nested: ["apply_patch"] }).failures.join(), /apply_patch/);
   assert.match(checkToolSurface("m", { top: ["functions.exec", "functions.wait", "collaboration.spawn_agent"], nested: [] }).failures.join(), /collaboration\.spawn_agent/);
   assert.match(checkToolSurface("m", { top: ["functions.exec"], nested: [] }).failures.join(), /functions\.wait is missing/);

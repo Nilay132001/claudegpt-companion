@@ -18,7 +18,7 @@ import { createItestCompanionCodex } from "./helpers/companionCodex.ts";
 import { isSignedIn, ownPaths, skipUnless, sleep } from "./helpers/companion.ts";
 import { GATE_INSTRUCTIONS, runExecCellGate } from "./helpers/execCellGate.ts";
 import { controlLaunch, controlReachability, ipv4Of, runFetchProbe, startLoopbackListener, type FetchProbeResult } from "./helpers/fetchProbe.ts";
-import { ALLOWED_NESTED, liveRunner, parseToolSurface, promptInputArgs } from "../src/codex/codeMode.ts";
+import { liveRunner, READONLY_NESTED, parseToolSurface, promptInputArgs } from "../src/codex/codeMode.ts";
 import { findCodex } from "../src/codex/codexInstall.ts";
 
 const skip = skipUnless({ live: true });
@@ -312,7 +312,7 @@ test("model-steered fetch: no model-reachable path makes Codex connect to a URL 
   assert.equal(webSearch, "disabled");
   assert.deepEqual(surface.top, ["functions.exec", "functions.wait"]);
   // Inventory (names only): the cell's tools are exactly the five; no fetch-shaped global exists.
-  assert.equal(production.inventory?.tools, [...ALLOWED_NESTED].sort().join(","));
+  assert.equal(production.inventory?.tools, [...READONLY_NESTED].sort().join(","));
   for (const k of ["view_image", "viewImage", "web_search", "webSearch", "fetchImage", "download", "browse", "open", "http", "request", "fetch", "XMLHttpRequest", "WebSocket", "EventSource", "importScripts", "navigator"]) {
     assert.equal(production.inventory?.[`typeof_${k}`], "undefined", k);
   }

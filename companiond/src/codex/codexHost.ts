@@ -408,7 +408,8 @@ export class CodexHost {
       const check = mergeChecks(
         checkThreadResponse(resp, cwd),
         checkThreadModel(resp, this.#models),
-        checkMcpStatus(mcp, this.#o.allowlist, binding ? "thread" : "process"),
+        // Task 6 binds companion-jira per thread; until then a root-bound thread has companion-readonly only.
+        checkMcpStatus(mcp, this.#o.allowlist, binding ? "thread" : "process", new Set(["companion-readonly"])),
       );
       if (check.failures.length > 0) throw new SecurityCheckError(check.failures.join("; "));
       return id;
@@ -512,7 +513,8 @@ export class CodexHost {
    * call without serverName re-spawns the thread's servers, spends the one-time token and is refused (M-10). */
   async #threadStatus(proc: Proc, threadId: string): Promise<unknown[]> {
     const out: unknown[] = [];
-    for (const serverName of this.#o.allowlist.keys()) out.push(...(await pageAll(proc.rpc, "mcpServerStatus/list", { threadId, serverName })));
+    // Task 6 adds companion-jira here when the thread has it bound; asking for an unbound inert server would spawn it.
+    for (const serverName of this.#o.allowlist.keys()) if (serverName === "companion-readonly") out.push(...(await pageAll(proc.rpc, "mcpServerStatus/list", { threadId, serverName })));
     return out;
   }
 
