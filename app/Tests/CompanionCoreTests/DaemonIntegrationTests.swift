@@ -37,6 +37,10 @@ enum DaemonITest {
         try await client.settingsSet("ui.speech.rate", "1.5")
         #expect(try await client.settingsGet("ui.speech.rate") == "1.5")
         await #expect(throws: DaemonError.self) { try await client.settingsSet("ui.speech.autoPlay", "true") } // Store keys are lowercase
+        for (k, v) in UISettings().values {
+            try await client.settingsSet(k, v)
+            #expect(try await client.settingsGet(k) == v, "\(k)")
+        }
         try await client.shutdown()
         var sawDisconnect = false
         for await e in client.events where e == .disconnected { sawDisconnect = true }
