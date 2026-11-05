@@ -242,7 +242,10 @@ export class ChatService {
 
   /** Closes every thread bound to a root (after an approval is revoked). They reopen with the next message. */
   async closeBound(): Promise<void> {
-    for (const [sessionId, o] of [...this.#open]) if (o.root !== null) await this.#close(sessionId, o);
+    const bound = [...this.#open].filter(([, o]) => o.root !== null);
+    const results = await Promise.allSettled(bound.map(([sessionId, o]) => this.#close(sessionId, o)));
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) throw new AggregateError(failed.map((r) => r.reason), `${failed.length} of ${bound.length} threads did not close.`);
   }
 
   /** Sessions this run opened a thread for. */
@@ -259,12 +262,13 @@ export class ChatService {
         sessionTitle: p.title, repo: repo.line, repoNote: p.repoNote, preview: p.preview, removeIds, question: p.question,
       });
       const threadId = await this.#openThread(p.sessionId, repo.binding);
-      if (this.#revokeGen !== gen) {
-        // An approval was revoked while this send resolved or opened: its binding may be for that root.
+      // An approval was revoked, or the sharing mode changed, while this send waited, resolved or opened: the
+      // binding may be for that root and the text was composed for the old mode. Nothing is sent.
+      if (this.#revokeGen !== gen || this.#d.sharingMode() !== p.mode) {
         const o = this.#open.get(p.sessionId);
         if (o?.threadId === threadId) this.#open.delete(p.sessionId);
         await this.#d.host.closeThread(threadId).catch(() => undefined);
-        throw new ChatError("prepare_stale", "An approval changed. Ask again.");
+        throw new ChatError("prepare_stale", "Sharing or an approval changed. Ask again.");
       }
       const { turnId } = await this.#d.host.startTurn(threadId, text);
       const pending: Pending = {
@@ -356,6 +360,16 @@ export class ChatService {
     return t;
   }
 
+  /** True when `next` is at or before the stored cursor in the transcript: an older prepare must not move it back. */
+  #behindCursor(sessionId: string, next: string): boolean {
+    const cur = this.#d.store.getCursor(sessionId);
+    if (!cur) return false;
+    const evs = this.#d.bridge.events(sessionId);
+    const ci = evs.findLastIndex((e) => e.uuid === cur);
+    const ni = evs.findLastIndex((e) => e.uuid === next);
+    return ci >= 0 && ni >= 0 && ni <= ci;
+  }
+
   #emit(e: ChatEvent): void {
     for (const l of this.#listeners) {
       try {
@@ -383,7 +397,7 @@ export class ChatService {
     }
     this.#pending.delete(turnId);
     if (status !== "completed") return; // spec §4.7: the cursor moves only when the turn completes
-    if (p.cursor) this.#d.store.setCursor(p.sessionId, p.cursor);
+    if (p.cursor && !this.#behindCursor(p.sessionId, p.cursor)) this.#d.store.setCursor(p.sessionId, p.cursor);
     this.#tracker(p.sessionId).markSent(p.subagents);
     if (p.repoNote !== null && this.#repoNotes.get(p.sessionId) === p.repoNote) this.#repoNotes.delete(p.sessionId);
   }

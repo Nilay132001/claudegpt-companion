@@ -23,6 +23,7 @@ function fakeHost() {
   let completeEarly: string | null = null;
   let onOpen: (() => void) | null = null;
   let startGate: Promise<void> | null = null;
+  let failClose: string | null = null;
   const emit = (e: HostEvent) => listeners.forEach((l) => l(e));
   const host: ChatHost = {
     state: () => ({ state: "ready", warnings: [] }),
@@ -35,6 +36,7 @@ function fakeHost() {
     },
     closeThread: async (id) => {
       if (active.has(id)) throw new TurnBusyError();
+      if (id === failClose) throw new Error("unsubscribe failed");
       closed.push(id);
     },
     startTurn: async (threadId, text) => {
@@ -62,6 +64,7 @@ function fakeHost() {
     setCompleteEarly: (s: string | null) => { completeEarly = s; },
     setOnOpen: (f: (() => void) | null) => { onOpen = f; },
     setStartGate: (g: Promise<void> | null) => { startGate = g; },
+    setFailClose: (id: string | null) => { failClose = id; },
   };
 }
 
@@ -72,7 +75,7 @@ function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; 
   let events = o.events ?? [userText("first", "u1"), assistantText("reply", "u2")];
   let approved = true;
   const bridge: ChatBridge = {
-    snapshot: () => ({ sessions: [session("s1", "Login bug")], selection: { sessionId: "s1", via: "focus", focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)", focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 }),
+    snapshot: () => ({ sessions: [session("s1", "Login bug"), session("s2", "Other")], selection: { sessionId: "s1", via: "focus", focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)", focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 }),
     worktree: () => (o.wt === undefined ? resolved("/r") : o.wt),
     events: () => events,
     hasUuid: (_id, uuid) => events.some((e) => e.uuid === uuid),
@@ -327,4 +330,38 @@ test("a repository change note is sent once", async () => {
   h.complete(s1.threadId, s1.turnId);
   assert.equal((await chat.prepare("s1", "q")).repoNote, null);
   assert.match(h.turns[0]?.[1] ?? "", /Note: Repository changed from \/a to \/r/);
+});
+
+test("a sharing mode switched to Off while the thread opens sends nothing", async () => {
+  const { chat, store, h } = setup();
+  const p = await chat.prepare("s1", "q");
+  h.setOnOpen(() => store.setSharingMode("off"));
+  await assert.rejects(chat.send(p.prepareId, []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_stale");
+  assert.deepEqual(h.turns, []);
+  assert.deepEqual(h.closed, ["thr-1"]);
+  assert.deepEqual(chat.openSessions(), []);
+});
+
+test("closeBound tries every thread when one close fails, then reports it", async () => {
+  const { chat, h } = setup();
+  const a = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  h.complete(a.threadId, a.turnId);
+  const b = await chat.send((await chat.prepare("s2", "q")).prepareId, []);
+  h.complete(b.threadId, b.turnId);
+  h.setFailClose(a.threadId);
+  await assert.rejects(chat.closeBound(), AggregateError);
+  assert.deepEqual(h.closed, [b.threadId]);
+});
+
+test("an older prepare completing later never moves the cursor backwards", async () => {
+  const { chat, store, h, setEvents } = setup();
+  const oldP = await chat.prepare("s1", "old");
+  setEvents([userText("first", "u1"), assistantText("reply", "u2"), userText("new", "u3")]);
+  const newP = await chat.prepare("s1", "new");
+  const n = await chat.send(newP.prepareId, []);
+  h.complete(n.threadId, n.turnId);
+  assert.equal(store.getCursor("s1"), "u3");
+  const o = await chat.send(oldP.prepareId, []);
+  h.complete(o.threadId, o.turnId);
+  assert.equal(store.getCursor("s1"), "u3");
 });
