@@ -4,7 +4,7 @@ import CompanionCore
 import Foundation
 
 /// DEBUG-only (ruling R6): COMPANION_DEMO=<scene> runs the real views on synthetic data. Nothing leaves the process.
-/// Scenes: empty, chat, context, history, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status.
+/// Scenes: empty, chat, context, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status.
 enum DemoFlags {
     static let scene: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO"]
     static func is_(_ s: String) -> Bool { scene == s }
@@ -201,7 +201,7 @@ enum DemoFlags {
     }
 
     var storedTurns: [TurnRecord] {
-        guard !cleared, ["chat", "context", "history", "whatGPTSees", "status", "streaming"].contains(scene) else { return [] }
+        guard !cleared, ["chat", "context", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
         let now = Date().timeIntervalSince1970 * 1000
         let all = Self.items[...]
         let t1 = TurnRecord(turnId: "h1", sessionId: "s1", threadId: "th1", sessionTitle: "Refactor widget parser", mode: .ask,

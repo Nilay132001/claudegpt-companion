@@ -173,9 +173,9 @@ extension SharingMode {
     /// The composer's hint row.
     var hint: String {
         switch self {
-        case .off: "Off — only your question and the repository"
-        case .ask: "Ask — you'll check before anything is sent"
-        case .automatic: "Automatic — new session context, redacted"
+        case .off: "Off · only your question and the repo"
+        case .ask: "Ask · you'll check before it's sent"
+        case .automatic: "Automatic · new context, redacted"
         }
     }
 }

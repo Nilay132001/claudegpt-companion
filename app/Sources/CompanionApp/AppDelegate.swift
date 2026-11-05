@@ -67,6 +67,10 @@ import SwiftUI
             #if DEBUG
             if let demo = Self.demo {
                 demo.afterStart()
+                if demo.scene == "pastChat" {
+                    await model.loadHistory()
+                    if let c = model.history?.chats.first(where: { $0.threadId == "th0" }) { await model.openPastChat(c) }
+                }
                 if let q = demo.autoQuestion {
                     model.draft = q
                     await model.submitDraft()

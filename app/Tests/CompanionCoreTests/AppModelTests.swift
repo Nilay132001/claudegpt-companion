@@ -322,16 +322,6 @@ import Testing
         #expect(m.gate == .daemonStopped("companiond stopped."))
     }
 
-    @Test func viewSentFindsTheRecordOrSaysNotKept() async {
-        let (m, d) = await started()
-        await m.ask("q")
-        let reply = m.currentMessages.last!
-        await m.viewSent(reply)
-        #expect(m.sentView == .notKept(turnId: "u1"))
-        d.sent = [SentRecord(sessionId: "s1", threadId: "t1", turnId: "u1", contextBlock: "<untrusted_data source=\"claude-session\">SYNTHETIC FIXTURE</untrusted_data>", question: "q", sentAt: 1)]
-        await m.viewSent(reply)
-        if case .found(let r)? = m.sentView { #expect(r.question == "q") } else { Issue.record("record not found") }
-    }
 
     @Test func pinFocusChipAndSettings() async {
         let d = FakeDaemon()

@@ -61,6 +61,7 @@ struct AccountSettings: View {
 struct PrivacySettings: View {
     @Environment(AppModel.self) private var model
     @State private var confirmAutomatic = false
+    @State private var confirmClear = false
     var body: some View {
         Form {
             Picker("Claude session context", selection: Binding(
@@ -88,10 +89,27 @@ struct PrivacySettings: View {
                     }
                 }
             }
+            Section("Chat history") {
+                Toggle("Keep chat history", isOn: Binding(
+                    get: { model.history?.enabled ?? true },
+                    set: { on in Task { await model.setHistoryEnabled(on) } }))
+                    .disabled(model.history == nil)
+                Text("Questions, answers and the exact context sent are stored on this Mac (redacted) so you can reopen past chats.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Clear History…", role: .destructive) { confirmClear = true }
+                    .disabled(model.history?.chats.isEmpty ?? true)
+            }
             Text(model.redactionNotice).font(.callout)
         }
         .formStyle(.grouped)
         .automaticModeConfirmation(isPresented: $confirmAutomatic)
+        .task { await model.loadHistory() }
+        .confirmationDialog("Clear all chat history?", isPresented: $confirmClear) {
+            Button("Clear All History", role: .destructive) { Task { await model.clearHistory(threadId: nil) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every stored chat, answer and sent context is removed from this Mac. This can't be undone.")
+        }
     }
     private var modeHelp: String {
         switch model.privacy?.sharingMode ?? .ask {

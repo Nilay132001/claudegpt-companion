@@ -16,6 +16,7 @@ struct SidebarView: View {
                     StatusLine()
                     if let past = model.pastChat { PastChatBar(past: past) }
                 }
+                .background(.bar)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if model.gate == .ready && model.pastChat == nil {
@@ -33,7 +34,6 @@ struct SidebarView: View {
                 if past { Task { await dictation.stopIfActive() } }
             }
             .sheet(item: $model.preview) { _ in PreviewSheet() }
-            .sheet(item: $model.sentView) { view in SentSheet(view: view) }
             .alert("Something went wrong", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -123,12 +123,17 @@ struct PastChatBar: View {
     var body: some View {
         HStack(spacing: Design.Space.s) {
             Image(systemName: "clock").foregroundStyle(.secondary)
-            Text(verbatim: "Past chat · \(Date(timeIntervalSince1970: past.summary.lastAt / 1000).shortStamp) · read-only")
-                .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Past chat · read-only").font(.callout.weight(.medium))
+                Text(verbatim: Date(timeIntervalSince1970: past.summary.lastAt / 1000).shortStamp)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
             Spacer(minLength: Design.Space.s)
             Button("Back to Current Chat") { model.closePastChat() }
-                .buttonStyle(.borderless)
-                .font(.callout.weight(.medium))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Return to this session's current chat")
         }
         .padding(.horizontal, Design.Space.m)
         .padding(.vertical, Design.Space.s)

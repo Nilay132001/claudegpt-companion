@@ -81,7 +81,7 @@ struct InputBar: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 28, height: 28)
-                    .background(Color.primary.opacity(0.85), in: Circle())
+                    .background(Color.accentColor, in: Circle())
             }
             .buttonStyle(.plain)
             .help("Stop the reply")

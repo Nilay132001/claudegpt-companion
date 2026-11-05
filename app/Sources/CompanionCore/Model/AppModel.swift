@@ -16,16 +16,6 @@ public struct PendingPreview: Identifiable, Equatable, Sendable {
     public var id: String { prepared.prepareId }
 }
 
-public enum SentView: Identifiable, Equatable, Sendable {
-    case found(SentRecord), notKept(turnId: String)
-    public var id: String {
-        switch self {
-        case .found(let r): r.turnId
-        case .notKept(let t): t
-        }
-    }
-}
-
 /// App state and every action that reaches companiond. Sends only a prepareId from chat.prepare in the same flow.
 @MainActor @Observable
 public final class AppModel {
@@ -56,7 +46,6 @@ public final class AppModel {
     public internal(set) var loadingChats: Set<String> = []
     public var draft = ""
     public var preview: PendingPreview?
-    public var sentView: SentView?
     public var errorMessage: String?
     public internal(set) var jira: JiraStatus?
     public internal(set) var jiraNote: String?
@@ -374,13 +363,6 @@ public final class AppModel {
     public func interrupt() async {
         guard let api, let sid = selectedSessionId else { return }
         do { try await api.chatInterrupt(sessionId: sid) } catch { errorMessage = Self.describe(error) }
-    }
-
-    public func viewSent(_ message: ChatMessage) async {
-        guard let api, let turn = message.turnId,
-              let sid = conversations.first(where: { $0.value.owns(turnId: turn) })?.key else { return }
-        let records = (try? await api.chatSent(sessionId: sid)) ?? []
-        sentView = records.first { $0.turnId == turn }.map { SentView.found($0) } ?? .notKept(turnId: turn)
     }
 
     private func maybeAutoPlay(_ sid: String, turnId: String) {
