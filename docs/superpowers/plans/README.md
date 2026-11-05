@@ -10,8 +10,8 @@ Spec: `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` (v3.4). 
 | M3 | [Session bridge, tail, parser, worktree resolver](2026-11-04-m3-session-bridge.md) | written, reviewed twice; implemented, PR open |
 | M4a | [CodexHost, hardened config, replies, guard, Codex under Seatbelt](2026-11-04-m4a-codex-host.md) | implemented (Tasks 1–10); §7.1.9 ok |
 | M4b | [Redactor, store, privacy, context, daemon API, bundle skeleton](2026-11-04-m4b-context-daemon.md) | implemented (Tasks 1–9) |
-| M5 | [SwiftUI app + speech → first usable release](2026-11-05-m5-swiftui-app.md) | implemented; owner checklist pending |
-| M6 | Jira (Atlassian MCP, read-only) | written after M5 |
+| M5 | [SwiftUI app + speech → first usable release](2026-11-05-m5-swiftui-app.md) | implemented, merged (PR #11); owner checklist pending |
+| M6 | [Jira, read-only (companion-jira proxy, owner ruling B)](2026-11-05-m6-jira.md) | written, self-reviewed; in progress |
 | M7 | Packaging | written after M6 |
 
 Why not all at once: M1 decides facts that later code depends on — one app-server or a pool, the exact
