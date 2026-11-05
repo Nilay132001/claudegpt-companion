@@ -36,7 +36,7 @@
 
 **Transport.** The app spawns `node --disable-warning=ExperimentalWarning <companiond>/src/daemon/main.ts`. JSON-RPC 2.0, one JSON object per line (UTF-8, `\n`); requests on stdin, responses and notifications on stdout; stderr is diagnostics only. The app sends no notifications. First call `daemon.hello`. Closing stdin shuts the daemon down. `result` may be `null` (`sessions.worktree`).
 
-**Errors** `{ code, message, data? }`, `message` user-presentable: `-32700` parse, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal; `1001` securityCheckFailed, `1002` hostNotReady, `1003` repoRefused, `1004` prepareExpired, `1005` turnBusy, `1006` approvalRefused (`data: { reason: "not_absolute" | "missing" | "home_or_root" | "repo_refused" | "not_toplevel" }`), `1007` unknownSession, `1008` emptyQuestion, `1009` hostBusy (capacity: show the message, try again later; the host stays ready), `1010` prepareStale (the sharing mode changed since `chat.prepare`, or an approval was revoked while the send was in progress: prepare again and re-confirm; an added approval never makes a prepare stale), `1011` confirmRequired (an Ask-mode send, or an unknown prepare while the mode is Ask, without `confirmed: true`; the prepare stays usable). Any other code: show `message`. `host.restart` answers `1001` while the host is in a security stop.
+**Errors** `{ code, message, data? }`, `message` user-presentable: `-32700` parse, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal; `1001` securityCheckFailed, `1002` hostNotReady, `1003` repoRefused, `1004` prepareExpired, `1005` turnBusy, `1006` approvalRefused (`data: { reason: "not_absolute" | "missing" | "home_or_root" | "repo_refused" | "not_toplevel" }`), `1007` unknownSession, `1008` emptyQuestion, `1009` hostBusy (capacity: show the message, try again later; the host stays ready), `1010` prepareStale (the sharing mode changed since `chat.prepare`, or an approval was revoked while the send was in progress: prepare again and re-confirm; an added approval never makes a prepare stale), `1011` confirmRequired (a send of a prepare made in Ask — even after the user switched mode — or of an unknown prepare while the mode is Ask, without `confirmed: true`; checked first, and the prepare stays usable). Any other code: show `message`. `host.restart` answers `1001` while the host is in a security stop.
 
 **Retry rule (M4b).** A `prepareId` is used up only when its turn starts. After `1009`, `1005` or `1002` the same `prepareId` can be sent again until it expires; after `1004` or `1010` call `chat.prepare` again; after `1011` prepare again and show the sheet. **Security stop:** `HostState {state:"failed", detail}` with `detail` starting `"Security check failed"` stays until the owner presses Acknowledge, which alone sends `host.acknowledgeSecurityStop`; `host.restart` does not clear it.
 
@@ -58,7 +58,7 @@
 | `privacy.get` | `{}` | `{ sharingMode, approvals: ApprovedRoot[], redactionNotice }` |
 | `privacy.setSharingMode` | `{ mode: "off" \| "ask" \| "automatic" }` | `{ sharingMode }` |
 | `privacy.approve` | `{ root, includeWorktrees: boolean }` | `ApprovedRoot` |
-| `privacy.revoke` | `{ root }` | `{ revoked: boolean, pendingClose: number }` (answers after the threads on roots no longer approved are closed; `pendingClose` = those still finishing a reply; if any is still open after 30 s and the host is ready, the daemon restarts Codex. Spec §8: the app shows it) |
+| `privacy.revoke` | `{ root }` | `{ revoked: boolean, pendingClose: number }` (answers after the threads on roots no longer approved are closed; `pendingClose` = threads on roots no longer approved that are still open, mostly replies being interrupted, which keep their repo access until they stop; if any is still open after 30 s and the host is ready, the daemon restarts Codex; `revoked: false` → `pendingClose: 0`, nothing armed. Spec §8: the app shows it) |
 | `chat.prepare` | `{ sessionId, question }` (question ≤ 20 000 UTF-16 units) | `Prepared` |
 | `chat.send` | `{ prepareId, removeItemIds: string[], confirmed: boolean }` | `{ threadId, turnId }` |
 | `chat.interrupt` | `{ sessionId }` | `{}` |
@@ -782,7 +782,8 @@ public struct ApprovedRoot: Decodable, Sendable, Equatable, Identifiable {
     public var id: String { root }
 }
 
-/// privacy.revoke's answer. pendingClose = threads on the revoked root still finishing a reply (spec §7.5, §8).
+/// privacy.revoke's answer. pendingClose = threads on roots no longer approved that are still open, mostly
+/// replies being stopped (M4b handlers.ts revokedThreadIds; spec §7.5, §8).
 public struct RevokeResult: Decodable, Sendable, Equatable {
     public let revoked: Bool
     public let pendingClose: Int
@@ -2721,7 +2722,13 @@ import Testing
         #expect(m.revokeNotice == nil) // nothing pending
         d.revokePending = 2
         await m.revoke(root: "/r")
-        #expect(m.revokeNotice?.hasPrefix("2 replies are still finishing") == true)
+        #expect(m.revokeNotice?.hasPrefix("2 conversations are still being stopped") == true)
+        #expect(m.revokeNotice?.contains("GPT may still read") == true)
+        d.revokePending = 0
+        await m.revoke(root: "/r") // fake answers revoked: true, pendingClose: 0 → the notice is replaced (now nothing pending)
+        #expect(m.revokeNotice == nil)
+        d.revokePending = 1
+        await m.revoke(root: "/r")
         m.dismissRevokeNotice()
         #expect(m.revokeNotice == nil)
         #expect(AppModel.revokeText(RevokeResult(revoked: false, pendingClose: 3)) == nil)
@@ -3165,7 +3172,8 @@ public final class AppModel {
         guard let api else { return }
         do {
             let r = try await api.privacyRevoke(root: root)
-            revokeNotice = Self.revokeText(r)
+            // Only a revoke that removed an approval replaces the notice; a no-op revoke must not hide one still true.
+            if r.revoked { revokeNotice = Self.revokeText(r) }
             privacy = try await api.privacyGet()
             if let id = selectedSessionId { await loadDetail(id) }
         } catch { errorMessage = Self.describe(error) }
@@ -3174,7 +3182,8 @@ public final class AppModel {
     static func revokeText(_ r: RevokeResult) -> String? {
         guard r.revoked, r.pendingClose > 0 else { return nil }
         let n = r.pendingClose
-        return "\(n) reply\(n == 1 ? " is" : "s are") still finishing in that repository. GPT cannot read it any more; if \(n == 1 ? "it does" : "they do") not finish within 30 seconds, Codex restarts and every conversation reopens at its next message."
+        // Follows the code (M4b handlers.ts): a running reply keeps its thread and repo access until it stops.
+        return "\(n) conversation\(n == 1 ? " is" : "s are") still being stopped on a repository that is no longer approved. Until \(n == 1 ? "it stops" : "they stop"), GPT may still read that repository; if \(n == 1 ? "it has" : "they have") not stopped within 30 seconds, Codex restarts and every conversation reopens at its next message."
     }
 
     public func dismissRevokeNotice() { revokeNotice = nil }
@@ -5813,10 +5822,11 @@ struct CompanionApp: App {
 
 - [ ] **Step 4: Build, bundle and check by hand**
 
-Run: `cd app && swift build && swift test && cd .. && bash scripts/build-app.sh && open "app/build/ClaudeGPT Companion.app"`
-Expected: all tests PASS; the bundle verifies; the panel opens at the left edge of the screen with Claude's window. With `COMPANIOND_CODEX=off` in the environment (`COMPANIOND_CODEX=off open …` does not pass it; launch the binary directly: `COMPANIOND_CODEX=off "app/build/ClaudeGPT Companion.app/Contents/MacOS/CompanionApp"`) the panel shows "Chat is off" with the daemon's reason, which checks the stopped path without Codex. Check, and note each result for the Task 14 checklist:
+Run: `cd app && swift build && swift test && cd .. && bash scripts/build-app.sh && COMPANIOND_CODEX=off "app/build/ClaudeGPT Companion.app/Contents/MacOS/CompanionApp"`
+(Launched directly so the variable reaches the app; `open` would not pass it, and would start real Codex. Only one instance at a time: quit any other copy first.)
+Expected: all tests PASS; the bundle verifies; the panel opens at the left edge of the screen with Claude's window and shows "Chat is off" with the daemon's reason (the host-failed gate, without starting Codex). Real Codex is exercised in Task 13. Check, and note each result for the Task 14 checklist:
 - ⌥⌘G hides and shows the panel; ⌘R works when the app is active; ⌘, opens Settings with five tabs.
-- Width drags between 280 and 640 pt and is remembered after relaunch (once the daemon runs).
+- Width drags between 280 and 640 pt and is remembered after relaunch.
 - Settings › Window › Follow: the Accessibility prompt appears; with permission the panel moves with Claude's window; without it the note explains and the panel stays movable.
 - Light and dark appearance both read well (System Settings › Appearance).
 Quit with ⌘Q; `pgrep -f companiond/src/daemon/main.ts` prints nothing within 5 s.
@@ -5840,7 +5850,7 @@ M4b part 2 merged (PR #10) and this plan was reconciled with it on 2026-11-05. T
 
 - [ ] **Step 1: Update the branch from main** — sync with `main` (in an app-made worktree use the `sync_with_base_branch` tool; otherwise `git fetch origin && git merge origin/main`). Then `cd companiond && npm ci && npm test`. Expected: green.
 
-- [ ] **Step 2: Diff the contract against the merged code, not the plan text** — compare `companiond/src/daemon/protocol.ts` (`METHODS`, `EVENTS`, `ErrorCodes`, `SECURITY_FAILED_PREFIX`), `handlers.ts` (`buildHandlers` param names and defaults — `chat.send`'s `confirmed`, `privacy.revoke`'s `{revoked, pendingClose}` — `wirePrepared`, `wireEvents`, `toDaemonError`), `chat/chatService.ts` (`Prepared`) and `store/store.ts` (`UI_KEY`) against "Daemon API (reconciled with merged M4b)". If nothing changed since a1947ea (`git diff a1947ea origin/main -- companiond/src/daemon companiond/src/chat/chatService.ts companiond/src/store/store.ts` is empty), skip to Step 3. For each difference: change the Swift mirror and its test first (failing test, then fix), and update that section. Confirm the reconciled items still hold: `"abandoned"` turn status (N1), `hostBusy` 1009 (N2), `prepareStale` 1010 and `confirmRequired` 1011 (N3, N3b), `pendingClose` (N6), `host.acknowledgeSecurityStop` and `host.restart`'s 1001, `chat.threadReplaced`, `Prepared.sessionTitle`.
+- [ ] **Step 2: Diff the contract against the merged code, not the plan text** — compare `companiond/src/daemon/protocol.ts` (`METHODS`, `EVENTS`, `ErrorCodes`, `SECURITY_FAILED_PREFIX`), `handlers.ts` (`buildHandlers` param names and defaults — `chat.send`'s `confirmed`, `privacy.revoke`'s `{revoked, pendingClose}` — `wirePrepared`, `wireEvents`, `toDaemonError`), `chat/chatService.ts` (`Prepared`) and `store/store.ts` (`UI_KEY`) against "Daemon API (reconciled with merged M4b)". If nothing changed since a1947ea (`git diff a1947ea origin/main -- companiond/src` is empty; the wire shapes also come from `codex/codexHost.ts`, `privacy/`, `bridge/`, `worktree/` and `context/`), skip to Step 3. For each difference: change the Swift mirror and its test first (failing test, then fix), and update that section. Confirm the reconciled items still hold: `"abandoned"` turn status (N1), `hostBusy` 1009 (N2), `prepareStale` 1010 and `confirmRequired` 1011 (N3, N3b), `pendingClose` (N6), `host.acknowledgeSecurityStop` and `host.restart`'s 1001, `chat.threadReplaced`, `Prepared.sessionTitle`.
 
 - [ ] **Step 3: Full tests, including the daemon integration test**
 
@@ -5919,7 +5929,7 @@ Rows marked **Owner** need the owner at the Mac (speaking, listening, signing in
 | 10 | Light and dark appearance | Agent | |
 | 11 | Ask mode: preview lists items; a removed item is absent in "View what was sent"; Cancel sends nothing | Agent | |
 | 12 | Off sends no Claude context (View what was sent shows only the repository line); Automatic needs the confirmation | Agent | |
-| 13 | An unapproved repo shows the banner; Approve works; approving the home folder is refused with the plain reason; revoking a repo while a reply runs in it shows "still finishing" in Settings › Privacy | Agent | |
+| 13 | An unapproved repo shows the banner; Approve works; approving the home folder is refused with the plain reason; revoking a repo while a reply runs in it shows "still being stopped" in Settings › Privacy (needs a long-running tool reply; a reply that stops at once shows no notice) | Agent | |
 | 14 | Reply links are not clickable and show their URL; no image loads; clicking `path:line` in a selectable reply reaches the app's handler and opens the editor at the line; a `path:line` to a `.command` or `.app` inside the repo is only revealed in Finder | Agent | |
 | 14b | Security stop: the panel shows the reason and only "acknowledge and restart" clears it; Settings hides the restart buttons meanwhile | Agent | |
 | 14c | Ask mode refuses to send without the sheet (a send from the sheet carries `confirmed: true`); "Send again" after a busy error reuses the prepare | Agent | |
