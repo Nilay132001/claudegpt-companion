@@ -24,6 +24,8 @@ public final class SpeechAnalyzerEngine: DictationEngine {
     /// Bumped by every start() and stop(). A start() that sees it move during an await was cancelled by Stop
     /// (or replaced by a newer start) and must never turn the microphone on.
     private var generation = 0
+    /// How long stop() waits for the last results before cancelling the session.
+    var stopTimeout: Duration = .seconds(2)
 
     public init() {}
 
@@ -115,10 +117,37 @@ public final class SpeechAnalyzerEngine: DictationEngine {
         audioEngine = nil
         input?.finish()
         input = nil
-        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
-        analyzer = nil
-        await results?.value
-        results = nil
+        let analyzer = self.analyzer
+        let results = self.results
+        self.analyzer = nil
+        self.results = nil
+        guard analyzer != nil || results != nil else { return }
+        // Normally finalize delivers the last finals and the results stream ends at once. With no audio ever fed it
+        // never ends, so the wait is bounded: on timeout the session is cancelled and stop() still returns.
+        let finished = await Self.race(timeout: stopTimeout) {
+            try? await analyzer?.finalizeAndFinishThroughEndOfInput()
+            await results?.value
+        }
+        if !finished {
+            results?.cancel()
+            await analyzer?.cancelAndFinishNow()
+        }
+    }
+
+    /// True if `work` finished before `timeout`. Unstructured on purpose: a task group would wait for a hung `work`.
+    /// A `work` that never ends is left suspended; the caller cancels what it waits on.
+    static func race(timeout: Duration, _ work: @escaping @MainActor () async -> Void) async -> Bool {
+        await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            let once = ResumeOnce(c)
+            Task { @MainActor in
+                await work()
+                once.resume(true)
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: timeout)
+                once.resume(false)
+            }
+        }
     }
 
     /// Spec §12.3 test path: transcribe an audio file, return the final text.
@@ -139,6 +168,16 @@ public final class SpeechAnalyzerEngine: DictationEngine {
             await analyzer.cancelAndFinishNow()
         }
         return try await collect.value
+    }
+}
+
+/// Resumes a continuation at most once (main actor only).
+@MainActor final class ResumeOnce {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    init(_ c: CheckedContinuation<Bool, Never>) { continuation = c }
+    func resume(_ value: Bool) {
+        continuation?.resume(returning: value)
+        continuation = nil
     }
 }
 

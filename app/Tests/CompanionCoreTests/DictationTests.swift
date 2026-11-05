@@ -39,6 +39,20 @@ import Testing
     func stop() async { stopped += 1 }
 }
 
+/// Runs `op` and reports whether it finished within `limit`, without letting a hang block the test run.
+@MainActor func finishes(within limit: Duration, _ op: @escaping @MainActor () async -> Void) async -> Bool {
+    var done = false
+    let work = Task { @MainActor in
+        await op()
+        done = true
+    }
+    let clock = ContinuousClock()
+    let deadline = clock.now + limit
+    while !done && clock.now < deadline { try? await Task.sleep(for: .milliseconds(50)) }
+    _ = work
+    return done
+}
+
 struct FakePermissions: DictationPermissions {
     let mic: Bool
     let speech: Bool
@@ -127,6 +141,21 @@ struct FakePermissions: DictationPermissions {
         #expect(c.statusText == DictationError.unsupportedLocale.errorDescription)
     }
 
+    @Test func stopsWaitIsBoundedEvenIfTheResultsNeverEnd() async {
+        // The race stop() uses: quick work wins; work that never ends loses to the timeout instead of hanging.
+        #expect(await SpeechAnalyzerEngine.race(timeout: .seconds(5)) {})
+        var hung: CheckedContinuation<Void, Never>?
+        var won: Bool?
+        let returned = await finishes(within: .seconds(5)) {
+            won = await SpeechAnalyzerEngine.race(timeout: .milliseconds(100)) {
+                await withCheckedContinuation { hung = $0 }
+            }
+        }
+        #expect(returned)
+        #expect(won == false)
+        hung?.resume()
+    }
+
     /// The real engine: Stop pressed while start() is still awaiting (locale, assets, analyzer) cancels the start
     /// before the microphone would open. The mic is replaced by a seam, so the runner never asks for it. Needs speech assets.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["COMPANION_SPEECH_TESTS"] == "1"), .timeLimit(.minutes(5)))
@@ -136,7 +165,7 @@ struct FakePermissions: DictationPermissions {
         control.microphoneOverride = { controlOpened = true }
         try await control.start { _ in }
         #expect(controlOpened)                   // without a Stop, start() does reach the microphone
-        // Not stopped here: with no audio ever fed (the seam), stop() waits on a results stream that never ends.
+        #expect(await finishes(within: .seconds(10)) { await control.stop() })
 
         let engine = SpeechAnalyzerEngine()
         var opened = false
@@ -147,6 +176,24 @@ struct FakePermissions: DictationPermissions {
         let result = await starting.result
         #expect(!opened)
         #expect(throws: CancellationError.self) { try result.get() }
+    }
+
+    /// The real engine: Stop before any audio arrived must not hang in "Finishing…" — stop() is bounded and the
+    /// controller returns to idle. The mic is the seam (no audio is ever fed). Needs speech assets.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["COMPANION_SPEECH_TESTS"] == "1"), .timeLimit(.minutes(5)))
+    func realEngineStopWithNoAudioReturnsToIdle() async throws {
+        let engine = SpeechAnalyzerEngine()
+        var opened = false
+        engine.microphoneOverride = { opened = true }
+        let c = DictationController(engine: engine, permissions: FakePermissions(mic: true, speech: true))
+        await c.toggle(appendTo: { _ in })
+        #expect(opened)
+        #expect(c.isRecording)
+        let clock = ContinuousClock()
+        let began = clock.now
+        #expect(await finishes(within: .seconds(10)) { await c.toggle(appendTo: { _ in }) })
+        #expect(clock.now - began < .seconds(5))
+        #expect(c.state == .idle)
     }
 
     /// Spec §12.3: a clip made with `say -o`, fed through SpeechAnalyzer from a file. Needs speech assets: opt-in (ruling 10).
