@@ -13,6 +13,9 @@ import SwiftUI
     private var following = false
     private var registered: HotkeySpec?
     private var resizeObserver: NSObjectProtocol?
+    private var closeObserver: NSObjectProtocol?
+    /// Called when the panel is hidden (hotkey) or closed: nothing keeps listening behind a hidden panel (spec §7.8).
+    var onHide: (@MainActor () -> Void)?
 
     init(status: WindowStatus) {
         self.status = status
@@ -29,6 +32,9 @@ import SwiftUI
                 onWidthChange(p.frame.width)
             }
         }
+        closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.onHide?() }
+        }
         let claude = ClaudeWindowFollower.windowListBounds()
         if let screen = claude.flatMap(Self.screen(containing:)) ?? NSScreen.main {
             p.setFrame(PanelGeometry.dockedFrame(width: width, claudeFrame: nil, visibleFrame: screen.visibleFrame), display: true)
@@ -42,10 +48,17 @@ import SwiftUI
 
     func toggle() {
         guard let p = panel else { return }
-        if p.isVisible && p.isKeyWindow { p.orderOut(nil) } else { show() }
+        if p.isVisible && p.isKeyWindow {
+            p.orderOut(nil)
+            onHide?()
+        } else {
+            show()
+        }
     }
 
-    func apply(_ s: UISettings, onHotkey: @escaping @MainActor () -> Void) {
+    /// `byUser`: the user turned a setting on in this run. Only then may the Accessibility prompt show; at launch
+    /// (settings loaded with Follow already on) the trust is just checked and the note set.
+    func apply(_ s: UISettings, byUser: Bool, onHotkey: @escaping @MainActor () -> Void) {
         let w = PanelGeometry.clampWidth(CGFloat(s.panelWidth))
         if let p = panel, abs(p.frame.width - w) > 1 {
             var f = p.frame
@@ -59,7 +72,7 @@ import SwiftUI
         }
         if s.followClaude != wantFollow {
             wantFollow = s.followClaude
-            setFollow(s.followClaude, prompt: true)
+            setFollow(s.followClaude, prompt: byUser)
         }
     }
 

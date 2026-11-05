@@ -45,6 +45,15 @@ import Testing
         #expect(throws: (any Error).self) { try RPCCodec.decode(line: line(#"[1,2]"#)) }
     }
 
+    @Test func rejectsIdsThatAreNotIntegers() {
+        for id in ["1e30", "1.5", "-1e300"] {
+            #expect(throws: RPCCodecError.notAMessage) { try RPCCodec.decode(line: line(#"{"jsonrpc":"2.0","id":\#(id),"result":1}"#)) }
+            #expect(throws: RPCCodecError.notAMessage) {
+                try RPCCodec.decode(line: line(#"{"jsonrpc":"2.0","id":\#(id),"error":{"code":1,"message":"x"}}"#))
+            }
+        }
+    }
+
     @Test func typedValues() throws {
         struct P: Decodable, Equatable { let x: Int; let y: String? }
         #expect(try RPCCodec.value(.object(["x": .number(2), "y": .null]), as: P.self) == P(x: 2, y: nil))

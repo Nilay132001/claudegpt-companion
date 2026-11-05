@@ -26,7 +26,11 @@ import SwiftUI
         let root = SidebarView()
             .environment(model).environment(readAloud).environment(dictation).environment(windowStatus)
         window.install(rootView: root, onWidthChange: { [weak self] w in self?.model.setSetting(\.panelWidth, Double(w)) })
-        model.onSettingsChanged = { [weak self] s in self?.apply(s) }
+        model.onSettingsChanged = { [weak self] s, byUser in self?.apply(s, byUser: byUser) }
+        window.onHide = { [weak self] in
+            guard let self else { return }
+            Task { await self.dictation.stopIfActive() }
+        }
         model.onReplyCompleted = { [weak self] id, text in self?.readAloud.play(id: id, markdown: text) }
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { if let self { Task { await self.model.refresh() } } }
@@ -34,22 +38,22 @@ import SwiftUI
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.window.retryFollowIfNeeded() }
         })
-        apply(model.settings)
+        apply(model.settings, byUser: false)
         window.show()
         Task { await model.start() }
     }
 
-    private func apply(_ s: UISettings) {
+    private func apply(_ s: UISettings, byUser: Bool) {
         readAloud.rateMultiplier = s.speechRate
         readAloud.voiceIdentifier = s.voiceIdentifier
         readAloud.readCode = s.readCode
-        window.apply(s, onHotkey: { [weak self] in self?.window.toggle() })
+        window.apply(s, byUser: byUser, onHotkey: { [weak self] in self?.window.toggle() })
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         readAloud.stop()
         Task {
-            if dictation.isRecording { await dictation.stop() }
+            await dictation.stopIfActive()
             await model.shutdown()
             NSApp.reply(toApplicationShouldTerminate: true)
         }

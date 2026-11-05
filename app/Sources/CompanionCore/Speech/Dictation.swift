@@ -106,6 +106,24 @@ public final class DictationController {
         }
     }
 
+    /// Starting or recording: the microphone is (or is about to be) on.
+    public var isActive: Bool {
+        switch state {
+        case .preparing, .installing, .recording: true
+        case .idle, .finishing, .failed: false
+        }
+    }
+
+    /// Stops dictation when it is starting or recording, else does nothing. Used when the Stop button goes away
+    /// (the panel gate leaves .ready, or the panel is hidden): the microphone is never left on (spec §7.8, §9).
+    public func stopIfActive() async {
+        guard isActive else { return }
+        await stop()
+    }
+
+    /// Whether a gate change must stop dictation: only `.ready` shows the input bar and its Stop button.
+    public nonisolated static func mustStop(for gate: Gate) -> Bool { gate != .ready }
+
     public func stop() async {
         startGeneration += 1
         state = .finishing

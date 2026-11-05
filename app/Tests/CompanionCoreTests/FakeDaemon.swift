@@ -53,7 +53,12 @@ import Foundation
 
     func hello() async throws -> HelloResult { calls.append("daemon.hello"); return HelloResult(protocolVersion: 1, daemonVersion: "0.4.0") }
     func shutdown() async throws { calls.append("daemon.shutdown") }
-    func hostStatus() async throws -> HostState { calls.append("host.status"); return host }
+    var hostStatusError: DaemonError?
+    func hostStatus() async throws -> HostState {
+        calls.append("host.status")
+        if let e = hostStatusError { throw e }
+        return host
+    }
     func hostRestart() async throws -> HostState { calls.append("host.restart"); return host }
     func hostAcknowledgeSecurityStop() async throws -> HostState {
         calls.append("host.acknowledgeSecurityStop")

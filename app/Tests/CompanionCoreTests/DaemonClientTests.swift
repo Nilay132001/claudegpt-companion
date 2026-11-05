@@ -121,4 +121,16 @@ final class MemoryTransport: LineTransport {
         var big = LineSplitter()
         #expect(throws: LineSplitter.Failure.lineTooLong) { try big.push(Data(count: LineSplitter.maxLineBytes + 1)) }
     }
+
+    /// An over-long line ends the stream and stops the child: "disconnected" must match reality.
+    @Test func anOverLongLineStopsTheChildProcess() async throws {
+        let launch = DaemonLaunch(executable: "/bin/sh",
+                                  arguments: ["-c", "head -c \(LineSplitter.maxLineBytes + 1024) /dev/zero; exec sleep 30"],
+                                  environment: [:], currentDirectory: "/")
+        let t = try ProcessTransport(launch: launch)
+        await #expect(throws: LineSplitter.Failure.lineTooLong) { for try await _ in t.lines {} }
+        for _ in 0..<50 where t.isRunning { try await Task.sleep(for: .milliseconds(100)) }
+        #expect(!t.isRunning)
+        await t.close()
+    }
 }

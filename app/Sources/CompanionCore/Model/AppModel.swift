@@ -53,7 +53,8 @@ public final class AppModel {
     public var sentView: SentView?
     public var errorMessage: String?
 
-    @ObservationIgnored public var onSettingsChanged: ((UISettings) -> Void)?
+    /// `byUser` is true only for a change made in this run (setSetting), false when settings are loaded from companiond.
+    @ObservationIgnored public var onSettingsChanged: ((UISettings, _ byUser: Bool) -> Void)?
     @ObservationIgnored public var onReplyCompleted: ((UUID, String) -> Void)?
     @ObservationIgnored public private(set) var detailLoad: Task<Void, Never>?
     @ObservationIgnored public private(set) var settingsWrite: Task<Void, Never>?
@@ -61,6 +62,9 @@ public final class AppModel {
     @ObservationIgnored private var current: Connection?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+    /// False until this connection has told us the host state (host.status or host.changed). Until then a security
+    /// stop cannot be ruled out, so restartDaemon reads the state first.
+    @ObservationIgnored private var hostKnown = false
     @ObservationIgnored private var autoPlayed: Set<UUID> = []
     /// Events with no session id for a turn no conversation owns yet (chat.send has not answered). Replayed on attach.
     @ObservationIgnored private var unrouted: [String: [TurnEvent]] = [:]
@@ -76,6 +80,7 @@ public final class AppModel {
     public func start() async {
         connection = .connecting
         generation += 1
+        hostKnown = false
         let gen = generation
         let c: Connection
         do {
@@ -98,9 +103,10 @@ public final class AppModel {
         // skip a security stop's acknowledgement (ruling 18).
         do {
             host = try await c.api.hostStatus()
+            hostKnown = true
             privacy = try await c.api.privacyGet()
             settings = await UISettings.load { try await c.api.settingsGet($0) }
-            onSettingsChanged?(settings)
+            onSettingsChanged?(settings, false)
             apply(snapshot: try await c.api.sessionsSnapshot())
             if host.isReady { await loadAuth() }
         } catch {
@@ -131,6 +137,13 @@ public final class AppModel {
     public func restartDaemon() async {
         // A live daemon in a security stop must be acknowledged; a daemon that is already gone may be restarted
         // (its stop latch went with it, and the user would otherwise be locked out).
+        if case .connected = connection, !hostKnown {
+            // The host state was never read on this connection (host.status failed after hello): read it now, and
+            // refuse while it is still unknown rather than risk skipping a security stop.
+            guard let api, let h = try? await api.hostStatus() else { return }
+            host = h
+            hostKnown = true
+        }
         if isSecurityStop, case .connected = connection { return }
         await shutdown()
         stopAllRunning("companiond restarted. Ask again.")
@@ -395,7 +408,7 @@ public final class AppModel {
         settings[keyPath: keyPath] = value
         let changes = settings.changes(from: old)
         guard !changes.isEmpty else { return }
-        onSettingsChanged?(settings)
+        onSettingsChanged?(settings, true)
         guard let api else { return }
         settingsWrite = Task { for c in changes { try? await api.settingsSet(c.key, c.value) } }
     }
@@ -413,6 +426,7 @@ public final class AppModel {
             // Replies are ended by the daemon ("abandoned"), not guessed from host state (ruling 15).
             let wasReady = host.isReady
             host = h
+            hostKnown = true
             if h.isReady && !wasReady { Task { await self.loadAuth() } }
         case .authChanged(let a):
             auth = a

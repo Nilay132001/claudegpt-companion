@@ -132,6 +132,47 @@ struct FakePermissions: DictationPermissions {
         #expect(!c.isRecording)
     }
 
+    @Test func stopIfActiveStopsARecordingAndLeavesIdleOrFailedAlone() async {
+        let e = FakeEngine()
+        let c = DictationController(engine: e, permissions: FakePermissions(mic: true, speech: true))
+        await c.stopIfActive()                   // idle: nothing to stop
+        #expect(e.stopped == 0)
+        #expect(c.state == .idle)
+        await c.toggle(appendTo: { _ in })
+        #expect(c.isActive)
+        await c.stopIfActive()
+        #expect(e.stopped == 1)
+        #expect(c.state == .idle)
+        #expect(!c.isActive)
+
+        let denied = DictationController(engine: e, permissions: FakePermissions(mic: false, speech: true))
+        await denied.toggle(appendTo: { _ in })
+        await denied.stopIfActive()              // failed: the error stays visible, the engine is not touched
+        #expect(denied.state == .failed(DictationController.microphoneDenied))
+        #expect(e.stopped == 1)
+    }
+
+    @Test func stopIfActiveWhileStartingNeverLeavesTheMicOn() async {
+        let e = FakeEngine()
+        e.holdStart = true
+        let c = DictationController(engine: e, permissions: FakePermissions(mic: true, speech: true))
+        let starting = Task { await c.toggle(appendTo: { _ in }) }
+        while e.held == nil { await Task.yield() }
+        #expect(c.isActive)
+        await c.stopIfActive()                   // e.g. the panel was hidden while the mic was still starting
+        e.held?.resume()
+        await starting.value
+        #expect(!e.micStarted)
+        #expect(c.state == .idle)
+    }
+
+    @Test func everyGateButReadyStopsDictation() {
+        #expect(!DictationController.mustStop(for: .ready))
+        let others: [Gate] = [.connecting, .daemonStopped("x"), .hostStarting, .hostFailed("x"), .securityStop("x"),
+                              .signedOut, .authUnsupported("x"), .authError("x"), .noSession]
+        for g in others { #expect(DictationController.mustStop(for: g)) }
+    }
+
     @Test func engineErrorsAreShown() async {
         let e = FakeEngine()
         e.startError = DictationError.unsupportedLocale

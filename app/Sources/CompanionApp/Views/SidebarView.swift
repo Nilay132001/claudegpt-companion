@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(DictationController.self) private var dictation
 
     var body: some View {
         @Bindable var model = model
@@ -17,6 +18,10 @@ struct SidebarView: View {
             }
         }
         .frame(minWidth: 280, maxWidth: 640, minHeight: 320)
+        .onChange(of: model.gate) { _, gate in
+            // The Stop button lives in InputBar, shown only while .ready: never leave the mic on without it.
+            if DictationController.mustStop(for: gate) { Task { await dictation.stopIfActive() } }
+        }
         .sheet(item: $model.preview) { _ in PreviewSheet() }
         .sheet(item: $model.sentView) { view in SentSheet(view: view) }
         .alert("Something went wrong", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {

@@ -211,6 +211,43 @@ import Testing
         #expect(!d.calls.contains("daemon.shutdown"))
     }
 
+    @Test func aFailedHostStatusAfterHelloNeverLetsARestartSkipASecurityStop() async {
+        let d = FakeDaemon()
+        d.host = .failed(detail: "Security check failed: x")
+        d.hostStatusError = DaemonError(code: DaemonErrorCode.invalidParams, message: "host unavailable")
+        let (m, _) = await started(d)
+        #expect(m.connection == .connected(daemonVersion: "0.4.0"))
+        #expect(!m.isSecurityStop)               // never read: the state is unknown, not "no stop"
+        await m.restartDaemon()                  // still unknown: refused
+        #expect(!d.calls.contains("daemon.shutdown"))
+        d.hostStatusError = nil
+        await m.restartDaemon()                  // read now: a security stop, still refused
+        #expect(!d.calls.contains("daemon.shutdown"))
+        #expect(m.gate == .securityStop("Security check failed: x"))
+    }
+
+    @Test func aFailedHostStatusAfterHelloAllowsARestartOnceTheHostIsKnownFine() async {
+        let d = FakeDaemon()
+        d.host = .failed(detail: "Codex exited")
+        d.hostStatusError = DaemonError(code: DaemonErrorCode.invalidParams, message: "host unavailable")
+        let (m, _) = await started(d)
+        d.hostStatusError = nil
+        await m.restartDaemon()
+        #expect(d.calls.contains("daemon.shutdown"))
+        #expect(d.calls.filter { $0 == "daemon.hello" }.count == 2)
+    }
+
+    @Test func settingsReportWhetherTheUserChangedThem() async {
+        let d = FakeDaemon()
+        let m = AppModel(connector: { d.connection })
+        var seen: [Bool] = []
+        m.onSettingsChanged = { _, byUser in seen.append(byUser) }
+        await m.start()
+        #expect(seen == [false])                 // loaded from companiond
+        m.setSetting(\.followClaude, true)
+        #expect(seen == [false, true])           // turned on by the user in this run
+    }
+
     @Test func authErrorHasAWayOut() async {
         let d = FakeDaemon()
         d.authError = DaemonError(code: DaemonErrorCode.hostNotReady, message: "Codex is not ready.")

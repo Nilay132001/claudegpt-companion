@@ -69,13 +69,19 @@ public enum RPCCodec {
             return .notification(method: method, params: env.params ?? .null)
         }
         if let err = env.error {
-            if case .number(let n)? = env.id { return .response(id: Int(n), result: .failure(err)) }
+            if case .number(let n)? = env.id { return .response(id: try requestId(n), result: .failure(err)) }
             return .orphanError(err)
         }
         if env.hasResult, case .number(let n)? = env.id {
-            return .response(id: Int(n), result: .success(env.result ?? .null))
+            return .response(id: try requestId(n), result: .success(env.result ?? .null))
         }
         throw RPCCodecError.notAMessage
+    }
+
+    /// Our ids are small integers. A fractional, huge or NaN id is not one of ours (and `Int(n)` would trap on it).
+    private static func requestId(_ n: Double) throws -> Int {
+        guard let id = Int(exactly: n) else { throw RPCCodecError.notAMessage }
+        return id
     }
 
     public static func value<T: Decodable>(_ v: JSONValue, as type: T.Type) throws -> T {

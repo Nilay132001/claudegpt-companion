@@ -15,13 +15,16 @@ public struct LineSplitter: Sendable {
     public init() {}
 
     public mutating func push(_ chunk: Data) throws -> [Data] {
-        buffer.append(chunk)
+        // Only the new chunk is searched for "\n": rescanning the whole buffer on every chunk is quadratic.
         var out: [Data] = []
-        while let nl = buffer.firstIndex(of: 0x0A) {
-            let line = buffer.subdata(in: buffer.startIndex..<nl)
-            buffer.removeSubrange(buffer.startIndex...nl)
-            if !line.isEmpty { out.append(line) }
+        var rest = chunk[...]
+        while let nl = rest.firstIndex(of: 0x0A) {
+            buffer.append(rest[rest.startIndex..<nl])
+            if !buffer.isEmpty { out.append(buffer) }
+            buffer = Data()
+            rest = rest[rest.index(after: nl)...]
         }
+        buffer.append(rest)
         if buffer.count > Self.maxLineBytes {
             buffer.removeAll()
             throw Failure.lineTooLong
@@ -32,7 +35,7 @@ public struct LineSplitter: Sendable {
 
 /// companiond as a child process: stdin/stdout pipes, stderr discarded (Global Constraints, ruling 7).
 public final class ProcessTransport: LineTransport, @unchecked Sendable {
-    // @unchecked: `splitter` is touched only under `lock`; Process and the pipes are thread-safe for this use.
+    // @unchecked: `splitter` and `failed` are touched only under `lock`; Process and the pipes are thread-safe for this use.
     public let lines: AsyncThrowingStream<Data, any Error>
     private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
     private let process = Process()
@@ -41,6 +44,7 @@ public final class ProcessTransport: LineTransport, @unchecked Sendable {
     private let writeQueue = DispatchQueue(label: "companion.daemon.stdin")
     private let lock = NSLock()
     private var splitter = LineSplitter()
+    private var failed = false
 
     public init(launch: DaemonLaunch) throws {
         signal(SIGPIPE, SIG_IGN) // a write to a dead daemon must fail, not kill the app
@@ -69,12 +73,21 @@ public final class ProcessTransport: LineTransport, @unchecked Sendable {
     private func consume(_ chunk: Data) {
         lock.lock()
         defer { lock.unlock() }
+        guard !failed else { return }
         do {
             for line in try splitter.push(chunk) { continuation.yield(line) }
         } catch {
+            // An over-long line: the stream is unusable. Stop reading and stop the child too, so "disconnected"
+            // is true and no companiond keeps running behind the app.
+            failed = true
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning { process.terminate() }
             continuation.finish(throwing: error)
         }
     }
+
+    /// For tests: whether the child process is still running.
+    var isRunning: Bool { process.isRunning }
 
     public func send(_ line: Data) async throws {
         let handle = stdinPipe.fileHandleForWriting

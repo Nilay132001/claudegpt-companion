@@ -18,7 +18,7 @@ public enum FileReferences {
     }
 
     // A path with an extension, then :line (and an optional :column). Not preceded by a path or URL character.
-    nonisolated(unsafe) static let regex = try! NSRegularExpression(
+    static let regex = try! NSRegularExpression(
         pattern: #"(?<![\w/.~:-])((?:/|\./)?(?:[\w.@+-]+/)*[\w@+-][\w.@+-]*\.[A-Za-z0-9]{1,10}):([1-9][0-9]{0,6})(?::[0-9]+)?"#)
 
     public static func find(in text: String, root: String?) -> [Match] {
