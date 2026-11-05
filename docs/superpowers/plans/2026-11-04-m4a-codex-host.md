@@ -17,7 +17,7 @@
 - **Codex is pinned** to `0.166.0` (`"@openai/codex": "0.166.0"`, no caret). The self-check refuses any other version (spec §7.1.5, §7.1.7).
 - **Codex stderr is never logged or kept.** `RpcClient` counts its bytes only (M1 carry-over: stderr holds local paths).
 - **companiond calls only the client methods in `CLIENT_METHODS`.** Anything else (`fs/*`, `thread/shellCommand`, `command/exec`, `plugin/*`, `mcpServer/tool/call`, …) is refused before it is sent.
-- **Codex runs under its own Seatbelt profile in production** (spec §7.1.9; owner rulings 2026-11-04): exec only of the Codex binary, its `codex-code-mode-host` and the companion relay; reads of its vendor folder, `CODEX_HOME`, the empty companion folder, system paths and the login keychain file; writes only `CODEX_HOME`, minus `config.toml` and the generated model catalog; network only outbound TCP 443 (loopback denied), the DNS resolver socket and the one relay socket. No `network*`, no `sandbox-exec`, no `/usr/bin/false`. The repo tools reach Codex only through relay → acceptor → sandboxed validator → M2 jail. `CODEX_SEATBELT_MEASURED` stays `"stopped"` until Task 10's end-to-end suites **and** the exec-cell gate pass; chat stays disabled until then (M4b's daemon refuses to start Codex while it is `"stopped"`). No weaker fallback, silent or otherwise: a STOP in any task is reported to the controller and nothing ships. `sandboxed: false` exists only for labelled measurements and needs the owner's explicit OK (`measurementOnly: true` for `CodexHost`); no task in this plan runs Codex unsandboxed.
+- **Codex runs under its own Seatbelt profile in production** (spec §7.1.9; owner rulings 2026-11-04): exec only of the Codex binary, its `codex-code-mode-host` and the companion relay; reads of its vendor folder, `CODEX_HOME`, the empty companion folder, system paths and the login keychain file; writes only `CODEX_HOME`, minus `config.toml` and the generated model catalog; network only outbound TCP 443 to non-local hosts (local addresses on 443 measured denied), the DNS resolver socket and the one relay socket. Sign-in runs in a separate short-lived process under the sign-in profile, which adds only bind + inbound on `localhost:1455` (ruling I-9). No `network*`, no `sandbox-exec`, no `/usr/bin/false`. The repo tools reach Codex only through relay → acceptor → sandboxed validator → M2 jail. `CODEX_SEATBELT_MEASURED` stays `"stopped"` until Task 10's end-to-end suites **and** the exec-cell gate pass; chat stays disabled until then (M4b's daemon refuses to start Codex while it is `"stopped"`). No weaker fallback, silent or otherwise: a STOP in any task is reported to the controller and nothing ships. `sandboxed: false` exists only for labelled measurements and needs the owner's explicit OK (`measurementOnly: true` for `CodexHost`); no task in this plan runs Codex unsandboxed.
 - **Credentials (hard rule).** No step reads, prints, copies or logs a token, credential, keyring entry, Codex auth file or env value of another process. Never touch `~/.claude` or any Claude/ChatGPT auth store. Never run `codex login` (or `scripts/codex-login.ts`). Signed-in steps use the companion's own CODEX_HOME, which the owner has already signed in: they call `account/read {refreshToken:false}` and keep only `account.type`. Relay tokens are companiond's own one-time values: never printed, logged or written to a file. Live itests skip cleanly when the account is not signed in.
 - **Thread `cwd`** = the empty companion folder; `sandbox: "read-only"`; `approvalPolicy: "untrusted"` (spec §7.1.2–7.1.3).
 - **Default tests have no network and spawn no real Codex.** Real-Codex tests are `companiond/itest/*.itest.ts`, run only by `npm run itest` with `COMPANION_ITEST=1` (and `COMPANION_ITEST_LIVE=1` for the ones that need login). Not in CI.
@@ -40,16 +40,16 @@
 Task 10 writes these into the spec so the owner sees them in the PR. Items 1–7 come from the first version of this plan; items 8–13 from the relay and code-mode rulings (ledger, 2026-11-04) and the measurements in `.superpowers/sdd/2026-11-04-m4a-codex-host/` (`step1-report.md`, `codemode-report.md`, `relay-spike-review.md`).
 
 1. **§7.1.4 table:** the reply to `execCommandApproval` / `applyPatchApproval` is `{decision:{denied:{rejection:"companion is read-only"}}}` — the 0.166.0 type is `{ decision: ReviewDecision }` (M1 spike sent this shape).
-2. **§7.1.4 elicitation gate (confirmed against 0.166.0 types + binary strings):** a tool-call approval is `mode: "form"` with `_meta.codex_approval_kind == "mcp_tool_call"`. The tool name comes from `_meta` or, if `_meta` has none, from the in-flight `mcpToolCall` item of that thread and server (matched by call id, or the only one). If the two disagree, or neither exists, it is declined. **Measured (Step 1, code-mode spike):** Codex sent no elicitation for the jail's tools in any run (they carry `readOnlyHint: true`; Codex appears to auto-approve read-only tools). For `companion-readonly` the allowlist therefore rests on `enabled_tools`, the validator's tool allowlist, the per-thread tool-list check and the guard's `mcpToolCall` check. The gate stays for M6 (Atlassian).
+2. **§7.1.4 elicitation gate (confirmed against 0.166.0 types + binary strings):** a tool-call approval is `mode: "form"` with `_meta.codex_approval_kind == "mcp_tool_call"`. The tool name comes from `_meta` or, if `_meta` has none, from the in-flight `mcpToolCall` item of that thread and server (matched by call id, or the only one). If the two disagree, or neither exists, it is declined. **Measured (Step 1, code-mode spike):** Codex sent no elicitation for the jail's tools in any run (they carry `readOnlyHint: true`; Codex appears to auto-approve read-only tools). For `companion-readonly` the allowlist therefore rests on `enabled_tools`, the validator's tool allowlist, the per-thread tool-list check and the guard's `mcpToolCall` check. The gate stays for M6 (Atlassian). **Deferred to M6 (ruling I-10):** whether Codex passes server-supplied `_meta` through on form elicitations (spoof risk), and whether the elicitation's `_meta` call id equals the `mcpToolCall` item id. M4a cannot measure either: the validator closes on any server→client request, and read-only tools trigger no elicitation. M4a does assert that item-bearing notifications are only `item/started` and `item/completed` (Task 10).
 3. **§7.1.5 additions:** the Codex version also comes from `initialize.userAgent`; `thread/start` / `thread/resume` responses must report `instructionSources: []`, the empty `cwd`, `approvalPolicy: "untrusted"`, `approvalsReviewer: "user"`, sandbox `readOnly`, and a `model` whose tool surface was checked at start (item 8); `CODEX_HOME` must hold no `AGENTS.md` / `AGENTS.override.md`; the ancestor check also looks for `AGENTS.override.md`. The MCP check is split: per process every listed server and tool must be allowlisted (subset); per root-bound thread the tool list must equal the allowlist exactly. The per-thread query always names the server (`mcpServerStatus/list {threadId, serverName}`): measured while planning M4a, the same call without `serverName` re-spawns the thread's servers, which spends the one-time relay token. `approval_policy` is not in `config.toml` (0.166.0 refuses it); it is set per thread and checked.
 4. **Base MCP server:** `config.toml` defines `companion-readonly` with `command = "/usr/bin/false"` (which the Codex profile cannot even exec). A thread with no approved root therefore has no repo tools. Only a per-thread override points it at the relay, with that thread's one-time token in its env.
 5. **§7.1.6:** item types in the 0.166.0 union that the spec does not name — `hookPrompt`, `functionCallOutput`, `sleep`, `enteredReviewMode`, `exitedReviewMode` — count as "unknown" and interrupt the turn; so do `fileChange` and `collabAgentToolCall` (code mode can reach `apply_patch` and the agent tools if the catalog or config ever regress). **Measured:** a code-mode `functions.exec` cell produces no item and no notification; only the tool calls it makes do (`mcpToolCall`, `fileChange`). Pure-JS work in a cell is invisible to the guard; item 12 covers it.
 6. **Client-method allowlist** (new, defence in depth): see Global Constraints.
 7. **§12.1 integration tests are opt-in** (`npm run itest`), not CI: even the no-login ones start a real app-server, which may use the network.
-8. **§7.1.1 code mode (owner ruling 2026-11-04, "Enable code mode").** Measured: in 0.166.0 a ChatGPT-login model reaches MCP tools only through code mode, and no released or alpha Codex from 0.160 to 0.168-alpha.2 offers direct MCP tools. So `features.code_mode_host = true` and the profile allows exec of `codex-code-mode-host`. The surface is then closed down to `functions.exec`, `functions.wait` and, inside exec, the five `mcp__companion_readonly__*` tools: `features.goals = false`; `[features.code_mode] excluded_tool_namespaces = ["clock", "functions"]`; `[tools] experimental_request_user_input = { enabled = false }`; `model_catalog_json` pointing at a catalog **generated at every start** from the pinned binary's own `codex debug models`, keeping only `tool_mode = "code_mode_only"` models, with `multi_agent_version` and `apply_patch_tool_type` cleared (the only measured way to remove `collaboration.*`). `direct_only_tool_namespaces` is never set (it widens the surface). `sleep_tool` stays off. Because the catalog is load-bearing it is verified, not trusted: before the first app-server starts, companiond runs `codex debug prompt-input` offline, per catalog model, under the offline Codex profile in a scratch CODEX_HOME, and fails closed unless the surface is exactly that allowlist (plus a parser canary that must see nested tools when `functions` is not excluded). `config/read` must show `code_mode_host: true`, `goals: false`, the two excluded namespaces, no direct-only namespaces and the generated catalog path. `request_user_input` is not visible in `config/read`; only the surface check covers it.
+8. **§7.1.1 code mode (owner ruling 2026-11-04, "Enable code mode").** Measured: in 0.166.0 a ChatGPT-login model reaches MCP tools only through code mode, and no released or alpha Codex from 0.160 to 0.168-alpha.2 offers direct MCP tools. So `features.code_mode_host = true` and the profile allows exec of `codex-code-mode-host`. The surface is then closed down to `functions.exec`, `functions.wait` and, inside exec, the five `mcp__companion_readonly__*` tools: `features.goals = false`; `[features.code_mode] excluded_tool_namespaces = ["clock", "functions"]`; `[tools] experimental_request_user_input = { enabled = false }`; `model_catalog_json` pointing at a catalog **generated at every start** from the pinned binary's own `codex debug models`, keeping only `tool_mode = "code_mode_only"` models, with `multi_agent_version` and `apply_patch_tool_type` cleared (the only measured way to remove `collaboration.*`). `direct_only_tool_namespaces` is never set (it widens the surface). `sleep_tool` stays off. Because the catalog is load-bearing it is verified, not trusted: before the first app-server starts, companiond runs `codex debug prompt-input` offline, per catalog model, under the offline Codex profile in a scratch CODEX_HOME, and fails closed unless the **offline** surface is exactly that allowlist (plus a parser canary that must see nested tools when `functions` is not excluded). The offline check cannot see account- or server-gated tools (the goal tools appear only live); Task 8 measures whether the same check under the production profile with the real CODEX_HOME sees them, and if so it also runs live at every start (`LIVE_SURFACE_CHECK`); otherwise live-only tools are a recorded residual risk (item 11). `config/read` must show `code_mode_host: true`, `goals: false`, the two excluded namespaces, no direct-only namespaces and the generated catalog path. `request_user_input` is not visible in `config/read`; only the surface check covers it.
 9. **§2 topology (owner ruling (b), review I1).** One app-server per approved root (cap 3, idle LRU close) plus a base process for sign-in and threads with no root. A thread moves between processes only after `thread/unsubscribe` in the old one. `companion-readonly` is no longer Codex's child: Codex execs the relay; companiond launches the jail (`buildReadonlyLaunch`, unchanged) per binding, outside Codex's sandbox. The diagram and §3 `CodexHost` row change accordingly.
-10. **§7.1.9 rewritten: measured rules and trust boundaries.** The Codex profile: `(deny default)`, `system.sb`; exec of the Codex binary, `codex-code-mode-host` and the relay only; `file-read*` of the vendor folder, `CODEX_HOME`, the empty folder, the system read paths, the relay binary and `~/Library/Keychains/login.keychain-db`; `file-read-metadata` literals on the ancestors of `CODEX_HOME`, the vendor folder and App Support, and on `~/Library/Keychains`; `file-write*` on `CODEX_HOME` and `/dev/null`, then `(deny file-write*)` on `CODEX_HOME/config.toml` and the generated catalog; `network-outbound` to `tcp *:443`, then a deny of `tcp localhost:*`, plus the unix sockets `/private/var/run/mDNSResponder` and the relay socket; `sysctl-read`; a fixed mach-lookup list. Boundaries, outermost first: (a) the Seatbelt literal — Codex can reach exactly one socket (measured: path tricks and symlinks fail); (b) the acceptor in companiond — mutual HMAC-SHA256 over a fresh nonce, the raw token never on the wire, one-time tokens that expire seconds after `thread/start` and are revoked at thread end, a socket dev/ino check, 0700/0600 folders; it parses no JSON; (c) the validator — its own profile (no network, no exec beyond Node, no writes), every line parsed and re-serialised, method and tool allowlists, outstanding-id tracking, in-flight cap 16, backpressure, idle timeout; (d) the jail — M2 profile and tool layer, unchanged. The relay itself is a convenience, not a boundary. Any refused connection, replaced socket or validator violation stops everything with "Security check failed".
-11. **§7.1.9 residual risks (recorded, not fixed).** (i) **KERN_PROCARGS2:** any same-uid process, and code inside Codex's profile, can read another process's initial environment; `unsetenv` does not clear it and Seatbelt cannot block it (measured with `sysctl-read` and `process-info*` denied). A relay token can be read before use; one-time use, the TTL and one process per root limit it to a root that process already holds. The same gap means §7.1.9 does **not** stop Codex reading other processes' env (API keys in terminals, IDEs). (ii) TCP 443 to **any** host: SBPL cannot name hosts. (iii) Codex can read the login keychain file (Keychain item ACLs still apply). (iv) `CODEX_HOME` stays writable to Codex apart from the two denied files. (v) `codex-code-mode-host` shares Codex's profile; a V8 escape gets Codex's rights. (vi) Exec cells are invisible to the guard; safety rests on the cell being a bare isolate (measured, and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does produce an item. (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files in App Support (out of scope: same uid). (viii) The catalog can drift from server-side model metadata; it is regenerated and checked at every start. Plus whatever Task 10 measures for loopback (I5) and for tokens on disk (I4).
+10. **§7.1.9 rewritten: measured rules and trust boundaries.** The Codex profile: `(deny default)`, `system.sb`; exec of the Codex binary, `codex-code-mode-host` and the relay only; `file-read*` of the vendor folder, `CODEX_HOME`, the empty folder, the system read paths, the relay binary and `~/Library/Keychains/login.keychain-db`; `file-read-metadata` literals on the ancestors of `CODEX_HOME`, the vendor folder and App Support, and on `~/Library/Keychains`; `file-write*` on `CODEX_HOME` and `/dev/null`, then `(deny file-write*)` on `CODEX_HOME/config.toml` and the generated catalog; `network-outbound` to `tcp *:443`, then a deny of `tcp localhost:*` (measured while planning: 127.0.0.1, ::1, 0.0.0.0 and the Mac's own address on 443 are all EPERM, with a live listener on `0.0.0.0:443`), plus the unix sockets `/private/var/run/mDNSResponder` and the relay socket; no `network-bind`/`network-inbound`; `sysctl-read`; a fixed mach-lookup list. Hard links to the protected files are denied (measured EPERM), and companiond also checks before every spawn and thread that both files have one link and the bytes it wrote. `config/read` may show only the user layer at `CODEX_HOME/config.toml` and the system layer at `/etc/codex/config.toml`. **Sign-in (ruling I-9)** runs in a separate short-lived Codex process under the sign-in profile = the production profile plus `(allow network-bind (local tcp "localhost:1455"))` and `(allow network-inbound (local tcp "localhost:1455"))` (measured: the production profile refuses the callback server; with these two rules sign-in starts and every other port stays closed). The offline profile has no network, keychain file or keychain/trust mach services. Boundaries, outermost first: (a) the Seatbelt literal — Codex can reach exactly one socket (measured: path tricks and symlinks fail); (b) the acceptor in companiond — mutual HMAC-SHA256 over a fresh nonce, the raw token never on the wire, one-time tokens that expire seconds after `thread/start` and are revoked at thread end, a socket dev/ino check, 0700/0600 folders; it parses no JSON; (c) the validator — its own profile (no network, no exec beyond Node, no writes), every line parsed and re-serialised, method and tool allowlists, outstanding-id tracking, in-flight cap 16, backpressure, idle timeout; (d) the jail — M2 profile and tool layer, unchanged. The relay itself is a convenience, not a boundary. Any refused connection, replaced socket or validator violation stops everything with "Security check failed".
+11. **§7.1.9 residual risks (recorded, not fixed).** (i) **KERN_PROCARGS2:** any same-uid process, and code inside Codex's profile — including another root's app-server — can read another process's initial environment; `unsetenv` does not clear it and Seatbelt cannot block it (measured with `sysctl-read` and `process-info*` denied). A relay token can be read before use. One process per root does not prevent that; what limits it is single use, the short window between exec and connect, the TTL, and detection (the real relay is then refused, which stops everything). The same gap means §7.1.9 does **not** stop Codex reading other processes' env (API keys in terminals, IDEs). (ii) TCP 443 to **any non-local** host: SBPL cannot name hosts (local addresses on 443 are denied, measured). (iii) Codex can read the login keychain file (Keychain item ACLs still apply). (iv) `CODEX_HOME` stays writable to Codex apart from the two denied files; other files Codex might read from it are covered only by the config-layer check (an unexpected layer fails) and not by any write deny. (v) `codex-code-mode-host` shares Codex's profile; a V8 escape gets Codex's rights. (vi) Exec cells are invisible to the guard; safety rests on the cell being a bare isolate (measured, and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does produce an item. (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files in App Support (out of scope: same uid). The handshake is not bound to the channel: a same-uid process that swaps the socket and restores it between two dev/ino checks (each accept, before each hand-off, every 2 s) is not detected. (viii) The catalog can drift from server-side model metadata; it is regenerated and checked at every start. Live-only (account- or server-gated) tools are covered only if Task 8 measured `LIVE_SURFACE_CHECK` true. (ix) The sign-in process can bind port 1455 on any local address, not only 127.0.0.1 (SBPL's `localhost:1455` also matches 0.0.0.0; no narrower form held), for the few minutes sign-in runs. (x) Not measured: Codex's unified logging and `RUST_LOG` output for relay tokens (I4 scanned files only); the thread model is re-checked only when a turn reports one. Plus whatever Task 10 measures for tokens on disk (I4).
 12. **Exec-cell gate (orchestrator ruling 2026-11-04).** Because the code-mode host inherits Codex's profile and the guard cannot see cells, a real cell under the production profile and config must show no network (non-OpenAI host on 443, loopback, DNS), no reads beyond its runtime (`login.keychain-db`, other keychain entries, `CODEX_HOME` and `$HOME` canaries), no write/exec/spawn, and no direct access to the relay socket. Measured in Task 8 and again in Task 10; chat stays off until it passes.
 13. **§7.2 and §16:** the jail's launch moves from Codex to companiond (per binding, same profile); §16's "Can `codex app-server` run under Seatbelt?" and "functions.exec … stay listed" rows are replaced by the measured answers above and item 11.
 
@@ -2464,14 +2464,20 @@ test("server lines: only responses to outstanding ids, with an object result or 
   ]) assert.ok(closes(g().fromServer(line)), line);
 });
 
-test("sendLine pauses the source while the destination is full and resumes on drain (I3)", async () => {
+test("sendLine pauses the source while a destination is full and resumes when all have drained (I3, M-2)", async () => {
   const src = new PassThrough();
   src.resume();
   const held: Array<() => void> = [];
-  const dst = new Writable({ highWaterMark: 4, write(_c, _e, cb) { held.push(() => cb()); } });
-  sendLine(dst, "0123456789\n", src);
+  const full = () => new Writable({ highWaterMark: 4, write(_c, _e, cb) { held.push(() => cb()); } });
+  const a = full();
+  const b = full();
+  sendLine(a, "0123456789\n", src);
+  sendLine(b, "0123456789\n", src);
   assert.equal(src.isPaused(), true);
-  held.shift()?.();
+  held.shift()?.(); // a drains
+  await new Promise((r) => setImmediate(r));
+  assert.equal(src.isPaused(), true, "b is still full");
+  held.shift()?.(); // b drains
   await new Promise((r) => setImmediate(r));
   assert.equal(src.isPaused(), false);
 });
@@ -2528,11 +2534,20 @@ test("listening: socket 0600 in a 0700 folder; a stale socket is replaced; anyth
   // A crashed companiond leaves its socket file behind: a child binds it and is SIGKILLed before any cleanup.
   const stale = ensureRelayDirs(relayPaths(tempDir("cgc-acc-")));
   spawnSync(process.execPath, ["-e", `require("node:net").createServer().listen(${JSON.stringify(stale.socket)}, () => process.kill(process.pid, "SIGKILL"))`]);
-  assert.equal(fs.lstatSync(stale.socket).isSocket(), true);
+  const staleIno = fs.lstatSync(stale.socket).ino;
   const a2 = new RelayAcceptor({ socketPath: stale.socket, validator: validator() });
   await a2.start();
   started.push(a2);
-  assert.notEqual(fs.lstatSync(stale.socket).ino, undefined);
+  assert.notEqual(fs.lstatSync(stale.socket).ino, staleIno, "the stale socket was replaced");
+  const hello = await new Promise<string>((r) => net.connect(stale.socket).once("data", (d) => r(d.toString("latin1"))).on("error", () => r("")));
+  assert.match(hello, /^CGC1 [0-9a-f]{64}\n$/);
+  // A LIVE socket at the path (another companiond, another itest run) is refused, never unlinked (M-9).
+  const busy = ensureRelayDirs(relayPaths(tempDir("cgc-acc-")));
+  const other = net.createServer((c) => c.destroy());
+  await new Promise<void>((r) => other.listen(busy.socket, r));
+  await assert.rejects(new RelayAcceptor({ socketPath: busy.socket, validator: validator() }).start(), RelaySetupError);
+  assert.equal(fs.lstatSync(busy.socket).isSocket(), true);
+  other.close();
   const notSock = ensureRelayDirs(relayPaths(tempDir("cgc-acc-")));
   fs.writeFileSync(notSock.socket, "SYNTHETIC FIXTURE\n");
   await assert.rejects(new RelayAcceptor({ socketPath: notSock.socket, validator: validator() }).start(), RelaySetupError);
@@ -2648,7 +2663,7 @@ test("too many pending handshakes are refused (M4)", async () => {
   await (await first).closed;
 });
 
-test("a replaced socket file revokes everything and is reported (I2)", async () => {
+test("a replaced socket file revokes everything, is reported, and leaves the broker unhealthy until restart (I2, I-1)", async () => {
   const { a, events, rp } = await start({ inodeCheckMs: 50 });
   const c = await connectRelay(rp.socket, a.grant(jail()).token);
   fs.renameSync(rp.socket, `${rp.socket}.moved`);
@@ -2657,7 +2672,31 @@ test("a replaced socket file revokes everything and is reported (I2)", async () 
   assert.ok(await until(() => has(events, "socketReplaced")));
   await c.closed;
   assert.ok(await until(() => has(events, "closed", "revoked")));
-  decoy.close();
+  assert.equal(a.healthy(), false);
+  // Closing our listener unlinks the path (libuv), so the decoy's file may be gone; a listener that holds the path
+  // when restart() runs is refused, never unlinked.
+  fs.rmSync(rp.socket, { force: true });
+  const squat = net.createServer((x) => x.destroy());
+  await new Promise<void>((r) => squat.listen(rp.socket, r));
+  try {
+    await assert.rejects(a.restart(), RelaySetupError, "a live foreign listener at the path is refused");
+  } finally {
+    squat.close();
+    decoy.close();
+  }
+  fs.rmSync(rp.socket, { force: true });
+  await a.restart();
+  assert.equal(a.healthy(), true);
+});
+
+test("a validator that crashes or exits with an unknown code ends the binding as a violation (I-2)", async () => {
+  // SYNTHETIC stand-ins for a validator that Codex input crashed: a signal death, and Node's own exit code 1.
+  for (const script of ['process.kill(process.pid, "SIGSEGV")', "process.exit(1)"]) {
+    const { a, events, rp } = await start({ validator: { command: process.execPath, args: ["-e", script], env: { PATH: "/usr/bin:/bin" }, cwd: "/" } });
+    const c = await connectRelay(rp.socket, a.grant(jail()).token);
+    await c.closed;
+    assert.ok(await until(() => has(events, "closed", "violation")), script);
+  }
 });
 ```
 
@@ -2817,7 +2856,14 @@ export type BrokerEvent =
 
 /** A one-time token for one thread's binding. arm() starts the short TTL; revoke() ends it, live or not. */
 export interface RelayGrant { readonly id: string; readonly token: string; arm(ttlMs?: number): void; revoke(): void }
-export interface RelayBroker { grant(launch: LaunchSpec): RelayGrant; on(l: (e: BrokerEvent) => void): () => void }
+export interface RelayBroker {
+  grant(launch: LaunchSpec): RelayGrant;
+  on(l: (e: BrokerEvent) => void): () => void;
+  /** false after a replaced socket or a listener error: nothing may be bound until restart() succeeds. */
+  healthy(): boolean;
+  /** Re-runs every start check (folder, stale or live socket) and listens again; throws if any fails. */
+  restart(): Promise<void>;
+}
 
 /** Ruling I1: a token is good for a few seconds after thread/start, and never longer than GRANT_MAX_AGE_MS. */
 export const DEFAULT_TOKEN_TTL_MS = 10_000;
@@ -2835,8 +2881,9 @@ export const MAX_LINE_BYTES = 1024 * 1024;
 export const MAX_IN_FLIGHT = 16;
 export const MAX_ID_BYTES = 256;
 export const IDLE_MS = 30 * 60_000;
-/** Validator exit codes; the acceptor maps them to a BindingEnd. */
-export const EXIT = { normal: 0, idle: 3, violation: 4, limit: 5, jail: 6, error: 7 } as const;
+/** Validator exit codes, outside Node's own (1–14) and the shell's (126+). The acceptor maps them to a BindingEnd;
+ * a signal death or any other code counts as a violation (plan review I-2). */
+export const EXIT = { normal: 80, idle: 81, violation: 82, limit: 83, jail: 84, error: 85 } as const;
 
 type Json = Record<string, unknown>;
 type Id = string | number;
@@ -2941,12 +2988,25 @@ export class McpFilter {
   }
 }
 
-/** Write with backpressure (review I3): while dst is full, stop reading src; resume when dst drains. */
+const fullFor = new WeakMap<Readable, Set<Writable>>();
+
+/** Write with backpressure (review I3): while any destination of src is full, stop reading src; resume only when
+ * every one of them has drained (plan review M-2). */
 export function sendLine(dst: Writable, line: string, src: Readable): void {
-  if (!dst.write(line) && !src.isPaused()) {
-    src.pause();
-    dst.once("drain", () => src.resume());
+  if (dst.write(line)) return;
+  let full = fullFor.get(src);
+  if (!full) {
+    full = new Set();
+    fullFor.set(src, full);
   }
+  if (full.has(dst)) return;
+  full.add(dst);
+  src.pause();
+  const waiting = full;
+  dst.once("drain", () => {
+    waiting.delete(dst);
+    if (waiting.size === 0) src.resume();
+  });
 }
 ```
 
@@ -3117,10 +3177,11 @@ interface Grant { id: string; token: string; launch: LaunchSpec; expires: number
 interface Binding { jail: ChildProcess; validator: ChildProcess; revoked: boolean }
 
 const END_BY_EXIT: ReadonlyMap<number, BindingEnd> = new Map([
-  [EXIT.normal, "normal"], [EXIT.idle, "idle"], [EXIT.violation, "violation"], [EXIT.limit, "limit"], [EXIT.jail, "jail"],
+  [EXIT.normal, "normal"], [EXIT.idle, "idle"], [EXIT.violation, "violation"], [EXIT.limit, "limit"], [EXIT.jail, "jail"], [EXIT.error, "error"],
 ]);
 
-function removeStaleSocket(p: string): void {
+/** A dead socket of ours is removed; a live one (another companiond or itest run) or anything else is refused (M7, M-9). */
+async function removeStaleSocket(p: string): Promise<void> {
   let st: fs.Stats;
   try {
     st = fs.lstatSync(p);
@@ -3131,6 +3192,15 @@ function removeStaleSocket(p: string): void {
   if (!st.isSocket() || st.uid !== (process.getuid?.() ?? -1)) {
     throw new RelaySetupError("Something that is not the companion's socket is where its socket goes.");
   }
+  const live = await new Promise<boolean>((resolve) => {
+    const c = net.connect(p);
+    c.once("connect", () => {
+      c.destroy();
+      resolve(true);
+    });
+    c.once("error", () => resolve(false));
+  });
+  if (live) throw new RelaySetupError("Another program is listening on the companion's relay socket.");
   fs.unlinkSync(p);
 }
 
@@ -3160,10 +3230,19 @@ export class RelayAcceptor implements RelayBroker {
     };
   }
 
+  healthy(): boolean {
+    return this.#server !== null && this.#inodeOk();
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
+  }
+
   async start(): Promise<void> {
     if (this.#server) return;
     checkPrivateDir(path.dirname(this.#o.socketPath));
-    removeStaleSocket(this.#o.socketPath);
+    await removeStaleSocket(this.#o.socketPath);
     const server = net.createServer({ allowHalfOpen: true }, (s) => this.#onConnection(s));
     const old = process.umask(0o077);
     try {
@@ -3231,6 +3310,12 @@ export class RelayAcceptor implements RelayBroker {
 
   #onConnection(s: net.Socket): void {
     s.on("error", () => {});
+    if (!this.#inodeOk()) {
+      // Checked at every accept, not only by the sweep (plan review I-8).
+      s.destroy();
+      this.#replaced();
+      return;
+    }
     if (this.#pending.size >= (this.#o.maxPending ?? 4) || this.#bound.size >= (this.#o.maxBound ?? 16)) {
       s.destroy();
       this.#emit({ type: "refused", reason: "too many connections" });
@@ -3266,9 +3351,11 @@ export class RelayAcceptor implements RelayBroker {
       s.pause();
       this.#grants.delete(g.id); // one use
       s.write(`${proof(g.token, nonce, "reader")}\n`, (err) => {
-        if (err) {
+        // pause() does not stop libuv reads, so a client that sent bytes before the validator's OK would leave them
+        // in companiond's buffer. The real relay sends nothing before OK: anything here is a violation (M-8).
+        if (err || s.readableLength > 0 || !this.#inodeOk()) {
           s.destroy();
-          this.#emit({ type: "closed", grantId: g.id, end: "error" });
+          this.#emit({ type: "closed", grantId: g.id, end: err ? "error" : "violation" });
           return;
         }
         this.#bind(s, g);
@@ -3301,13 +3388,15 @@ export class RelayAcceptor implements RelayBroker {
     }
     const v = this.#o.validator;
     const validator = spawn(v.command, v.args, { env: v.env, cwd: v.cwd, stdio: ["ignore", "ignore", "ignore", s, jail.stdin, jail.stdout] });
-    // The children hold their own copies now. companiond keeps none: it never reads Codex's bytes.
+    // The children hold their own copies now; companiond closes its own and parses nothing (it has read only the
+    // fixed-size handshake lines).
     s.destroy();
     jail.stdin.destroy();
     jail.stdout.destroy();
     const b: Binding = { jail, validator, revoked: false };
     this.#bound.set(g.id, b);
     let jailGone = false;
+    let killedAfterJail = false;
     let ended = false;
     const end = (e: BindingEnd): void => {
       if (ended) return;
@@ -3325,7 +3414,9 @@ export class RelayAcceptor implements RelayBroker {
       // A jail that exits on a clean EOF is normal: the validator sees its stdout end and exits on its own.
       // Only a validator that is still there after a short grace period is killed.
       setTimeout(() => {
-        if (alive(validator)) validator.kill("SIGKILL");
+        if (!alive(validator)) return;
+        killedAfterJail = true;
+        validator.kill("SIGKILL");
       }, 2000).unref();
     });
     validator.on("error", () => {
@@ -3334,7 +3425,9 @@ export class RelayAcceptor implements RelayBroker {
     });
     validator.on("exit", (code) => {
       if (alive(jail)) jail.kill("SIGKILL");
-      end((code !== null ? END_BY_EXIT.get(code) : undefined) ?? (jailGone ? "jail" : "error"));
+      // A signal death or an unknown code is how an attack on the parser looks: never a silent rebind (I-2).
+      const mapped = code !== null ? END_BY_EXIT.get(code) : undefined;
+      end(mapped ?? (killedAfterJail ? "jail" : "violation"));
     });
     this.#emit({ type: "bound", grantId: g.id });
   }
@@ -3348,18 +3441,22 @@ export class RelayAcceptor implements RelayBroker {
     b.jail.kill("SIGKILL");
   }
 
-  /** Drops expired grants and checks that the socket path is still our socket (review I2). */
+  #inodeOk(): boolean {
+    if (!this.#ino) return false;
+    try {
+      const st = fs.lstatSync(this.#o.socketPath);
+      return st.isSocket() && st.dev === this.#ino.dev && st.ino === this.#ino.ino;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Drops expired grants and checks that the socket path is still our socket (review I2). A same-uid swap that is
+   * restored between two checks is not detected (spec residual risk). */
   #sweep(): void {
     const now = Date.now();
     for (const [id, g] of this.#grants) if (g.expires <= now) this.#grants.delete(id);
-    if (!this.#ino) return;
-    try {
-      const st = fs.lstatSync(this.#o.socketPath);
-      if (st.isSocket() && st.dev === this.#ino.dev && st.ino === this.#ino.ino) return;
-    } catch {
-      // gone: replaced
-    }
-    this.#replaced();
+    if (this.#server && !this.#inodeOk()) this.#replaced();
   }
 
   #replaced(): void {
@@ -3396,7 +3493,7 @@ git commit -m "feat(relay): add the authenticated acceptor and the sandboxed val
 The measured profile (Step 1 report: the spike's relay profile plus three rules) gains exec of `codex-code-mode-host` (owner ruling) and write-denies on `config.toml` and the catalog (ruling). Code mode is on and closed down to `functions.exec`, `functions.wait` and the five jail tools (ruling, measured "combinedB"). The catalog is generated, then verified offline per model (ruling). Then this task measures, on the real binary, that it all holds — including the exec-cell gate (orchestrator ruling), the first time a real cell runs under the production profile and config.
 
 **Files:**
-- Modify: `companiond/src/codex/codexSeatbelt.ts` (rewritten), `companiond/src/codex/config.ts`, `companiond/src/codex/selfCheck.ts`, `companiond/scripts/codex-login.ts`, `companiond/test/codex/codexSeatbelt.test.ts` (rewritten), `companiond/test/codex/config.test.ts`, `companiond/test/codex/selfCheck.test.ts`, `docs/findings/2026-11-03-phase1-poc.md`
+- Modify: `companiond/src/codex/codexSeatbelt.ts` (rewritten), `companiond/src/codex/config.ts`, `companiond/src/codex/selfCheck.ts`, `companiond/src/codex/codexInstall.ts` (review M-7), `companiond/scripts/codex-login.ts` (rewritten, ruling I-9), `companiond/test/codex/codexSeatbelt.test.ts` (rewritten), `companiond/test/codex/config.test.ts`, `companiond/test/codex/selfCheck.test.ts`, `companiond/test/codex/codexInstall.test.ts`, `docs/findings/2026-11-03-phase1-poc.md`
 - Create: `companiond/src/codex/codeMode.ts`, `companiond/src/codex/binding.ts`, `companiond/src/codex/instructions.ts`, `companiond/itest/fixtures/probe.c`, `companiond/itest/helpers/companion.ts`, `companiond/itest/helpers/codeModeSession.ts`, `companiond/itest/helpers/execCellGate.ts`, `companiond/itest/codeMode.itest.ts`
 - Delete: `companiond/scripts/measure-codex-profile.ts` (`git rm`; its STOP evidence stays in the findings doc)
 - Test: `companiond/test/codex/codeMode.test.ts`, `companiond/test/codex/binding.test.ts`
@@ -3404,10 +3501,11 @@ The measured profile (Step 1 report: the spike's relay profile plus three rules)
 **Interfaces:**
 - Consumes: Tasks 1–7.
 - Produces:
-  - `codexSeatbelt.ts`: `CodexLaunch` (unchanged), `RelayEndpoint { binary; socket }`, `CodexProfileInput`, `buildCodexProfile(i)`, `buildCodexLaunch({ install, paths, sandboxed, relay?, home?, extraArgs? })`, `buildOfflineCodexLaunch(install, scratchHome)`, `codexEnv` (unchanged), `sbplString` (unchanged), `DNS_SOCKET`, `CODEX_SEATBELT_MEASURED` (stays `"stopped"`)
+  - `codexSeatbelt.ts`: `CodexLaunch` (unchanged), `RelayEndpoint { binary; socket }`, `CodexProfileInput` (with `login?`), `buildCodexProfile(i)`, `buildCodexLaunch({ install, paths, sandboxed, relay?, home?, extraArgs?, login?, subcommand? })`, `buildOfflineCodexLaunch(install, scratchHome)`, `LOGIN_CALLBACK_PORT = 1455`, `LOGIN_RULES`, `codexEnv` (unchanged), `sbplString` (unchanged), `DNS_SOCKET`, `CODEX_SEATBELT_MEASURED` (stays `"stopped"`)
   - `config.ts`: `CANDIDATE_OFF_FEATURES = ["sleep_tool"]`, `CODE_MODE_OFF_FEATURES = ["goals"]`, `EXCLUDED_TOOL_NAMESPACES = ["clock", "functions"]`, `CATALOG_FILE = "companion-models.json"`, `CODEX_PROTECTED_FILES`, `CodeModeConfig { catalogPath; excluded? }`, `buildCodexConfigToml(off?, codeMode?)`, `writeCodexHomeFile(codexHome, name, body)`
-  - `selfCheck.ts`: `checkCodeModeConfig(resp, featureEntries, catalogPath)`, `checkThreadModel(resp, models)`
-  - `codeMode.ts`: `ALLOWED_TOP_LEVEL`, `ALLOWED_NESTED`, `trimCatalog`, `parseToolSurface`, `checkToolSurface`, `prepareCodeMode({ install, paths, off?, run? }): PreparedCodeMode`, `offlineRunner(install)`, `CodeModeError`, `PreparedCodeMode { result: CheckResult; models: string[] }`, `CodexDebugRunner`
+  - `selfCheck.ts`: `checkCodeModeConfig(resp, featureEntries, catalogPath)`, `checkThreadModel(resp, models)`, `checkConfigLayers(resp, codexHome)`, `SYSTEM_CONFIG_FILE`; `versionFromUserAgent` / `checkVersion` fixed (a missing version fails)
+  - `codexInstall.ts`: containment checked after realpath
+  - `codeMode.ts`: `ALLOWED_TOP_LEVEL`, `ALLOWED_NESTED`, `trimCatalog`, `parseToolSurface`, `checkToolSurface`, `prepareCodeMode({ install, paths, off?, run?, live? }): PreparedCodeMode`, `offlineRunner(install)`, `liveRunner(install, paths, relay, home?)`, `promptInputArgs(model, extra?)`, `LIVE_SURFACE_CHECK` (measured in Step 7), `snapshotProtectedFiles`, `checkProtectedFiles`, `CodeModeError`, `PreparedCodeMode { result: CheckResult; models: string[]; protectedFiles: Record<string, string> }`, `CodexDebugRunner`
   - `binding.ts`: `RELAY_TOKEN_ENV`, `relayOverride(relayBinary, token, emptyCwd, serverName?)`, `inertOverride(serverName?)`
   - `instructions.ts`: `DEVELOPER_INSTRUCTIONS`
   - itest helpers: `skipUnless`, `freshPaths`, `ownPaths`, `isSignedIn`; `startSession(...)`, `Session`; `runExecCellGate(...)`, `GateResult`
@@ -3468,7 +3566,19 @@ test("offline profile: no network, no keychain, no relay", () => {
   const p = buildCodexProfile({ install, codexHome: "/t", emptyCwd: "/t", supportDir: "/t", home: "/t", relay: null, protectedFiles: [] });
   assert.deepEqual(networkLines(p), []);
   assert.doesNotMatch(p, /login\.keychain-db|"\/t\/Library\/Keychains"|cgc-relay|unix-socket|deny file-write/);
+  assert.doesNotMatch(p, /SecurityServer|securityd|trustd/); // M-1: no keychain or trust services offline
   assert.ok(p.includes('(allow process-exec (literal "/v/bin/codex") (literal "/v/bin/codex-code-mode-host"))'));
+});
+
+test("the sign-in profile is the production profile plus the callback bind and inbound rules, nothing else (I-9)", () => {
+  const login = buildCodexProfile({ install, codexHome: paths.codexHome, emptyCwd: paths.emptyCwd, supportDir: paths.supportDir, home: "/h", relay, protectedFiles: CODEX_PROTECTED_FILES, login: true });
+  const extra = login.split("\n").filter((l) => !online().split("\n").includes(l));
+  assert.deepEqual(extra, ['(allow network-bind (local tcp "localhost:1455"))', '(allow network-inbound (local tcp "localhost:1455"))']);
+  assert.doesNotMatch(online(), /network-bind|network-inbound/);
+  assert.throws(() => buildCodexProfile({ install, codexHome: "/t", emptyCwd: "/t", supportDir: "/t", home: "/t", relay: null, protectedFiles: [], login: true }));
+  const l = buildCodexLaunch({ install, paths, home: "/h", sandboxed: true, relay, login: true });
+  assert.ok(l.args[1]?.includes("network-bind"));
+  assert.deepEqual(buildCodexLaunch({ install, paths, home: "/h", sandboxed: true, relay, subcommand: ["debug", "prompt-input"] }).args.slice(2), ["/v/bin/codex", "debug", "prompt-input"]);
 });
 
 test("an install without the code-mode host is refused", () => {
@@ -3522,7 +3632,7 @@ test("code mode: catalog path, code_mode_host on, goals off, namespaces excluded
 });
 ```
 
-Add to `companiond/test/codex/selfCheck.test.ts` (extend the import from `selfCheck.ts` with `checkCodeModeConfig, checkThreadModel`):
+Add to `companiond/test/codex/selfCheck.test.ts` (extend the import from `selfCheck.ts` with `checkCodeModeConfig, checkConfigLayers, checkThreadModel`):
 
 ```ts
 const CATALOG = "/s/codex-home/companion-models.json";
@@ -3546,6 +3656,41 @@ test("the thread's model must be one whose tool surface was checked", () => {
   assert.equal(checkThreadModel({ model: "m2" }, ["m1"]).failures.length, 1);
   assert.equal(checkThreadModel({}, ["m1"]).failures.length, 1);
 });
+
+test("config layers: only the user layer at CODEX_HOME/config.toml and the system layer at /etc/codex (I-5)", () => {
+  const layer = (type: string, file: string | null) => ({ name: { type, file, profile: null }, version: "1", config: {}, disabledReason: null });
+  const ok = { layers: [layer("user", "/s/codex-home/config.toml"), layer("system", "/etc/codex/config.toml")] };
+  assert.deepEqual(checkConfigLayers(ok, "/s/codex-home"), { failures: [], warnings: [] });
+  assert.match(checkConfigLayers({ layers: [layer("user", "/s/codex-home/other.toml")] }, "/s/codex-home").failures.join(), /user config layer/);
+  assert.match(checkConfigLayers({ layers: [...ok.layers, layer("managed", "/s/codex-home/managed_config.toml")] }, "/s/codex-home").failures.join(), /managed config layer/);
+  assert.match(checkConfigLayers({ layers: [layer("system", "/etc/codex/config.toml")] }, "/s/codex-home").failures.join(), /no user config layer/);
+  assert.equal(checkConfigLayers({}, "/s/codex-home").failures.length, 1);
+});
+```
+
+In `companiond/test/codex/selfCheck.test.ts`, replace the test `"version: pinned package and userAgent must agree"` with (I-11; measured userAgent on 0.166.0: `claudegpt_companion/0.166.0 (Mac OS 27.0.1; arm64) unknown (claudegpt_companion; 0.4.0)` — the first token carries Codex's version under the client's originator name):
+
+```ts
+test("version: pinned package and the running binary's userAgent must agree; a missing version fails (I-11)", () => {
+  assert.equal(versionFromUserAgent("claudegpt_companion/0.166.0 (Mac OS 27.0.1; arm64) unknown (claudegpt_companion; 0.4.0)"), "0.166.0");
+  assert.equal(versionFromUserAgent("codex_cli_rs/0.166.0 (Mac OS 27.0.1; arm64)"), "0.166.0");
+  assert.equal(versionFromUserAgent("something else"), null);
+  assert.deepEqual(checkVersion("0.166.0", "0.166.0", "claudegpt_companion/0.166.0 (Mac OS)"), { failures: [], warnings: [] });
+  assert.match(checkVersion("0.166.0", "0.166.0", "?").failures.join(), /did not report its version/);
+  assert.equal(checkVersion("0.167.0", "0.166.0", "claudegpt_companion/0.167.0").failures.length, 2);
+});
+```
+
+Add to `companiond/test/codex/codexInstall.test.ts` (M-7):
+
+```ts
+test("a symlink inside the vendor folder may not lead out of it (M-7)", () => {
+  const d = vendor({ version: "0.166.0", entrypoint: "bin/codex" }, false);
+  const outside = tempDir("cgc-outside-");
+  fs.writeFileSync(path.join(outside, "codex"), MARK);
+  fs.symlinkSync(path.join(outside, "codex"), path.join(d, "bin", "codex"));
+  assert.throws(() => readVendorDir(d), CodexInstallError);
+});
 ```
 
 `companiond/test/codex/codeMode.test.ts`:
@@ -3556,7 +3701,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { appPaths, ensureAppDirs } from "../../src/app/appPaths.ts";
-import { ALLOWED_NESTED, checkToolSurface, CodeModeError, parseToolSurface, prepareCodeMode, trimCatalog, type CodexDebugRunner } from "../../src/codex/codeMode.ts";
+import { ALLOWED_NESTED, checkProtectedFiles, checkToolSurface, CodeModeError, parseToolSurface, prepareCodeMode, trimCatalog, type CodexDebugRunner } from "../../src/codex/codeMode.ts";
 import type { CodexInstall } from "../../src/codex/codexInstall.ts";
 import { CATALOG_FILE } from "../../src/codex/config.ts";
 import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
@@ -3624,7 +3769,10 @@ test("prepareCodeMode writes the catalog and config, then checks every model off
   const paths = ensureAppDirs(appPaths(tempDir()));
   const f = fakeRunner(() => GOOD);
   const r = prepareCodeMode({ install, paths, run: f.run });
-  assert.deepEqual(r, { result: { failures: [], warnings: [] }, models: ["m-code", "m-code2"] });
+  assert.deepEqual(r.result, { failures: [], warnings: [] });
+  assert.deepEqual(r.models, ["m-code", "m-code2"]);
+  assert.deepEqual(Object.keys(r.protectedFiles).sort(), ["companion-models.json", "config.toml"]);
+  assert.deepEqual(checkProtectedFiles(paths.codexHome, r.protectedFiles), { failures: [], warnings: [] });
   const catalog = path.join(paths.codexHome, CATALOG_FILE);
   assert.equal(fs.statSync(catalog).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(fs.readFileSync(catalog, "utf8")).models.map((m: any) => m.slug), ["m-code", "m-code2"]);
@@ -3642,7 +3790,23 @@ test("prepareCodeMode fails closed: a widened surface, a blind parser, a runner 
   const blind = prepareCodeMode({ install, paths, run: fakeRunner(() => GOOD, GOOD).run });
   assert.match(blind.result.failures.join(), /cannot read the tools nested/);
   const broken = prepareCodeMode({ install, paths, run: () => { throw new CodeModeError("codex debug models failed under its offline profile"); } });
-  assert.deepEqual(broken, { result: { failures: ["codex debug models failed under its offline profile"], warnings: [] }, models: [] });
+  assert.deepEqual(broken, { result: { failures: ["codex debug models failed under its offline profile"], warnings: [] }, models: [], protectedFiles: {} });
+  const liveWide = prepareCodeMode({ install, paths, run: fakeRunner(() => GOOD).run, live: () => promptInput({ functions: ["exec", "wait"] }, ["create_goal"]) });
+  assert.match(liveWide.result.failures.join(), /m-code, live.*create_goal/);
+});
+
+test("protected files: a changed byte, a hard link or a missing file fails the check (I-5)", () => {
+  const paths = ensureAppDirs(appPaths(tempDir()));
+  const r = prepareCodeMode({ install, paths, run: fakeRunner(() => GOOD).run });
+  const cfg = path.join(paths.codexHome, "config.toml");
+  fs.linkSync(cfg, path.join(paths.codexHome, "config-link.toml"));
+  assert.match(checkProtectedFiles(paths.codexHome, r.protectedFiles).failures.join(), /config\.toml .*changed/);
+  fs.rmSync(path.join(paths.codexHome, "config-link.toml"));
+  assert.deepEqual(checkProtectedFiles(paths.codexHome, r.protectedFiles).failures, []);
+  fs.appendFileSync(path.join(paths.codexHome, CATALOG_FILE), " ");
+  assert.match(checkProtectedFiles(paths.codexHome, r.protectedFiles).failures.join(), /companion-models\.json .*changed/);
+  fs.rmSync(cfg);
+  assert.match(checkProtectedFiles(paths.codexHome, r.protectedFiles).failures.join(), /config\.toml .*missing/);
 });
 ```
 
@@ -3705,7 +3869,22 @@ export interface CodexProfileInput {
   relay: RelayEndpoint | null;
   /** File names inside CODEX_HOME that Codex may not write (companiond writes them before spawn). */
   protectedFiles: readonly string[];
+  /** The short-lived sign-in process only (ruling I-9): adds LOGIN_RULES. Needs relay !== null. */
+  login?: boolean;
 }
+
+/** Measured while planning (signed out, macOS 27, Codex 0.166.0): Codex's ChatGPT sign-in listens on 127.0.0.1:1455
+ * (redirect_uri http://127.0.0.1:1455/auth/callback). bind alone is not enough; bind + inbound on localhost:1455 lets
+ * account/login/start succeed, keeps every other port closed (1456: EPERM), but SBPL also lets it bind 1455 on
+ * 0.0.0.0 and the Mac's own address (recorded residual risk). Only the sign-in process gets these rules. */
+export const LOGIN_CALLBACK_PORT = 1455;
+export const LOGIN_RULES: readonly string[] = [
+  `(allow network-bind (local tcp "localhost:${LOGIN_CALLBACK_PORT}"))`,
+  `(allow network-inbound (local tcp "localhost:${LOGIN_CALLBACK_PORT}"))`,
+];
+/** Keychain and trust services: not reachable from the offline profile (plan review M-1; measured: debug models and
+ * prompt-input still run without them). */
+const KEYCHAIN_MACH = /SecurityServer|securityd|trustd/;
 
 /** Set in Task 10, and only on measured success of the end-to-end suites and the exec-cell gate. */
 export const CODEX_SEATBELT_MEASURED: "ok" | "stopped" = "stopped";
@@ -3743,6 +3922,7 @@ export function ancestors(p: string): string[] {
 
 export function buildCodexProfile(i: CodexProfileInput): string {
   if (!i.install.codeModeHost) throw new Error("This Codex install has no code-mode host.");
+  if (i.login && !i.relay) throw new Error("The sign-in profile is an online profile.");
   const sub = (p: string) => `(subpath ${sbplString(p)})`;
   const lit = (p: string) => `(literal ${sbplString(p)})`;
   const keychains = path.join(i.home, "Library", "Keychains");
@@ -3771,8 +3951,9 @@ export function buildCodexProfile(i: CodexProfileInput): string {
           `(allow network-outbound (remote unix-socket (path-literal ${sbplString(r.socket)})))`,
         ]
       : []),
+    ...(i.login ? LOGIN_RULES : []),
     "(allow sysctl-read)",
-    `(allow mach-lookup ${MACH_LOOKUPS.map((n) => `(global-name ${sbplString(n)})`).join(" ")})`,
+    `(allow mach-lookup ${(r ? MACH_LOOKUPS : MACH_LOOKUPS.filter((n) => !KEYCHAIN_MACH.test(n))).map((n) => `(global-name ${sbplString(n)})`).join(" ")})`,
     "",
   ].join("\n");
 }
@@ -3791,15 +3972,19 @@ export function codexEnv(install: CodexInstall, paths: AppPaths, home: string): 
 
 export function buildCodexLaunch(o: {
   install: CodexInstall; paths: AppPaths; sandboxed: boolean; relay?: RelayEndpoint; home?: string; extraArgs?: readonly string[];
+  /** The sign-in process (ruling I-9). */
+  login?: boolean;
+  /** Default ["app-server"]; the live surface check runs ["debug", "prompt-input", …] under the same profile. */
+  subcommand?: readonly string[];
 }): CodexLaunch {
   const home = o.home ?? os.homedir();
-  const codexArgs = ["app-server", ...(o.extraArgs ?? [])];
+  const codexArgs = [...(o.subcommand ?? ["app-server"]), ...(o.extraArgs ?? [])];
   const env = codexEnv(o.install, o.paths, home);
   if (!o.sandboxed) return { command: o.install.binary, args: codexArgs, env, cwd: o.paths.emptyCwd };
   if (!o.relay) throw new Error("A sandboxed Codex needs the relay endpoint for its profile.");
   const profile = buildCodexProfile({
     install: o.install, codexHome: o.paths.codexHome, emptyCwd: o.paths.emptyCwd, supportDir: o.paths.supportDir, home,
-    relay: o.relay, protectedFiles: CODEX_PROTECTED_FILES,
+    relay: o.relay, protectedFiles: CODEX_PROTECTED_FILES, login: o.login === true,
   });
   return { command: SANDBOX_EXEC, args: ["-p", profile, o.install.binary, ...codexArgs], env, cwd: o.paths.emptyCwd };
 }
@@ -3918,7 +4103,68 @@ export function checkThreadModel(resp: unknown, models: readonly string[]): Chec
   if (typeof m !== "string" || !models.includes(m)) r.failures.push("the thread's model is not one whose tool surface was checked");
   return r;
 }
+
+/** Measured on 0.166.0 (signed out, fresh home): exactly a user layer at CODEX_HOME/config.toml and a system layer at
+ * /etc/codex/config.toml. Any other layer (managed, profile, project, another file) is a failure (plan review I-5). */
+export const SYSTEM_CONFIG_FILE = "/etc/codex/config.toml";
+export function checkConfigLayers(resp: unknown, codexHome: string): CheckResult {
+  const r = empty();
+  const layers = obj(resp)?.layers;
+  if (!Array.isArray(layers)) {
+    r.failures.push("config/read returned no layers");
+    return r;
+  }
+  let user = false;
+  for (const l of layers) {
+    const name = obj(obj(l)?.name);
+    const type = typeof name?.type === "string" ? name.type : "unknown";
+    if (type === "user" && name?.file === path.join(codexHome, "config.toml")) user = true;
+    else if (type === "system" && name?.file === SYSTEM_CONFIG_FILE) continue;
+    else r.failures.push(`config/read: unexpected ${type} config layer`);
+  }
+  if (!user) r.failures.push("config/read: no user config layer for the companion's config.toml");
+  return r;
+}
 ```
+
+Replace `versionFromUserAgent` and `checkVersion` in `companiond/src/codex/selfCheck.ts` with (plan review I-11):
+
+```ts
+/** The first `name/x.y.z` token. Codex puts its own version there, under the client's originator name. */
+export function versionFromUserAgent(ua: unknown): string | null {
+  if (typeof ua !== "string") return null;
+  return /^[\w.-]+\/(\d+\.\d+\.\d+)(?=[\s(;]|$)/.exec(ua.trim())?.[1] ?? null;
+}
+
+export function checkVersion(installed: string, pinned: string, userAgent: unknown): CheckResult {
+  const r = empty();
+  if (installed !== pinned) r.failures.push(`Codex ${installed} is installed; pinned is ${pinned}`);
+  const ua = versionFromUserAgent(userAgent);
+  if (ua === null) r.failures.push("app-server did not report its version");
+  else if (ua !== pinned) r.failures.push(`app-server reports Codex ${ua}; pinned is ${pinned}`);
+  return r;
+}
+```
+
+Replace the `inside` helper and the `codeModeHost` line of `readVendorDir` in `companiond/src/codex/codexInstall.ts` with (plan review M-7: containment is checked after realpath, because these paths become Seatbelt read and exec rules):
+
+```ts
+  const contained = (p: string) => p === real || p.startsWith(real + path.sep);
+  const inside = (rel: unknown): string | null => {
+    if (typeof rel !== "string") return null;
+    const p = path.resolve(real, rel);
+    if (!contained(p)) throw new CodexInstallError("codex-package.json points outside its folder.");
+    if (!fs.existsSync(p)) return null;
+    const rp = fs.realpathSync.native(p);
+    if (!contained(rp)) throw new CodexInstallError("codex-package.json points outside its folder.");
+    return rp;
+  };
+  const binary = inside(meta.entrypoint);
+  if (!binary) throw new CodexInstallError("The Codex binary is missing.");
+  const host = inside(path.relative(real, path.join(path.dirname(binary), "codex-code-mode-host")));
+```
+
+and in the returned object use `codeModeHost: host,`.
 
 `companiond/src/codex/codeMode.ts`:
 
@@ -3933,14 +4179,15 @@ export function checkThreadModel(resp: unknown, models: readonly string[]): Chec
 //    Codex profile in a scratch CODEX_HOME (no login, no network, no MCP servers). The catalog is load-bearing,
 //    so it is verified, not trusted: anything beyond the allowlist fails the start.
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AppPaths } from "../app/appPaths.ts";
 import { SERVER_NAME, TOOL_NAMES } from "../jail/mcpServer.ts";
 import type { CodexInstall } from "./codexInstall.ts";
-import { buildOfflineCodexLaunch } from "./codexSeatbelt.ts";
-import { buildCodexConfigToml, CATALOG_FILE, OFF_FEATURES, tomlString, writeCodexConfig, writeCodexHomeFile } from "./config.ts";
+import { buildCodexLaunch, buildOfflineCodexLaunch, type CodexLaunch, type RelayEndpoint } from "./codexSeatbelt.ts";
+import { buildCodexConfigToml, CATALOG_FILE, CODEX_PROTECTED_FILES, OFF_FEATURES, tomlString, writeCodexConfig, writeCodexHomeFile } from "./config.ts";
 import type { CheckResult } from "./selfCheck.ts";
 
 export const ALLOWED_TOP_LEVEL: readonly string[] = ["functions.exec", "functions.wait"];
@@ -3954,9 +4201,37 @@ export class CodeModeError extends Error {
   }
 }
 export interface ToolSurface { top: string[]; nested: string[] }
-export interface PreparedCodeMode { result: CheckResult; models: string[] }
-/** Runs `codex <args>` offline with CODEX_HOME = scratchHome and returns stdout. Throws CodeModeError on failure. */
-export type CodexDebugRunner = (args: readonly string[], scratchHome: string) => string;
+/** protectedFiles: sha256 of config.toml and the catalog as companiond wrote them (checked before every spawn and
+ * every thread/start or thread/resume; plan review I-5). */
+export interface PreparedCodeMode { result: CheckResult; models: string[]; protectedFiles: Record<string, string> }
+/** Runs `codex <args>` with CODEX_HOME = home and returns stdout. Throws CodeModeError on failure. */
+export type CodexDebugRunner = (args: readonly string[], home: string) => string;
+
+/** Measured in Task 8 Step 7 (plan review I-6): does `codex debug prompt-input` with the real, signed-in CODEX_HOME,
+ * under the production profile, list live-only tools (the goal tools with goals on are the canary)? If true, the
+ * per-model surface check also runs live at every start; if false, the gap is a recorded residual risk. */
+export const LIVE_SURFACE_CHECK: boolean = false;
+
+const sha256 = (file: string): string => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+
+export function snapshotProtectedFiles(codexHome: string): Record<string, string> {
+  return Object.fromEntries(CODEX_PROTECTED_FILES.map((n) => [n, sha256(path.join(codexHome, n))]));
+}
+
+/** Each protected file is a regular file with one link and the content companiond wrote. */
+export function checkProtectedFiles(codexHome: string, expected: Readonly<Record<string, string>>): CheckResult {
+  const r: CheckResult = { failures: [], warnings: [] };
+  for (const name of CODEX_PROTECTED_FILES) {
+    const file = path.join(codexHome, name);
+    try {
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.nlink !== 1 || sha256(file) !== expected[name]) r.failures.push(`${name} in the Codex home changed since the start`);
+    } catch {
+      r.failures.push(`${name} in the Codex home is missing`);
+    }
+  }
+  return r;
+}
 
 const obj = (v: unknown): Record<string, unknown> | null =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -4014,20 +4289,31 @@ export function checkToolSurface(model: string, s: ToolSurface): CheckResult {
   return r;
 }
 
+function runLaunch(l: CodexLaunch, what: string): string {
+  // stderr is never kept: it can hold local paths.
+  const r = spawnSync(l.command, l.args, { cwd: l.cwd, env: l.env, stdio: ["ignore", "pipe", "ignore"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status !== 0) throw new CodeModeError(`codex ${what} failed under its profile`);
+  return r.stdout.toString("utf8");
+}
+
 export function offlineRunner(install: CodexInstall): CodexDebugRunner {
   return (args, scratchHome) => {
     const l = buildOfflineCodexLaunch(install, scratchHome);
-    // stderr is never kept: it can hold local paths.
-    const r = spawnSync(l.command, [...l.args, ...args], { cwd: l.cwd, env: l.env, stdio: ["ignore", "pipe", "ignore"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
-    if (r.error || r.status !== 0) throw new CodeModeError(`codex ${args.slice(0, 2).join(" ")} failed under its offline profile`);
-    return r.stdout.toString("utf8");
+    return runLaunch({ ...l, args: [...l.args, ...args] }, `${args.slice(0, 2).join(" ")} (offline)`);
   };
 }
 
-const promptInputArgs = (model: string): string[] => ["debug", "prompt-input", "-c", `model=${tomlString(model)}`, "hi"];
+/** `codex <args>` under the PRODUCTION profile with the real CODEX_HOME: Codex reads its own keyring; companiond reads
+ * nothing. Used only when LIVE_SURFACE_CHECK is true, and by the Task 8 Step 7 measurement. */
+export function liveRunner(install: CodexInstall, paths: AppPaths, relay: RelayEndpoint, home?: string): CodexDebugRunner {
+  return (args) => runLaunch(buildCodexLaunch({ install, paths, sandboxed: true, relay, home, subcommand: args }), `${args.slice(0, 2).join(" ")} (live)`);
+}
 
-/** Writes the catalog and config.toml into CODEX_HOME and checks the tool surface offline for every catalog model. */
-export function prepareCodeMode(o: { install: CodexInstall; paths: AppPaths; off?: readonly string[]; run?: CodexDebugRunner }): PreparedCodeMode {
+export const promptInputArgs = (model: string, extra: readonly string[] = []): string[] => ["debug", "prompt-input", "-c", `model=${tomlString(model)}`, ...extra, "hi"];
+
+/** Writes the catalog and config.toml into CODEX_HOME and checks the tool surface offline (and, with `live`, live)
+ * for every catalog model. */
+export function prepareCodeMode(o: { install: CodexInstall; paths: AppPaths; off?: readonly string[]; run?: CodexDebugRunner; live?: CodexDebugRunner }): PreparedCodeMode {
   const run = o.run ?? offlineRunner(o.install);
   const off = o.off ?? OFF_FEATURES;
   const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cgc-codemode-")));
@@ -4049,9 +4335,12 @@ export function prepareCodeMode(o: { install: CodexInstall; paths: AppPaths; off
     }
     scratchConfig();
     for (const m of catalog.models) result.failures.push(...checkToolSurface(m, parseToolSurface(run(promptInputArgs(m), scratch))).failures);
-    return { result, models: catalog.models };
+    if (o.live) {
+      for (const m of catalog.models) result.failures.push(...checkToolSurface(`${m}, live`, parseToolSurface(o.live(promptInputArgs(m), o.paths.codexHome))).failures);
+    }
+    return { result, models: catalog.models, protectedFiles: snapshotProtectedFiles(o.paths.codexHome) };
   } catch (e) {
-    return { result: { failures: [e instanceof CodeModeError ? e.message : "the code-mode self-check could not run"], warnings: [] }, models: [] };
+    return { result: { failures: [e instanceof CodeModeError ? e.message : "the code-mode self-check could not run"], warnings: [] }, models: [], protectedFiles: {} };
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
@@ -4094,14 +4383,41 @@ export const DEVELOPER_INSTRUCTIONS = [
 ].join("\n");
 ```
 
-In `companiond/scripts/codex-login.ts` (owner-only tool; no task runs it), replace the launch line so it type-checks against the new profile:
+Replace `companiond/scripts/codex-login.ts` (owner-only tool; no task runs it) with this version, which signs in through the sign-in profile and refuses unsandboxed Codex unless asked by name (ruling I-9):
 
 ```ts
-import { relayPaths } from "../src/relay/relayPaths.ts";
-// …
+// Sign in to the companion's own CODEX_HOME with ChatGPT (spec §5). Owner-only tool: no plan step runs it.
+// Runs a short-lived Codex under the SIGN-IN profile: the production profile plus the callback port (ruling I-9).
+// Codex runs unsandboxed only with an explicit --unsandboxed. Opens the browser; prints nothing secret.
+// Usage: cd companiond && node scripts/codex-login.ts [--unsandboxed]
+import { execFileSync } from "node:child_process";
+import os from "node:os";
+import { appPaths, ensureAppDirs } from "../src/app/appPaths.ts";
+import { findCodex } from "../src/codex/codexInstall.ts";
+import { buildCodexLaunch } from "../src/codex/codexSeatbelt.ts";
+import { buildCodexConfigToml, writeCodexConfig } from "../src/codex/config.ts";
+import { ensureRelayDirs, relayPaths } from "../src/relay/relayPaths.ts";
+import { startAppServer } from "../itest/helpers/appServer.ts";
+
+const unsandboxed = process.argv.includes("--unsandboxed");
+const paths = ensureAppDirs(appPaths(os.homedir()));
 const install = findCodex();
-const rp = relayPaths(paths.supportDir);
-const a = await startAppServer(buildCodexLaunch({ install, paths, sandboxed, relay: { binary: rp.binary, socket: rp.socket } }));
+const rp = ensureRelayDirs(relayPaths(paths.supportDir));
+writeCodexConfig(paths.codexHome, buildCodexConfigToml()); // companiond rewrites it (code mode) at its next start
+const a = await startAppServer(buildCodexLaunch({ install, paths, sandboxed: !unsandboxed, login: true, relay: { binary: rp.binary, socket: rp.socket } }));
+const acct: any = await a.rpc.request("account/read", { refreshToken: false });
+if (acct?.account?.type === "chatgpt") {
+  console.log("Already signed in.");
+} else {
+  const done = new Promise<any>((res) => a.rpc.onNotification((m, p) => { if (m === "account/login/completed") res(p); }));
+  const r: any = await a.rpc.request("account/login/start", { type: "chatgpt" });
+  if (typeof r?.authUrl !== "string" || !r.authUrl.startsWith("https://")) throw new Error("no https sign-in link");
+  execFileSync("/usr/bin/open", [r.authUrl]);
+  const c = await done;
+  console.log(c?.success ? "Signed in." : "Sign-in failed.");
+}
+console.log(JSON.stringify({ sandboxed: !unsandboxed }));
+a.kill();
 ```
 
 Remove the old measurement script: `git rm companiond/scripts/measure-codex-profile.ts`.
@@ -4119,8 +4435,10 @@ Expected: PASS, whole suite green (Task 5's config and self-check tests still pa
 // with the errno it got. It reads and sends no data: a connect that succeeds is closed at once, an open for reading
 // is closed without a read. Point it only at decoys and synthetic files the caller made.
 //   unix:<path>  connect      tcp:<port>  127.0.0.1      tcp6:<port>  ::1      host:<name>:<port>  DNS + connect
-//   bind:<path>  bind a unix socket      exec:<path>  fork + execve, no arguments, empty env
-//   read:<path>  open O_RDONLY, no read  write:<path> open O_WRONLY, no data   unlink:<path>   rename:<from>><to>
+//   bind:<path>  bind a unix socket      bindtcp:<ipv4>:<port>  bind + listen a TCP socket, closed at once
+//   exec:<path>  fork + execve, no arguments, empty env
+//   read:<path>  open O_RDONLY, no read  write:<path> open O_WRONLY, no data   unlink:<path>
+//   rename:<from>><to>                   link:<from>><to>  create a hard link
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -4207,6 +4525,35 @@ static int do_host(const char *arg) {
   return e;
 }
 
+static int do_bindtcp(const char *arg) {
+  char host[64];
+  const char *colon = strrchr(arg, ':');
+  if (colon == NULL || (size_t)(colon - arg) >= sizeof host) return EINVAL;
+  memcpy(host, arg, (size_t)(colon - arg));
+  host[colon - arg] = 0;
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_port = htons((unsigned short)atoi(colon + 1));
+  if (inet_pton(AF_INET, host, &a.sin_addr) != 1) return EINVAL;
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return errno;
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  int e = bind(s, (struct sockaddr *)&a, sizeof a) == 0 ? (listen(s, 1) == 0 ? 0 : errno) : errno;
+  close(s);
+  return e;
+}
+
+static int two_paths(const char *arg, char *from, size_t n, const char **to) {
+  const char *gt = strchr(arg, '>');
+  if (gt == NULL || (size_t)(gt - arg) >= n) return -1;
+  memcpy(from, arg, (size_t)(gt - arg));
+  from[gt - arg] = 0;
+  *to = gt + 1;
+  return 0;
+}
+
 static int do_exec(const char *path) {
   int p[2];
   if (pipe(p) != 0) return errno;
@@ -4249,6 +4596,7 @@ int main(int argc, char **argv) {
     else if (strncmp(a, "tcp:", 4) == 0) e = do_tcp(arg, 0);
     else if (strncmp(a, "tcp6:", 5) == 0) e = do_tcp(arg, 1);
     else if (strncmp(a, "host:", 5) == 0) e = do_host(arg);
+    else if (strncmp(a, "bindtcp:", 8) == 0) e = do_bindtcp(arg);
     else if (strncmp(a, "exec:", 5) == 0) e = do_exec(arg);
     else if (strncmp(a, "read:", 5) == 0) {
       int fd = open(arg, O_RDONLY);
@@ -4259,15 +4607,12 @@ int main(int argc, char **argv) {
       e = fd >= 0 ? 0 : errno;
       if (fd >= 0) close(fd);
     } else if (strncmp(a, "unlink:", 7) == 0) e = unlink(arg) == 0 ? 0 : errno;
-    else if (strncmp(a, "rename:", 7) == 0) {
+    else if (strncmp(a, "rename:", 7) == 0 || strncmp(a, "link:", 5) == 0) {
       char from[1024];
-      const char *gt = strchr(arg, '>');
-      if (gt == NULL || (size_t)(gt - arg) >= sizeof from) e = EINVAL;
-      else {
-        memcpy(from, arg, (size_t)(gt - arg));
-        from[gt - arg] = 0;
-        e = rename(from, gt + 1) == 0 ? 0 : errno;
-      }
+      const char *to = NULL;
+      if (two_paths(arg, from, sizeof from, &to) != 0) e = EINVAL;
+      else if (a[0] == 'r') e = rename(from, to) == 0 ? 0 : errno;
+      else e = link(from, to) == 0 ? 0 : errno;
     } else continue;
     printf("{\"action\":%d,\"errno\":\"%s\"}\n", i, ename(e));
   }
@@ -4451,7 +4796,11 @@ import { ALLOWED_NESTED } from "../../src/codex/codeMode.ts";
 import type { Session } from "./codeModeSession.ts";
 
 export const GLOBALS = ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "Deno", "process", "require", "Bun", "navigator", "WebAssembly", "Worker", "SharedArrayBuffer", "importScripts"];
-export const MODULES = ["node:fs", "node:child_process", "node:net", "node:dns", "node:http", "node:os", "node:worker_threads"];
+// DNS has no row of its own because a cell has no resolver API at all: node:dns and node:dns/promises are its only
+// routes, and both are import rows. "Other keychain entries" cannot be expressed in a bare isolate either (no file
+// API); the login keychain import row stands for them (plan review M-6, recorded in the findings).
+export const MODULES = ["node:fs", "node:child_process", "node:net", "node:dns", "node:dns/promises", "node:http", "node:os", "node:worker_threads"];
+const CANARY_PREFIX = "cgc-gate-canary-";
 export interface GateResult { pass: boolean; open: string[]; cell: Record<string, string> | null; harness: Record<string, number | boolean> }
 
 function cellSource(p: { port: number; homeCanary: string; codexCanary: string; keychain: string; relaySocket: string }): string {
@@ -4488,10 +4837,14 @@ function hostChildren(): number {
 }
 
 export async function runExecCellGate(s: Session, o: { codexHome: string; attempts?: number }): Promise<GateResult> {
+  // Canaries left by a crashed earlier run are removed first (fixed prefix, synthetic content only).
+  for (const [dir, prefix] of [[os.homedir(), `.${CANARY_PREFIX}`], [o.codexHome, CANARY_PREFIX]] as const) {
+    for (const n of fs.readdirSync(dir)) if (n.startsWith(prefix) && n.endsWith(".txt")) fs.rmSync(path.join(dir, n), { force: true });
+  }
   const hex = crypto.randomBytes(8).toString("hex");
   const secret = `CGC-GATE-SECRET-${hex}`;
-  const homeCanary = path.join(os.homedir(), `.cgc-gate-canary-${hex}.txt`);
-  const codexCanary = path.join(o.codexHome, `cgc-gate-canary-${hex}.txt`);
+  const homeCanary = path.join(os.homedir(), `.${CANARY_PREFIX}${hex}.txt`);
+  const codexCanary = path.join(o.codexHome, `${CANARY_PREFIX}${hex}.txt`);
   for (const f of [homeCanary, codexCanary]) fs.writeFileSync(f, `SYNTHETIC FIXTURE ${secret}\n`, { mode: 0o600 });
   let loopbackHits = 0;
   const web = http.createServer((_q, res) => {
@@ -4517,6 +4870,11 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
     let cell: Record<string, string> | null = null;
     const itemTypes = new Set<string>();
     let replyText = "";
+    // Sampled during the turn too, so a short-lived child of the code-mode host is not missed (M-6).
+    let maxChildren = 0;
+    const sampler = setInterval(() => {
+      maxChildren = Math.max(maxChildren, hostChildren());
+    }, 200).unref();
     for (let i = 0; i < (o.attempts ?? 2) && !cell; i++) {
       const t = await s.turn(prompt);
       for (const x of t.itemTypes) itemTypes.add(x);
@@ -4528,6 +4886,7 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
         cell = null;
       }
     }
+    clearInterval(sampler);
     const open: string[] = [];
     if (!cell) open.push("the cell did not run or its output was not relayed (inconclusive, not a pass)");
     else {
@@ -4543,7 +4902,7 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
       decoyHits,
       newRefusedConnections: count("refused") + count("socketReplaced") - before.refused,
       newRelayBindings: count("bound") - before.bound,
-      codeModeHostChildren: hostChildren(),
+      codeModeHostChildren: Math.max(maxChildren, hostChildren()),
       secretInReply: replyText.includes(secret),
       secretInNotifications: JSON.stringify(s.a.notifications.slice(before.notifications)).includes(secret),
       writeOrExecItems: [...itemTypes].some((t) => t === "fileChange" || t === "commandExecution"),
@@ -4575,9 +4934,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { prepareCodeMode } from "../src/codex/codeMode.ts";
+import { liveRunner, prepareCodeMode, promptInputArgs, parseToolSurface } from "../src/codex/codeMode.ts";
 import { findCodex } from "../src/codex/codexInstall.ts";
-import { buildCodexProfile } from "../src/codex/codexSeatbelt.ts";
+import { buildCodexLaunch, buildCodexProfile, LOGIN_CALLBACK_PORT } from "../src/codex/codexSeatbelt.ts";
+import { startAppServer } from "./helpers/appServer.ts";
 import { CATALOG_FILE, CODE_MODE_OFF_FEATURES, CODEX_PROTECTED_FILES, OFF_FEATURES, writeCodexConfig, writeCodexHomeFile } from "../src/codex/config.ts";
 import { checkCodeModeConfig, checkConfigRead, checkFeatureList, checkMcpStatus } from "../src/codex/selfCheck.ts";
 import { COMPANION_ALLOWLIST } from "../src/codex/serverRequests.ts";
@@ -4636,14 +4996,14 @@ test("app-server under the production profile: config/read shows the code-mode c
 
 // MEASUREMENT ONLY: the probe sits in the relay's exec slot of an otherwise production profile, so it runs with
 // exactly the rights Codex, its code-mode host and the relay have. errno is asserted, never exit codes (M8).
-function probeRun(paths: ReturnType<typeof freshPaths>, actions: Array<[string, string]>): Record<string, string> {
+function probeRun(paths: ReturnType<typeof freshPaths>, actions: Array<[string, string]>, o: { login?: boolean } = {}): Record<string, string> {
   const d = tempDir("cgc-probe-");
   const probe = path.join(d, "probe");
   execFileSync("/usr/bin/xcrun", ["clang", "-O2", "-Wall", "-Werror", "-o", probe, fileURLToPath(new URL("./fixtures/probe.c", import.meta.url))], { stdio: ["ignore", "ignore", "ignore"] });
   const relay = relayPaths(paths.supportDir);
   const profile = buildCodexProfile({
     install: findCodex(), codexHome: paths.codexHome, emptyCwd: paths.emptyCwd, supportDir: paths.supportDir, home: os.homedir(),
-    relay: { binary: probe, socket: relay.socket }, protectedFiles: CODEX_PROTECTED_FILES,
+    relay: { binary: probe, socket: relay.socket }, protectedFiles: CODEX_PROTECTED_FILES, login: o.login === true,
   });
   const r = spawnSync(SANDBOX_EXEC, ["-p", profile, probe, ...actions.map((a) => a[1])], { env: {}, cwd: paths.emptyCwd, encoding: "utf8", timeout: 60_000 });
   const out: Record<string, string> = {};
@@ -4668,6 +5028,13 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
   await new Promise<void>((r) => decoy.listen(path.join(decoyDir, "d.sock"), r));
   const tcp = net.createServer((c) => { hits++; c.destroy(); });
   await new Promise<void>((r) => tcp.listen(0, "127.0.0.1", r));
+  // A service on all interfaces at 443 (Docker, dev proxies: review I5 / plan review I-7). macOS lets a user bind 443.
+  const any443 = net.createServer((c) => { hits++; c.destroy(); });
+  const listening443 = await new Promise<boolean>((r) => {
+    any443.once("error", () => r(false));
+    any443.listen(443, "0.0.0.0", () => r(true));
+  });
+  const ownIp = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address ?? null;
   const config = "# SYNTHETIC FIXTURE config\n";
   writeCodexConfig(paths.codexHome, config);
   writeCodexHomeFile(paths.codexHome, CATALOG_FILE, "{}");
@@ -4685,23 +5052,66 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
       ["unlinkConfigToml", `unlink:${path.join(h, "config.toml")}`], ["renameOntoConfigToml", `rename:${scratch}>${path.join(h, "config.toml")}`],
       ["writeCodexHome", `write:${scratch}`], ["readHomeCanary", `read:${homeCanary}`], ["writeHomeCanary", `write:${homeCanary}`],
       ["readRepo", `read:${path.join(repo, "README.md")}`], ["unlinkRelaySocket", `unlink:${relay.socket}`],
+      ["linkConfigToml", `link:${path.join(h, "config.toml")}>${path.join(h, "cfg-link.toml")}`],
+      ["linkCatalog", `link:${path.join(h, CATALOG_FILE)}>${path.join(h, "cat-link.json")}`],
+      ["anyAddr443", "host:0.0.0.0:443"], ...(ownIp ? [["ownIp443", `host:${ownIp}:443`] as [string, string]] : []),
+      ["bindLoginPort", `bindtcp:127.0.0.1:${LOGIN_CALLBACK_PORT}`],
     ]);
-    console.log(JSON.stringify({ profileProbe: out, decoyAndLoopbackHits: hits }));
+    // The sign-in profile (ruling I-9), signed out: only the callback port opens.
+    const login = probeRun(paths, [
+      ["bindLoginPort", `bindtcp:127.0.0.1:${LOGIN_CALLBACK_PORT}`], ["bindOtherPort", `bindtcp:127.0.0.1:${LOGIN_CALLBACK_PORT + 1}`],
+      ["bindLoginPortAnyAddr", `bindtcp:0.0.0.0:${LOGIN_CALLBACK_PORT}`], ["loopback443", "tcp:443"], ["execSh", "exec:/bin/sh"],
+    ], { login: true });
+    console.log(JSON.stringify({ profileProbe: out, loginProfileProbe: login, listening443, decoyAndLoopbackHits: hits }));
     assert.equal(out.relaySocket, "OK");
     assert.equal(out.dnsSocket, "OK");
     assert.equal(out.writeCodexHome, "OK");
-    for (const k of ["decoySocket", "loopbackListener", "bindInCodexHome", "execSh", "execNode", "execSandboxExec", "execFalse", "writeConfigToml", "writeCatalog", "unlinkConfigToml", "renameOntoConfigToml", "readHomeCanary", "writeHomeCanary", "readRepo", "unlinkRelaySocket"]) {
+    // Measured while planning (macOS 27): every row below is EPERM, including loopback, 0.0.0.0 and the Mac's own
+    // address on 443 (the loopback deny is shipped, so it is asserted: plan review I-7).
+    for (const k of [
+      "decoySocket", "loopbackListener", "bindInCodexHome", "execSh", "execNode", "execSandboxExec", "execFalse", "writeConfigToml",
+      "writeCatalog", "unlinkConfigToml", "renameOntoConfigToml", "readHomeCanary", "writeHomeCanary", "readRepo", "unlinkRelaySocket",
+      "linkConfigToml", "linkCatalog", "loopback443", "loopback443v6", "anyAddr443", ...(ownIp ? ["ownIp443"] : []), "bindLoginPort",
+    ]) {
       assert.match(out[k] ?? "missing", DENIED, k);
     }
+    assert.equal(login.bindLoginPort, "OK");
+    for (const k of ["bindOtherPort", "loopback443", "execSh"]) assert.match(login[k] ?? "missing", DENIED, `login ${k}`);
+    // login.bindLoginPortAnyAddr is recorded: measured OK while planning (SBPL's localhost:1455 also matches 0.0.0.0).
     assert.equal(hits, 0);
     assert.equal(fs.readFileSync(path.join(h, "config.toml"), "utf8"), config);
-    // loopback443 / loopback443v6 (review I5) are recorded, not asserted: the ruling ships the deny if it holds.
   } finally {
     fs.rmSync(homeCanary, { force: true });
     relayListener.close();
     decoy.close();
     tcp.close();
+    any443.close();
   }
+});
+
+test("sign-in, signed out: the production profile refuses the callback server; the sign-in profile starts it (I-9)", { skip: noLogin }, async () => {
+  const paths = freshPaths();
+  const install = findCodex();
+  const relay = ensureRelayDirs(relayPaths(paths.supportDir));
+  prepareCodeMode({ install, paths });
+  const out: Record<string, string> = {};
+  for (const login of [false, true]) {
+    const a = await startAppServer(buildCodexLaunch({ install, paths, sandboxed: true, relay: { binary: relay.binary, socket: relay.socket }, login }));
+    try {
+      const r: any = await a.rpc.request("account/login/start", { type: "chatgpt" });
+      // The link is not a credential, but it is never printed: only where its callback points.
+      const cb = new URL(new URL(String(r?.authUrl)).searchParams.get("redirect_uri") ?? "http://none");
+      out[login ? "loginProfile" : "production"] = `callback ${cb.hostname}:${cb.port}`;
+      await a.rpc.request("account/login/cancel", { loginId: r?.loginId }).catch(() => undefined);
+    } catch (e) {
+      out[login ? "loginProfile" : "production"] = `refused: ${(e as Error).name}`;
+    } finally {
+      a.kill();
+    }
+  }
+  console.log(JSON.stringify(out));
+  assert.match(out.production ?? "", /^refused/);
+  assert.equal(out.loginProfile, `callback 127.0.0.1:${LOGIN_CALLBACK_PORT}`);
 });
 
 test("signed in: list_dir through the relay, then the exec-cell gate", { skip: live }, async (t) => {
@@ -4713,10 +5123,22 @@ test("signed in: list_dir through the relay, then the exec-cell gate", { skip: l
     const baseline = await s.turn("Use functions.exec to call tools.mcp__companion_readonly__list_dir({}) once, then list the file names it returned.");
     const gate = await runExecCellGate(s, { codexHome: paths.codexHome });
     const net443 = probeRun(paths, [["nonOpenAiHost443", "host:example.com:443"], ["nonOpenAiHost80", "host:example.com:80"]]);
+    // Plan review I-6: can a live surface check see account- or server-gated tools? The goal tools appear only live
+    // (codemode-report M2); with goals turned on for this one call they are the canary. Tool NAMES only are kept.
+    const liveRun = liveRunner(findCodex(), paths, { binary: s.relay.binary, socket: s.relay.socket });
+    const model = s.threadModel ?? String(s.models[0]);
+    let liveSurface: Record<string, unknown>;
+    try {
+      const plain = parseToolSurface(liveRun(promptInputArgs(model), paths.codexHome));
+      const goalsOn = parseToolSurface(liveRun(promptInputArgs(model, ["-c", "features.goals=true"]), paths.codexHome));
+      liveSurface = { plain, goalsOn, liveShowsGoalTools: [...goalsOn.top, ...goalsOn.nested].some((t) => /goal/i.test(t)) };
+    } catch (e) {
+      liveSurface = { error: (e as Error).message };
+    }
     console.log(JSON.stringify({
       threadModel: s.threadModel, threadModelChecked: s.threadModel !== null && s.models.includes(s.threadModel),
       baseline: { status: baseline.status, mcpCalls: baseline.mcpCalls, itemTypes: baseline.itemTypes, replyHasFixture: baseline.agentText.includes("pelican-ledger.txt") },
-      gate, profileLevelNetwork: net443, alerts: s.alerts, serverRequests: s.decisions,
+      gate, profileLevelNetwork: net443, liveSurface, alerts: s.alerts, serverRequests: s.decisions,
     }, null, 2));
     assert.ok(baseline.mcpCalls.includes("list_dir:completed"));
     assert.ok(baseline.agentText.includes("pelican-ledger.txt"));
@@ -4733,29 +5155,31 @@ test("signed in: list_dir through the relay, then the exec-cell gate", { skip: l
 - [ ] **Step 6: Measure without login.**
 
 Run: `cd companiond && COMPANION_ITEST=1 node --test --test-concurrency=1 itest/codeMode.itest.ts`
-Expected: 3 pass, 1 skipped (the signed-in test). The JSON shows:
-- catalog: the code-mode models of the pinned binary (11 on 0.166.0 at plan time; `gpt-5.5` excluded), `failures: []`;
+Expected: 4 pass, 1 skipped (the signed-in test). The JSON shows (all measured while planning, signed out, macOS 27):
+- catalog: the code-mode models of the pinned binary (11 on 0.166.0; `gpt-5.5` excluded), `failures: []`, ≈ 0.5–2 s;
 - config/read, code-mode config, feature list and bound tools all `[]`; broker `["bound"]`;
-- profile probe: `relaySocket`, `dnsSocket`, `writeCodexHome` = `OK`; every other asserted key `EPERM` (or `EACCES`); `loopback443`/`loopback443v6` expected `EPERM` (I5).
+- profile probe: `relaySocket`, `dnsSocket`, `writeCodexHome` = `OK`; every other asserted key `EPERM` (or `EACCES`), including `linkConfigToml`/`linkCatalog`, `loopback443`/`loopback443v6`, `anyAddr443`, `ownIp443` (with a real listener on `0.0.0.0:443`, 0 hits) and `bindLoginPort`;
+- sign-in profile probe: `bindLoginPort` `OK`, `bindOtherPort` `EPERM`; `bindLoginPortAnyAddr` recorded (measured `OK`: SBPL's `localhost:1455` also matches `0.0.0.0`; a recorded residual risk of the short-lived sign-in process);
+- sign-in test: `production` `refused: RpcError` ("failed to start login server"), `loginProfile` `callback 127.0.0.1:1455`.
 
 **STOP (report to the controller; do not continue to Step 7) if:**
 1. `prepareCodeMode` fails because `codex debug models` or `prompt-input` cannot run under the offline profile. Do **not** run them unsandboxed or widen the offline profile; report the failing subcommand (no stderr is kept — rerun once with the sandbox log open: `log show --last 2m --predicate 'sender == "Sandbox"'`, and report only the denied operation names, never paths under home).
 2. The surface check fails (a tool beyond exec/wait or beyond the five jail tools), or the parser canary is blind.
 3. app-server does not start, or config/read fails a check (for example Codex refuses `code_mode_host = true` or the `[features.code_mode]` table).
-4. Any asserted probe row is open.
-
-`loopback443` / `loopback443v6` not `EPERM` is **not** a STOP (ruling I5): record the value; the residual risk goes into the spec in Task 10.
+4. Any asserted probe row is open (the loopback rows included: the deny ships, so it must hold — plan review I-7).
+5. The sign-in profile opens anything beyond `127.0.0.1:1455` / `*:1455`, or the sign-in test does not start the callback server (ruling I-9: if no narrow rule holds, STOP).
 
 - [ ] **Step 7: The exec-cell gate, signed in.** The companion's CODEX_HOME is already signed in; never run `codex login`.
 
 Run: `cd companiond && COMPANION_ITEST=1 COMPANION_ITEST_LIVE=1 node --test --test-concurrency=1 itest/codeMode.itest.ts`
-Expected: 4 pass (≈ 5–10 min). The signed-in JSON shows:
+Expected: 5 pass (≈ 5–10 min). The signed-in JSON shows:
 - `baseline.mcpCalls` contains `list_dir:completed`, `replyHasFixture: true`, `threadModelChecked: true`;
 - `gate.pass: true`, `gate.open: []`, every `typeof_*` `"undefined"`, every `import*` `"refused"`, `load*` not `"LEAKED"`, `applyPatch`/`execCommand` `"undefined"`, `toolNames` only `mcp__companion_readonly__*`; harness counts all 0 and `false`;
 - `profileLevelNetwork.nonOpenAiHost443: "OK"` (recorded residual risk: SBPL cannot name hosts; the cell has no network API, which the gate asserts), `nonOpenAiHost80` `EPERM`;
-- `alerts: []`; `serverRequests` likely `[]` (no elicitation for read-only tools — record it).
+- `alerts: []`; `serverRequests` likely `[]` (no elicitation for read-only tools — record it);
+- `liveSurface.plain` passes `checkToolSurface` (exactly exec/wait, only jail tools nested). **Act on `liveSurface.liveShowsGoalTools` (plan review I-6):** `true` → the live check can see account-gated tools: set `LIVE_SURFACE_CHECK = true` in `codeMode.ts` (createCompanionCodex then runs the per-model surface check live at every start too), re-run `npm test` and this step. `false` (or an error) → leave it `false`, and Task 10 records in spec item 8/11 that live-only tools are not covered by any start check. Never print tool descriptions, only names.
 
-**Gate procedure (binding).** If any gate check is open: first try narrowing — a per-path or per-port SBPL deny added to `buildCodexProfile` (later rules win), or an OpenAI IP/port rule — then re-run Steps 4, 6 and 7. If it is still open, **STOP**: commit nothing that claims a pass, leave `CODEX_SEATBELT_MEASURED = "stopped"`, and report the JSON to the controller. It must not ship. If the gate is inconclusive twice (the model did not run the cell), report that as a STOP too: an unmeasured gate is not a pass.
+**Gate procedure (binding).** If any gate check is open: first try narrowing with a per-path or per-port SBPL deny added to `buildCodexProfile` (later rules win), then re-run Steps 4, 6 and 7. An OpenAI IP rule is not a narrowing option (CDN addresses cannot be proven complete; plan review M-13) unless the orchestrator rules for it first. If a check is still open, **STOP**: commit nothing that claims a pass, leave `CODEX_SEATBELT_MEASURED = "stopped"`, and report the JSON to the controller. It must not ship. If the gate is inconclusive twice (the model did not run the cell), report that as a STOP too: an unmeasured gate is not a pass.
 
 - [ ] **Step 8: Record and commit.** Add under "## M4 Codex measurements" in `docs/findings/2026-11-03-phase1-poc.md`:
 
@@ -4767,7 +5191,10 @@ Date: <date>. macOS <version>, Codex 0.166.0. `COMPANION_ITEST=1 [COMPANION_ITES
 - Catalog and offline tool surface: <JSON line>
 - config/read and bound tools under the production profile: <JSON line>
 - Profile probe (errno per action; loopback 443 = review I5): <JSON line>
+- Sign-in profile probe and sign-in test (ruling I-9): <JSON lines>
 - Exec-cell gate (signed in): <gate JSON, profileLevelNetwork, baseline, serverRequests>
+- Live tool surface (plan review I-6): <liveSurface; LIVE_SURFACE_CHECK as set>
+- Not expressible in a bare isolate: reads of keychain entries other than the login keychain (no file API at all); DNS is covered by the node:dns import rows (plan review M-6).
 ```
 
 Fill each `<…>` with the printed output (paths replaced).
@@ -4775,7 +5202,7 @@ Fill each `<…>` with the printed output (paths replaced).
 ```bash
 bash scripts/check-repo.sh
 git rm companiond/scripts/measure-codex-profile.ts
-git add companiond/src/codex/codexSeatbelt.ts companiond/src/codex/config.ts companiond/src/codex/selfCheck.ts companiond/src/codex/codeMode.ts companiond/src/codex/binding.ts companiond/src/codex/instructions.ts companiond/scripts/codex-login.ts companiond/test/codex/codexSeatbelt.test.ts companiond/test/codex/config.test.ts companiond/test/codex/selfCheck.test.ts companiond/test/codex/codeMode.test.ts companiond/test/codex/binding.test.ts companiond/itest/fixtures/probe.c companiond/itest/helpers/companion.ts companiond/itest/helpers/codeModeSession.ts companiond/itest/helpers/execCellGate.ts companiond/itest/codeMode.itest.ts docs/findings/2026-11-03-phase1-poc.md
+git add companiond/src/codex/codexSeatbelt.ts companiond/src/codex/config.ts companiond/src/codex/selfCheck.ts companiond/src/codex/codexInstall.ts companiond/src/codex/codeMode.ts companiond/src/codex/binding.ts companiond/src/codex/instructions.ts companiond/scripts/codex-login.ts companiond/test/codex/codexSeatbelt.test.ts companiond/test/codex/config.test.ts companiond/test/codex/selfCheck.test.ts companiond/test/codex/codexInstall.test.ts companiond/test/codex/codeMode.test.ts companiond/test/codex/binding.test.ts companiond/itest/fixtures/probe.c companiond/itest/helpers/companion.ts companiond/itest/helpers/codeModeSession.ts companiond/itest/helpers/execCellGate.ts companiond/itest/codeMode.itest.ts docs/findings/2026-11-03-phase1-poc.md
 git commit -m "feat(codex): run Codex under the relay profile with code mode closed down, and measure it" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -4785,7 +5212,7 @@ On a STOP in Step 6 or 7: commit the code and the findings with the measured fai
 
 ### Task 9: `CodexHost` — one app-server per root, the relay binding, token TTL, fail-stop (spec §2, §3, §7.1; ruling I1)
 
-Ruling I1: one app-server per approved root (cap 3, idle LRU close) plus a base process for sign-in and threads with no root, so a token stolen inside one process only reaches a root that process already holds. Each `thread/start` / `thread/resume` gets a fresh one-time grant, armed right after the response and revoked at thread end. A refused connection, a replaced socket, or a validator `violation`/`limit` end stops everything with "Security check failed"; a binding that simply ended (`normal`, `idle`, `jail`, `error`) is rebound before the thread's next turn.
+Ruling I1: one app-server per approved root (cap 3, idle LRU close) plus a base process for threads with no root. This does not stop one process reading another relay's env (KERN_PROCARGS2 is readable for any same-uid process, measured); what limits a stolen token is single use, the short window between exec and connect, the TTL, and detection — the real relay is then refused, which stops everything (plan review I-8). Each `thread/start` / `thread/resume` gets a fresh one-time grant, armed right after the response and revoked at thread end (`closeThread`, a move, eviction, a failure). Bindings are made one at a time and kept below the acceptor's cap, so normal load never looks like a squatter (I-3). A refused connection, a replaced socket, or a validator end of `violation`, `limit` or `error` (a crash counts as `violation`, I-2) stops everything with "Security check failed", and the stop is sticky: `start()` refuses until `clearSecurityStop()` (I-1). A binding that simply ended (`normal`, `idle`, `jail`) is rebound before the thread's next turn, at most 3 times in 10 minutes. Sign-in runs in its own short-lived Codex process under the sign-in profile (ruling I-9).
 
 **Files:**
 - Create: `companiond/src/codex/codexHost.ts`, `companiond/src/codex/companionCodex.ts`, `companiond/test/codex/fakeAppServer.ts`
@@ -4815,25 +5242,30 @@ export class TurnBusyError extends Error {}
 export interface CodexHostOptions {
   paths: AppPaths; codexVersion: string; pinnedVersion: string;
   makeLaunch: () => CodexLaunch;              // one launch shape for every process (per-root binding is per thread)
-  prepare: () => PreparedCodeMode;            // generated catalog + config + offline surface check (codeMode.ts)
+  makeLoginLaunch: () => CodexLaunch;         // the short-lived sign-in process (ruling I-9)
+  prepare: () => PreparedCodeMode;            // generated catalog + config + surface check + protected-file hashes
   broker: RelayBroker; relayBinary: string;
   allowlist: ToolAllowlist; spawn?: SpawnFn; offFeatures?: readonly string[];
-  fsProbe?: FsProbe; maxProcesses?: number; timeoutMs?: number; tokenTtlMs?: number;
+  fsProbe?: FsProbe; maxProcesses?: number; maxBindings?: number; timeoutMs?: number; tokenTtlMs?: number; loginTimeoutMs?: number;
   measurementOnly?: boolean;                  // only then may makeLaunch return a launch that is not under sandbox-exec
 }
 export class CodexHost {
   constructor(o: CodexHostOptions);
   on(l: (e: HostEvent) => void): () => void;
   state(): HostState;
-  start(): Promise<HostState>;          // also from "failed": a retry
+  start(): Promise<HostState>;          // a retry after a plain failure; refused while a security stop is latched
+  clearSecurityStop(): void;            // M4b calls it only after the owner acknowledged "Security check failed"
   stop(): Promise<void>;
   auth(): Promise<AuthState>;
-  login(): Promise<{ authUrl: string }>;
+  login(): Promise<{ authUrl: string }>; // separate sign-in process; ends on account/login/completed or a timeout
   openThread(threadId: string | null, binding: RootBinding | null): Promise<string>; // start or resume; returns thread id
+  closeThread(threadId: string): Promise<void>; // unsubscribe + revoke its token (thread end)
   startTurn(threadId: string, text: string): Promise<{ turnId: string }>;
   interrupt(threadId: string): Promise<void>;
   activeTurn(threadId: string): string | null;
 }
+// Callers never call mcpServerStatus/list for a thread without serverName: that re-spawns the thread's servers and
+// spends its one-time token (measured). CodexHost does it through one helper (plan review M-10).
 // src/codex/companionCodex.ts — the production wiring M4b calls:
 export interface CompanionCodex { host: CodexHost; acceptor: RelayAcceptor; close(): Promise<void> }
 export function createCompanionCodex(o: { paths: AppPaths; install?: CodexInstall; toolchain?: Toolchain; home?: string; tokenTtlMs?: number; maxProcesses?: number; wrapBroker?: (b: RelayBroker) => RelayBroker }): Promise<CompanionCodex>;
@@ -4946,7 +5378,8 @@ export function goodHandlers(): Record<string, Handler> {
     };
   };
   return {
-    initialize: () => ({ userAgent: "codex_cli_rs/0.166.0 (fake)", codexHome: "/x", platformFamily: "unix", platformOs: "macos" }),
+    // The real 0.166.0 shape (measured): Codex's version under the client's originator name (plan review I-11).
+    initialize: () => ({ userAgent: "claudegpt_companion/0.166.0 (Mac OS 27.0.1; arm64) unknown (claudegpt_companion; 0.4.0)", codexHome: "/x", platformFamily: "unix", platformOs: "macos" }),
     "config/read": (_p, f) => ({
       config: {
         features: {
@@ -4958,7 +5391,10 @@ export function goodHandlers(): Record<string, Handler> {
         model_catalog_json: path.join(f.launch.env.CODEX_HOME ?? "", CATALOG_FILE),
       },
       origins: {},
-      layers: [{ name: { type: "user", file: "/x/config.toml", profile: null }, version: "1", config: {}, disabledReason: null }],
+      layers: [
+        { name: { type: "user", file: path.join(f.launch.env.CODEX_HOME ?? "", "config.toml"), profile: null }, version: "1", config: {}, disabledReason: null },
+        { name: { type: "system", file: "/etc/codex/config.toml" }, version: "1", config: {}, disabledReason: null },
+      ],
     }),
     "experimentalFeature/list": () => ({
       data: OFF_FEATURES.map((name) => ({ name, stage: "stable", enabled: name === "unified_exec", defaultEnabled: name === "unified_exec", displayName: null, description: null, announcement: null })),
@@ -4989,14 +5425,31 @@ export function fakeSpawn(handlers: () => Record<string, Handler> = goodHandlers
 
 export interface FakeGrant { id: string; token: string; launch: LaunchSpec; ttl: number | null; revoked: boolean }
 
-/** Records grants; tests emit broker events by hand. */
+/** Records grants; tests emit broker events by hand. Like the real acceptor, more than `maxLive` live grants is a
+ * refused connection, and an unhealthy broker must be restarted. */
 export class FakeBroker implements RelayBroker {
   readonly grants: FakeGrant[] = [];
+  isHealthy = true;
+  restarts = 0;
+  restartFails = false;
+  maxLive = 16;
   #listeners = new Set<(e: BrokerEvent) => void>();
 
+  healthy(): boolean {
+    return this.isHealthy;
+  }
+  async restart(): Promise<void> {
+    this.restarts++;
+    if (this.restartFails) throw new Error("SYNTHETIC: a foreign listener holds the socket");
+    this.isHealthy = true;
+  }
+  live(): number {
+    return this.grants.filter((g) => !g.revoked).length;
+  }
   grant(launch: LaunchSpec): RelayGrant {
     const g: FakeGrant = { id: `g${this.grants.length + 1}`, token: newToken(), launch, ttl: null, revoked: false };
     this.grants.push(g);
+    if (this.live() > this.maxLive) this.emit({ type: "refused", reason: "too many connections" });
     return {
       id: g.id,
       token: g.token,
@@ -5028,8 +5481,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { appPaths, ensureAppDirs, type AppPaths } from "../../src/app/appPaths.ts";
-import type { PreparedCodeMode } from "../../src/codex/codeMode.ts";
+import { snapshotProtectedFiles, type PreparedCodeMode } from "../../src/codex/codeMode.ts";
 import { CodexHost, SecurityCheckError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
+import { CATALOG_FILE, writeCodexHomeFile } from "../../src/codex/config.ts";
 import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../../src/launch/seatbelt.ts";
 import { DEFAULT_TOKEN_TTL_MS } from "../../src/relay/broker.ts";
@@ -5042,10 +5496,16 @@ const RELAY = "/s/bin/cgc-relay";
 const SRV = "mcp_servers.companion-readonly";
 const jail = (root: string): LaunchSpec => ({ command: "/usr/bin/sandbox-exec", args: ["-p", `(subpath "${root}")`, "/n/node", "/c/main.ts"], env: { COMPANION_ROOT: root, COMPANION_GIT: "/g", PATH: "/usr/bin:/bin" }, cwd: root });
 const bind = (root: string) => ({ root, launch: jail(root) });
-const okPrepare = (): PreparedCodeMode => ({ result: { failures: [], warnings: [] }, models: [FAKE_MODEL] });
+/** Like prepareCodeMode: writes the two protected files and returns their hashes. */
+const okPrepare = (paths: AppPaths) => (): PreparedCodeMode => {
+  writeCodexHomeFile(paths.codexHome, "config.toml", "# SYNTHETIC FIXTURE config\n");
+  writeCodexHomeFile(paths.codexHome, CATALOG_FILE, "{}");
+  return { result: { failures: [], warnings: [] }, models: [FAKE_MODEL], protectedFiles: snapshotProtectedFiles(paths.codexHome) };
+};
 const detail = (s: HostState) => (s.state === "failed" ? s.detail : "");
+const LOGIN_PROFILE = "(version 1) ; sign-in";
 
-function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; maxProcesses?: number; unsandboxed?: boolean; measurementOnly?: boolean; prepare?: () => PreparedCodeMode } = {}) {
+function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; maxProcesses?: number; maxBindings?: number; unsandboxed?: boolean; measurementOnly?: boolean; prepare?: (paths: AppPaths) => () => PreparedCodeMode } = {}) {
   const paths = o.paths ?? ensureAppDirs(appPaths(tempDir()));
   const f = fakeSpawn(o.handlers);
   const broker = new FakeBroker();
@@ -5053,10 +5513,11 @@ function host(o: { handlers?: () => Record<string, Handler>; paths?: AppPaths; m
   const env = { CODEX_HOME: paths.codexHome };
   const h = new CodexHost({
     paths, codexVersion: "0.166.0", pinnedVersion: "0.166.0", allowlist: COMPANION_ALLOWLIST, spawn: f.spawn, broker, relayBinary: RELAY,
-    prepare: o.prepare ?? okPrepare, maxProcesses: o.maxProcesses, measurementOnly: o.measurementOnly,
+    prepare: (o.prepare ?? okPrepare)(paths), maxProcesses: o.maxProcesses, maxBindings: o.maxBindings, measurementOnly: o.measurementOnly,
     makeLaunch: () => (o.unsandboxed
       ? { command: "/fake/codex", args: ["app-server"], env, cwd: paths.emptyCwd }
       : { command: SANDBOX_EXEC, args: ["-p", "(version 1)", "/fake/codex", "app-server"], env, cwd: paths.emptyCwd }),
+    makeLoginLaunch: () => ({ command: SANDBOX_EXEC, args: ["-p", LOGIN_PROFILE, "/fake/codex", "app-server"], env, cwd: paths.emptyCwd }),
   });
   h.on((e) => events.push(e));
   return { h, f, broker, events, paths };
@@ -5066,7 +5527,7 @@ const withHandler = (name: string, fn: Handler) => () => ({ ...goodHandlers(), [
 
 test("start: prepares code mode, runs the self-check, ready with the unified_exec warning", async () => {
   let prepared = 0;
-  const { h, f, paths } = host({ prepare: () => { prepared++; return okPrepare(); } });
+  const { h, f, paths } = host({ prepare: (p) => () => { prepared++; return okPrepare(p)(); } });
   const s = await h.start();
   assert.equal(s.state, "ready");
   assert.equal(prepared, 1);
@@ -5086,7 +5547,7 @@ test("an unsandboxed launch is refused before spawn; measurementOnly allows it a
 });
 
 test("a failing code-mode preparation stops the start before any spawn", async () => {
-  const { h, f } = host({ prepare: () => ({ result: { failures: ["tool surface (m): collaboration.spawn_agent is exposed"], warnings: [] }, models: [] }) });
+  const { h, f } = host({ prepare: () => () => ({ result: { failures: ["tool surface (m): collaboration.spawn_agent is exposed"], warnings: [] }, models: [], protectedFiles: {} }) });
   assert.match(detail(await h.start()), /Security check failed: .*collaboration\.spawn_agent/);
   assert.equal(f.servers.length, 0);
 });
@@ -5107,7 +5568,7 @@ test("an AGENTS.md above the companion folder fails before code mode is prepared
   const home = tempDir();
   fs.writeFileSync(path.join(home, "AGENTS.md"), "SYNTHETIC FIXTURE\n");
   let prepared = 0;
-  const { h, f } = host({ paths: ensureAppDirs(appPaths(home)), prepare: () => { prepared++; return okPrepare(); } });
+  const { h, f } = host({ paths: ensureAppDirs(appPaths(home)), prepare: (p) => () => { prepared++; return okPrepare(p)(); } });
   assert.equal((await h.start()).state, "failed");
   assert.equal(prepared, 0);
   assert.equal(f.servers.length, 0);
@@ -5272,6 +5733,100 @@ test("at most maxProcesses root processes: the least recently used idle one clos
   assert.equal(f.servers.length, 4);
   await assert.rejects(h.startTurn(t1, "x"), /not open/);
 });
+
+test("a security stop is sticky: start() stays failed until clearSecurityStop, then restarts an unhealthy broker (I-1)", async () => {
+  for (const ev of [{ type: "refused", reason: "bad proof" }, { type: "socketReplaced" }, { type: "closed", grantId: "g1", end: "violation" }] as const) {
+    const { h, f, broker } = host();
+    await h.start();
+    await h.openThread(null, bind("/r1"));
+    if (ev.type === "socketReplaced") broker.isHealthy = false;
+    broker.emit(ev);
+    const before = f.servers.length;
+    assert.match(detail(await h.start()), /Security check failed/);
+    assert.equal(f.servers.length, before, "no new process while the stop is latched");
+    h.clearSecurityStop();
+    if (ev.type === "socketReplaced") {
+      broker.restartFails = true;
+      assert.equal((await h.start()).state, "failed", "the broker could not restart");
+      assert.equal(f.servers.some((s) => s.methods().includes("thread/start") && s !== f.servers[1]), false);
+      broker.restartFails = false;
+    }
+    assert.equal((await h.start()).state, "ready");
+    assert.equal(broker.restarts, ev.type === "socketReplaced" ? 2 : 0);
+  }
+});
+
+test("validator ends: error stops everything; jail ends rebind at most 3 times in 10 minutes (I-2)", async () => {
+  const e = host();
+  await e.h.start();
+  await e.h.openThread(null, bind("/r1"));
+  e.broker.emit({ type: "closed", grantId: e.broker.grants[0]?.id ?? "", end: "error" });
+  assert.match(detail(e.h.state()), /Security check failed/);
+
+  const { h, broker } = host();
+  await h.start();
+  const t = await h.openThread(null, bind("/r1"));
+  for (let i = 0; i < 3; i++) {
+    broker.emit({ type: "closed", grantId: broker.grants.at(-1)?.id ?? "", end: "jail" });
+    assert.equal(h.state().state, "ready", `rebind ${i + 1}`);
+    await h.openThread(t, bind("/r1"));
+  }
+  broker.emit({ type: "closed", grantId: broker.grants.at(-1)?.id ?? "", end: "jail" });
+  assert.match(detail(h.state()), /Security check failed/);
+});
+
+test("17 bound threads in a row never trip the acceptor's cap: the oldest idle binding is closed first (I-3)", async () => {
+  const { h, broker, events } = host({ maxProcesses: 3 });
+  await h.start();
+  const ids: string[] = [];
+  for (let i = 0; i < 17; i++) ids.push(await h.openThread(null, bind(`/r${i % 3}`)));
+  assert.equal(h.state().state, "ready");
+  assert.equal(events.some((e) => e.type === "alert" && /Security check failed/.test(e.detail)), false);
+  assert.ok(broker.live() <= 12, `live bindings: ${broker.live()}`);
+  await h.closeThread(ids[16] ?? "");
+  assert.equal(broker.grants.at(-1)?.revoked, true);
+  await assert.rejects(h.startTurn(ids[16] ?? "", "x"), /not open/);
+});
+
+test("a check that throws fails the host and revokes the token (I-4)", async () => {
+  const { h, broker } = host({ handlers: withHandler("mcpServerStatus/list", (p) => { if (p?.threadId) throw { code: -32000, message: "SYNTHETIC" }; return { data: [], nextCursor: null }; }) });
+  await h.start();
+  await assert.rejects(h.openThread(null, bind("/r1")));
+  assert.match(detail(h.state()), /Security check failed/);
+  assert.equal(broker.grants[0]?.revoked, true);
+});
+
+test("a protected file changed after the start fails the next spawn or thread (I-5)", async () => {
+  const { h, paths } = host();
+  await h.start();
+  await h.openThread(null, null);
+  fs.appendFileSync(path.join(paths.codexHome, "config.toml"), "web_search = \"live\"\n");
+  await assert.rejects(h.openThread(null, bind("/r1")), /config\.toml/);
+  assert.match(detail(h.state()), /config\.toml/);
+});
+
+test("a turn on a model whose surface was not checked stops everything (M-11)", async () => {
+  const { h, f } = host();
+  await h.start();
+  const t = await h.openThread(null, null);
+  const { turnId } = await h.startTurn(t, "x");
+  srv(f, 0).notify("turn/started", { threadId: t, turn: { id: turnId, model: "gpt-unchecked", status: "inProgress", items: [] } });
+  await tick();
+  assert.match(detail(h.state()), /model/);
+});
+
+test("sign-in runs in its own process under the sign-in launch and ends on account/login/completed (I-9)", async () => {
+  const { h, f, events } = host();
+  await h.start();
+  assert.deepEqual(await h.login(), { authUrl: "https://auth.example/start" });
+  const login = f.servers.find((s) => s.launch.args[1] === LOGIN_PROFILE) as FakeAppServer;
+  assert.ok(login, "a separate sign-in process");
+  assert.equal(srv(f, 0).methods().includes("account/login/start"), false, "never on the base process");
+  login.notify("account/login/completed", { loginId: "l1", success: true, error: null });
+  await tick(10);
+  assert.equal(login.killed, true);
+  assert.ok(events.some((e) => e.type === "auth"));
+});
 ```
 
 - [ ] **Step 3: Run it to verify it fails**
@@ -5283,25 +5838,27 @@ Expected: FAIL — `Cannot find module '../../src/codex/codexHost.ts'`.
 
 ```ts
 // CodexHost (spec §3, §7.1, §7.1.9): supervises app-server processes — one per approved root (cap, idle LRU close),
-// plus a base process for sign-in and threads with no root — so a relay token stolen inside one process can only
-// reach a root that process already holds (review I1). Runs the self-check, binds each thread to its root through the
-// relay with a fresh one-time token, answers server requests per type and guards every turn. A refused relay
-// connection, a replaced socket, a validator violation or any failed check stops everything: "Security check failed".
+// plus a base process for threads with no root, plus a short-lived sign-in process. One process per root does NOT stop
+// a process reading another relay's env (KERN_PROCARGS2); what limits a stolen token is single use, the TTL and
+// detection: the real relay is then refused, which stops everything (plan review I-8). Runs the self-check, binds
+// each thread to its root through the relay with a fresh one-time token, answers server requests per type and guards
+// every turn. A refused relay connection, a replaced socket, a validator violation/limit/error, or any failed or
+// failing check stops everything with "Security check failed", and the stop is latched (plan review I-1).
 import path from "node:path";
 import type { AppPaths } from "../app/appPaths.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../launch/seatbelt.ts";
 import { DEFAULT_TOKEN_TTL_MS, type BrokerEvent, type RelayBroker, type RelayGrant } from "../relay/broker.ts";
 import { inertOverride, relayOverride } from "./binding.ts";
-import type { PreparedCodeMode } from "./codeMode.ts";
+import { checkProtectedFiles, type PreparedCodeMode } from "./codeMode.ts";
 import type { CodexLaunch } from "./codexSeatbelt.ts";
 import { CATALOG_FILE, CODE_MODE_OFF_FEATURES, OFF_FEATURES } from "./config.ts";
 import { RuntimeGuard } from "./guard.ts";
 import { DEVELOPER_INSTRUCTIONS } from "./instructions.ts";
 import { CLIENT_INFO, CLIENT_METHODS } from "./methods.ts";
-import { RpcClient } from "./rpc.ts";
+import { RpcClient, RpcError } from "./rpc.ts";
 import {
-  checkCodeModeConfig, checkCodexHome, checkCompanionCwd, checkConfigRead, checkFeatureList, checkMcpStatus, checkThreadModel,
-  checkThreadResponse, checkVersion, mergeChecks, nodeFsProbe, type CheckResult, type FsProbe,
+  checkCodeModeConfig, checkCodexHome, checkCompanionCwd, checkConfigLayers, checkConfigRead, checkFeatureList, checkMcpStatus,
+  checkThreadModel, checkThreadResponse, checkVersion, mergeChecks, nodeFsProbe, type CheckResult, type FsProbe,
 } from "./selfCheck.ts";
 import { decideServerRequest, type ToolAllowlist } from "./serverRequests.ts";
 import { nodeSpawn, type SpawnFn } from "./spawn.ts";
@@ -5346,6 +5903,8 @@ export interface CodexHostOptions {
   codexVersion: string;
   pinnedVersion: string;
   makeLaunch: () => CodexLaunch;
+  /** The short-lived sign-in process: the production profile plus the callback port (ruling I-9). */
+  makeLoginLaunch: () => CodexLaunch;
   prepare: () => PreparedCodeMode;
   broker: RelayBroker;
   relayBinary: string;
@@ -5354,14 +5913,19 @@ export interface CodexHostOptions {
   offFeatures?: readonly string[];
   fsProbe?: FsProbe;
   maxProcesses?: number;
+  /** Live bindings kept below the acceptor's cap of 16 (plan review I-3). */
+  maxBindings?: number;
   timeoutMs?: number;
   tokenTtlMs?: number;
+  loginTimeoutMs?: number;
   /** Only for labelled measurements: allows a launch that is not under sandbox-exec (spec §7.1.9). */
   measurementOnly?: boolean;
 }
 
 const UNSANDBOXED_WARNING = "measurement only: Codex is running without its Seatbelt profile";
 const BASE = "";
+const MAX_REBINDS = 3;
+const REBIND_WINDOW_MS = 10 * 60_000;
 
 interface Proc { key: string; rpc: RpcClient; kill: () => void; threads: Set<string>; lastUsed: number; closing: boolean }
 interface ThreadState {
@@ -5373,6 +5937,7 @@ interface ThreadState {
   activeTurn: string | null;
   finished: Set<string>;
   needsRebind: boolean;
+  lastUsed: number;
 }
 
 const obj = (v: unknown): Record<string, unknown> | null =>
@@ -5402,6 +5967,11 @@ export class CodexHost {
   #threads = new Map<string, ThreadState>();
   #byGrant = new Map<string, string>();
   #models: readonly string[] = [];
+  #protected: Readonly<Record<string, string>> = {};
+  #rebinds = new Map<string, number[]>();
+  #bindQueue: Promise<unknown> = Promise.resolve();
+  #login: { end: () => void } | null = null;
+  #securityStopped: string | null = null;
   #warnings: string[] = [];
   #clock = 0;
 
@@ -5430,14 +6000,22 @@ export class CodexHost {
 
   async start(): Promise<HostState> {
     if (this.#state.state === "ready" || this.#state.state === "starting") return this.#state;
+    if (this.#securityStopped !== null) {
+      // Latched (plan review I-1): a retry must not turn fail-stop into fail-restart.
+      this.#set({ state: "failed", detail: `Security check failed: ${this.#securityStopped}` });
+      return this.#state;
+    }
     this.#set({ state: "starting" });
     this.#warnings = [];
     try {
       const pre = mergeChecks(checkCompanionCwd(this.#o.paths.emptyCwd, this.#fs), checkCodexHome(this.#o.paths.codexHome, this.#fs));
       if (pre.failures.length > 0) throw new SecurityCheckError(pre.failures.join("; "));
-      const prep = this.#o.prepare(); // writes the catalog and config.toml, then checks the tool surface offline
+      // After a replaced socket the acceptor re-runs every start check before anything is bound again.
+      if (!this.#o.broker.healthy()) await this.#o.broker.restart();
+      const prep = this.#o.prepare(); // writes the catalog and config.toml, then checks the tool surface
       if (prep.result.failures.length > 0) throw new SecurityCheckError(prep.result.failures.join("; "));
       this.#models = prep.models;
+      this.#protected = prep.protectedFiles;
       this.#addWarnings(prep.result.warnings);
       await this.#proc(BASE);
       this.#set({ state: "ready", warnings: [...this.#warnings] });
@@ -5447,7 +6025,13 @@ export class CodexHost {
     return this.#state;
   }
 
+  /** M4b calls this only after the owner acknowledged the "Security check failed" message. */
+  clearSecurityStop(): void {
+    this.#securityStopped = null;
+  }
+
   async stop(): Promise<void> {
+    this.#login?.end();
     for (const t of this.#threads.values()) this.#dropGrant(t);
     for (const p of this.#procs.values()) this.#close(p);
     this.#procs.clear();
@@ -5464,14 +6048,76 @@ export class CodexHost {
     return { state: "unsupported", mode: str(acct.type) ?? "unknown" };
   }
 
+  /** Sign-in in its own short-lived Codex process under the sign-in profile (ruling I-9). The base process never
+   * listens on the callback port. The process ends on account/login/completed or after loginTimeoutMs. */
   async login(): Promise<{ authUrl: string }> {
-    const r = obj(await this.#base().rpc.request("account/login/start", { type: "chatgpt" }));
-    const authUrl = str(r?.authUrl);
-    if (!authUrl || !authUrl.startsWith("https://")) throw new Error("Sign-in did not return an https link.");
-    return { authUrl };
+    this.#requireReady();
+    this.#login?.end();
+    this.#requireProtected();
+    const launch = this.#o.makeLoginLaunch();
+    this.#requireSandboxed(launch);
+    const s = this.#spawn(launch);
+    const rpc = new RpcClient(s.transport, {
+      allowedMethods: CLIENT_METHODS,
+      timeoutMs: this.#o.timeoutMs,
+      onServerRequest: async (method, params) => decideServerRequest(method, params, this.#o.allowlist, () => null).reply,
+    });
+    s.onExit((d) => rpc.close(d));
+    let timer: NodeJS.Timeout | undefined;
+    const handle = {
+      end: () => {
+        clearTimeout(timer);
+        if (this.#login === handle) this.#login = null;
+        s.kill();
+        rpc.close("sign-in ended");
+      },
+    };
+    this.#login = handle;
+    timer = setTimeout(handle.end, this.#o.loginTimeoutMs ?? 10 * 60_000);
+    timer.unref();
+    rpc.onNotification((m) => {
+      if (m !== "account/login/completed") return;
+      handle.end();
+      void this.auth().then((auth) => this.#emit({ type: "auth", auth }), () => undefined);
+    });
+    try {
+      const init = await rpc.request("initialize", { clientInfo: CLIENT_INFO, capabilities: null });
+      rpc.notify("initialized");
+      const cfg = await rpc.request("config/read", { includeLayers: true, cwd: this.#o.paths.emptyCwd });
+      const check = mergeChecks(
+        checkVersion(this.#o.codexVersion, this.#o.pinnedVersion, obj(init)?.userAgent),
+        checkConfigRead(cfg, [...this.#off, ...CODE_MODE_OFF_FEATURES]),
+        checkCodeModeConfig(cfg, [], path.join(this.#o.paths.codexHome, CATALOG_FILE)),
+        checkConfigLayers(cfg, this.#o.paths.codexHome),
+      );
+      if (check.failures.length > 0) throw new SecurityCheckError(check.failures.join("; "));
+      const r = obj(await rpc.request("account/login/start", { type: "chatgpt" }));
+      const authUrl = str(r?.authUrl);
+      if (!authUrl || !authUrl.startsWith("https://")) throw new Error("Sign-in did not return an https link.");
+      return { authUrl };
+    } catch (e) {
+      handle.end();
+      throw e;
+    }
   }
 
   async openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
+    if (!binding) return this.#openThread(threadId, null);
+    // Bindings are made one at a time, so the acceptor never sees more than one handshake from us at once (I-3).
+    const run = this.#bindQueue.then(() => this.#openThread(threadId, binding));
+    this.#bindQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Thread end (ruling I1): unsubscribe and revoke its token. */
+  async closeThread(threadId: string): Promise<void> {
+    const t = this.#threads.get(threadId);
+    if (!t) return;
+    if (t.activeTurn) throw new TurnBusyError();
+    await this.#unload(t);
+  }
+
+  async #openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
     this.#requireReady();
     const rootKey = binding?.root ?? BASE;
     const loaded = threadId ? this.#threads.get(threadId) : undefined;
@@ -5480,48 +6126,59 @@ export class CodexHost {
       if (loaded.activeTurn) throw new TurnBusyError();
       await this.#unload(loaded);
     }
-    const proc = await this.#proc(rootKey);
-    const grant = binding ? this.#o.broker.grant(binding.launch) : null;
-    const cwd = this.#o.paths.emptyCwd;
-    const params: Record<string, unknown> = {
-      cwd,
-      sandbox: "read-only",
-      approvalPolicy: "untrusted",
-      developerInstructions: DEVELOPER_INSTRUCTIONS,
-      config: grant ? relayOverride(this.#o.relayBinary, grant.token, cwd) : inertOverride(),
-    };
-    let resp: unknown;
+    let grant: RelayGrant | null = null;
+    let t: ThreadState | null = null;
+    let asking = false;
+    let requested = false;
     try {
-      resp = threadId ? await proc.rpc.request("thread/resume", { threadId, ...params }) : await proc.rpc.request("thread/start", params);
+      if (binding) await this.#makeRoomForBinding();
+      const proc = await this.#proc(rootKey);
+      this.#requireProtected();
+      grant = binding ? this.#o.broker.grant(binding.launch) : null;
+      const cwd = this.#o.paths.emptyCwd;
+      const params: Record<string, unknown> = {
+        cwd,
+        sandbox: "read-only",
+        approvalPolicy: "untrusted",
+        developerInstructions: DEVELOPER_INSTRUCTIONS,
+        config: grant ? relayOverride(this.#o.relayBinary, grant.token, cwd) : inertOverride(),
+      };
+      asking = true;
+      const resp = threadId ? await proc.rpc.request("thread/resume", { threadId, ...params }) : await proc.rpc.request("thread/start", params);
+      requested = true;
+      grant?.arm(this.#o.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS); // the relay connected during thread/start; seconds to spare
+      this.#requireReady(); // a #fail may have run while we waited
+      const id = str(obj(obj(resp)?.thread)?.id);
+      if (!id) throw new SecurityCheckError("app-server returned no thread id");
+      t = { threadId: id, proc, rootKey, binding, grant, activeTurn: null, finished: new Set(), needsRebind: false, lastUsed: ++this.#clock };
+      this.#threads.set(id, t);
+      proc.threads.add(id);
+      if (grant) this.#byGrant.set(grant.id, id);
+      const mcp = await this.#threadStatus(proc, id);
+      this.#requireReady();
+      const check = mergeChecks(
+        checkThreadResponse(resp, cwd),
+        checkThreadModel(resp, this.#models),
+        checkMcpStatus(mcp, this.#o.allowlist, binding ? "thread" : "process"),
+      );
+      if (check.failures.length > 0) throw new SecurityCheckError(check.failures.join("; "));
+      return id;
     } catch (e) {
+      // Plan review I-4: an error is never weaker than a mismatch. The token is revoked and the thread dropped; once
+      // Codex has (or may have) loaded the thread, everything stops. A JSON-RPC error reply to thread/start or
+      // thread/resume itself (no thread loaded, for example an unknown thread id) is passed to the caller instead.
       grant?.revoke();
+      if (t) {
+        this.#threads.delete(t.threadId);
+        t.proc.threads.delete(t.threadId);
+        if (grant) this.#byGrant.delete(grant.id);
+      }
+      const plainRefusal = asking && !requested && e instanceof RpcError;
+      if (!plainRefusal && this.#state.state === "ready") {
+        this.#fail(e instanceof SecurityCheckError ? e : new SecurityCheckError(`a conversation could not be checked (${e instanceof Error ? e.name : "error"})`));
+      }
       throw e;
     }
-    grant?.arm(this.#o.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS); // the relay connected during thread/start; seconds to spare
-    const id = str(obj(obj(resp)?.thread)?.id);
-    if (!id) {
-      grant?.revoke();
-      throw new Error("app-server returned no thread id");
-    }
-    const t: ThreadState = { threadId: id, proc, rootKey, binding, grant, activeTurn: null, finished: new Set(), needsRebind: false };
-    this.#threads.set(id, t);
-    proc.threads.add(id);
-    if (grant) this.#byGrant.set(grant.id, id);
-    // Always by serverName. Measured while writing this plan: mcpServerStatus/list with a threadId and NO serverName
-    // re-spawns every server of the thread (a status probe), which spends the one-time token and is refused.
-    const mcp: unknown[] = [];
-    for (const serverName of this.#o.allowlist.keys()) mcp.push(...(await pageAll(proc.rpc, "mcpServerStatus/list", { threadId: id, serverName })));
-    const check = mergeChecks(
-      checkThreadResponse(resp, cwd),
-      checkThreadModel(resp, this.#models),
-      checkMcpStatus(mcp, this.#o.allowlist, binding ? "thread" : "process"),
-    );
-    if (check.failures.length > 0) {
-      const e = new SecurityCheckError(check.failures.join("; "));
-      this.#fail(e);
-      throw e;
-    }
-    return id;
   }
 
   async startTurn(threadId: string, text: string): Promise<{ turnId: string }> {
@@ -5534,6 +6191,7 @@ export class CodexHost {
       t = this.#threads.get(threadId);
       if (!t) throw new Error("That conversation is not open.");
     }
+    t.lastUsed = ++this.#clock;
     t.activeTurn = "pending";
     let turnId: string | null = null;
     try {
@@ -5568,6 +6226,37 @@ export class CodexHost {
     for (const w of ws) if (!this.#warnings.includes(w)) this.#warnings.push(w);
   }
 
+  /** config.toml and the catalog are exactly what companiond wrote: one link, same bytes (plan review I-5). */
+  #requireProtected(): void {
+    const c = checkProtectedFiles(this.#o.paths.codexHome, this.#protected);
+    if (c.failures.length > 0) throw new SecurityCheckError(c.failures.join("; "));
+  }
+
+  #requireSandboxed(launch: CodexLaunch): void {
+    if (launch.command === SANDBOX_EXEC && launch.args[0] === "-p") return;
+    // No silent weaker fallback: an unsandboxed Codex runs only when a measurement asks for it by name.
+    if (this.#o.measurementOnly !== true) throw new SecurityCheckError("Codex must run under its Seatbelt profile.");
+    this.#addWarnings([UNSANDBOXED_WARNING]);
+  }
+
+  /** The only way CodexHost asks for a thread's MCP status: always by serverName. Measured while planning: the same
+   * call without serverName re-spawns the thread's servers, spends the one-time token and is refused (M-10). */
+  async #threadStatus(proc: Proc, threadId: string): Promise<unknown[]> {
+    const out: unknown[] = [];
+    for (const serverName of this.#o.allowlist.keys()) out.push(...(await pageAll(proc.rpc, "mcpServerStatus/list", { threadId, serverName })));
+    return out;
+  }
+
+  /** Keeps live bindings below the acceptor's cap: the least recently used idle bound thread is closed first (I-3). */
+  async #makeRoomForBinding(): Promise<void> {
+    const max = this.#o.maxBindings ?? 12;
+    const bound = [...this.#threads.values()].filter((t) => t.grant !== null);
+    if (bound.length < max) return;
+    const idle = bound.filter((t) => !t.activeTurn).sort((a, b) => a.lastUsed - b.lastUsed)[0];
+    if (!idle) throw new Error("Too many conversations are busy. Wait for a reply to finish.");
+    await this.#unload(idle);
+  }
+
   async #proc(key: string): Promise<Proc> {
     const existing = this.#procs.get(key);
     if (existing && !existing.rpc.isClosed) {
@@ -5575,12 +6264,9 @@ export class CodexHost {
       return existing;
     }
     if (key !== BASE) await this.#evictIfFull();
+    this.#requireProtected();
     const launch = this.#o.makeLaunch();
-    if (launch.command !== SANDBOX_EXEC || launch.args[0] !== "-p") {
-      // No silent weaker fallback: an unsandboxed Codex runs only when a measurement asks for it by name.
-      if (this.#o.measurementOnly !== true) throw new SecurityCheckError("Codex must run under its Seatbelt profile.");
-      this.#addWarnings([UNSANDBOXED_WARNING]);
-    }
+    this.#requireSandboxed(launch);
     const s = this.#spawn(launch);
     let rpc: RpcClient | null = null;
     const guard = new RuntimeGuard(this.#o.allowlist, {
@@ -5630,6 +6316,7 @@ export class CodexHost {
     return mergeChecks(
       checkVersion(this.#o.codexVersion, this.#o.pinnedVersion, obj(init)?.userAgent),
       checkConfigRead(cfg, [...this.#off, ...CODE_MODE_OFF_FEATURES]),
+      checkConfigLayers(cfg, this.#o.paths.codexHome),
       checkCodeModeConfig(cfg, features, path.join(this.#o.paths.codexHome, CATALOG_FILE)),
       checkFeatureList(features, this.#off, this.#o.codexVersion),
       checkCompanionCwd(this.#o.paths.emptyCwd, this.#fs),
@@ -5694,16 +6381,26 @@ export class CodexHost {
     const threadId = this.#byGrant.get(e.grantId) ?? null;
     this.#byGrant.delete(e.grantId);
     if (e.end === "revoked") return;
-    if (e.end === "violation" || e.end === "limit") return this.#securityStop("Codex sent the repository tools something they do not allow");
+    // A crash of the validator arrives as "violation" (I-2); "error" (a spawn or socket failure) also stops.
+    if (e.end === "violation" || e.end === "limit" || e.end === "error") {
+      return this.#securityStop("the repository tools stopped in a way that is not allowed");
+    }
     const t = threadId ? this.#threads.get(threadId) : undefined;
     if (t && t.grant?.id === e.grantId) {
+      const now = Date.now();
+      const recent = (this.#rebinds.get(t.threadId) ?? []).filter((x) => now - x < REBIND_WINDOW_MS);
+      recent.push(now);
+      this.#rebinds.set(t.threadId, recent);
+      if (recent.length > MAX_REBINDS) return this.#securityStop("the repository tools keep stopping");
       t.grant = null;
       t.needsRebind = true;
     }
     this.#emit({ type: "alert", threadId, turnId: null, kind: "process", detail: "The repository tools stopped. They restart with the next message." });
   }
 
+  /** Latched: start() refuses until clearSecurityStop() (plan review I-1). */
   #securityStop(detail: string): void {
+    this.#securityStopped = detail;
     if (this.#state.state !== "ready" && this.#state.state !== "starting") return;
     this.#emit({ type: "alert", threadId: null, turnId: null, kind: "process", detail: `Security check failed: ${detail}` });
     this.#fail(new SecurityCheckError(detail));
@@ -5732,7 +6429,11 @@ export class CodexHost {
       }
       case "turn/started": {
         const t = threadId ? this.#threads.get(threadId) : undefined;
-        const turnId = str(obj(p?.turn)?.id);
+        const turn = obj(p?.turn);
+        const turnId = str(turn?.id);
+        // The model is checked at start/resume; if a turn reports another one, its surface was never checked (M-11).
+        const model = str(turn?.model);
+        if (model && !this.#models.includes(model)) return this.#securityStop("a turn runs a model whose tool surface was not checked");
         if (t && turnId && !t.finished.has(turnId)) t.activeTurn = turnId;
         return;
       }
@@ -5758,6 +6459,7 @@ export class CodexHost {
   }
 
   #fail(e: unknown): void {
+    this.#login?.end();
     for (const t of this.#threads.values()) this.#dropGrant(t);
     for (const p of this.#procs.values()) this.#close(p);
     this.#procs.clear();
@@ -5800,7 +6502,7 @@ import type { RelayBroker } from "../relay/broker.ts";
 import { buildRelay } from "../relay/relayBuild.ts";
 import { ensureRelayDirs, relayPaths } from "../relay/relayPaths.ts";
 import { buildValidatorLaunch } from "../relay/validatorProfile.ts";
-import { prepareCodeMode } from "./codeMode.ts";
+import { LIVE_SURFACE_CHECK, liveRunner, prepareCodeMode } from "./codeMode.ts";
 import { CodexHost } from "./codexHost.ts";
 import { findCodex, PINNED_CODEX_VERSION, type CodexInstall } from "./codexInstall.ts";
 import { buildCodexLaunch } from "./codexSeatbelt.ts";
@@ -5836,7 +6538,8 @@ export async function createCompanionCodex(o: {
     tokenTtlMs: o.tokenTtlMs,
     maxProcesses: o.maxProcesses,
     makeLaunch: () => buildCodexLaunch({ install, paths: o.paths, home, sandboxed: true, relay }),
-    prepare: () => prepareCodeMode({ install, paths: o.paths }),
+    makeLoginLaunch: () => buildCodexLaunch({ install, paths: o.paths, home, sandboxed: true, relay, login: true }),
+    prepare: () => prepareCodeMode({ install, paths: o.paths, live: LIVE_SURFACE_CHECK ? liveRunner(install, o.paths, relay, home) : undefined }),
   });
   return {
     host,
@@ -5909,7 +6612,9 @@ test("the production host starts: the self-check passes with the unified_exec wa
     const s = await c.host.start();
     console.log(JSON.stringify({ state: s }));
     assert.equal(s.state, "ready");
-    assert.ok(s.state === "ready" && s.warnings.some((w) => w.startsWith("unified_exec")));
+    // Exactly the one known warning: the running binary's version is a check, not a warning (plan review I-11).
+    assert.equal(s.state === "ready" && s.warnings.length, 1);
+    assert.ok(s.state === "ready" && s.warnings[0]?.startsWith("unified_exec"));
   } finally {
     await c.close();
   }
@@ -6045,6 +6750,7 @@ process.stdin.on("data", (c: Buffer) => {
 // Run: cd companiond && COMPANION_ITEST=1 COMPANION_ITEST_LIVE=1 node --test --test-concurrency=1 itest/live.itest.ts
 import { after, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6157,6 +6863,10 @@ test("the tool surface as the model reports it (recorded)", { skip }, async (t) 
     const r = await ask(c.host, events, id, "List the exact names of every tool or function you can call, including those available inside functions.exec, one per line. Do not call any of them.");
     console.log(JSON.stringify({ toolList: r.reply, items: r.items, status: r.status }));
     assert.equal(r.status, "completed");
+    // Model-reported, so it only corroborates the offline check; the rest of the list is read by hand (plan review M-4).
+    for (const name of ["apply_patch", "spawn_agent", "create_goal", "request_user_input", "exec_command", "clock"]) {
+      assert.doesNotMatch(r.reply, new RegExp(`\\b${name}\\b`), name);
+    }
   } finally {
     await c.close();
   }
@@ -6209,6 +6919,9 @@ test("resume after a real turn rebinds the thread to another root", { skip }, as
   }
 });
 
+// Reads the companion's own App Support files only to match their bytes against the relay tokens this test issued;
+// no byte is kept or printed, and files whose names say auth, credential, keyring or keychain are never opened.
+// Codex's unified logging and RUST_LOG output are NOT scanned (recorded as not measured; plan review M-5).
 test("relay tokens never reach the disk (review I4)", { skip }, async (t) => {
   const tokens: string[] = [];
   const live = await liveHost(t, (b) => ({
@@ -6218,6 +6931,8 @@ test("relay tokens never reach the disk (review I4)", { skip }, async (t) => {
       return g;
     },
     on: (l) => b.on(l),
+    healthy: () => b.healthy(),
+    restart: () => b.restart(),
   }));
   if (!live) return;
   const { c, events } = live;
@@ -6265,15 +6980,38 @@ test("exec-cell gate, final run (production profile and config)", { skip }, asyn
   }
 });
 
+// Ruling I-9: sign-in under the sign-in profile end to end. It needs the OWNER at the browser and signs the account
+// in again, so no implementer or controller runs it: only the owner, with COMPANION_ITEST_LOGIN=1.
+test("sign-in through CodexHost's sign-in process (owner only)", { skip: skip || (process.env.COMPANION_ITEST_LOGIN !== "1" && "owner only: COMPANION_ITEST_LOGIN=1") }, async () => {
+  const c = await createCompanionCodex({ paths: ownPaths() });
+  const events: HostEvent[] = [];
+  c.host.on((e) => events.push(e));
+  try {
+    assert.equal((await c.host.start()).state, "ready");
+    const { authUrl } = await c.host.login();
+    execFileSync("/usr/bin/open", [authUrl]); // never printed
+    for (let i = 0; i < 1200 && !events.some((e) => e.type === "auth"); i++) await sleep(250);
+    const auth = events.find((e) => e.type === "auth");
+    console.log(JSON.stringify({ auth: auth?.type === "auth" ? auth.auth.state : "no auth event" }));
+    assert.equal(auth?.type === "auth" && auth.auth.state, "signed_in");
+  } finally {
+    await c.close();
+  }
+});
+
 test("server requests, item types and notification methods in a tool turn (recorded)", { skip }, async (t) => {
   const paths = ownPaths();
   const s = await startSession({ paths, root: makeRepo({ "pelican-ledger.txt": "ledger\n" }) });
   try {
     if (!(await isSignedIn(s.a))) return t.skip("the companion's CODEX_HOME is not signed in");
+    const n0 = s.a.notifications.length;
     const r = await s.turn(LIST);
     const requests = s.a.requests.map((q) => [q.method, ...Object.keys(q.params?._meta ?? {})]);
-    console.log(JSON.stringify({ requests, decisions: s.decisions, itemTypes: r.itemTypes, methods: r.methods, mcpCalls: r.mcpCalls, threadModel: s.threadModel }, null, 2));
+    // Ruling I-10 (Task 4 carry-over, second half): items arrive only through item/started and item/completed.
+    const itemBearing = [...new Set(s.a.notifications.slice(n0).filter((n) => n.params && typeof n.params === "object" && "item" in n.params).map((n) => n.method))];
+    console.log(JSON.stringify({ requests, decisions: s.decisions, itemTypes: r.itemTypes, methods: r.methods, itemBearing, mcpCalls: r.mcpCalls, threadModel: s.threadModel }, null, 2));
     assert.ok(r.mcpCalls.includes("list_dir:completed"));
+    assert.deepEqual(itemBearing.filter((m) => m !== "item/started" && m !== "item/completed"), []);
   } finally {
     await s.close();
   }
@@ -6281,7 +7019,8 @@ test("server requests, item types and notification methods in a tool turn (recor
 ```
 
 Run: `cd companiond && COMPANION_ITEST=1 COMPANION_ITEST_LIVE=1 node --test --test-concurrency=1 itest/live.itest.ts`
-Expected: 8 pass (≈ 15–25 min). Act on the output:
+Expected: 8 pass, 1 skipped (the owner-only sign-in test) (≈ 15–25 min). Act on the output:
+- the item-bearing notification check (ruling I-10): any method other than `item/started`/`item/completed` carrying an `item` is a **STOP** (the guard would miss it).
 - `filesWithAToken` > 0 → **STOP and report** (review I4): tokens reach the disk; the controller decides between ephemeral threads and another fix. Never print the file or the token.
 - interrupt test: `broker` must show no `closed:violation` (the cancel was dropped, ruling M6). If `second` fails because Codex kept waiting on the cancelled id, record it and report.
 - `requests`: record whether any `mcpServer/elicitation/request` appeared and its `_meta` key names. None is the expected, already-measured outcome (read-only tools). If one appears and its tool-name key is not in `TOOL_NAME_KEYS`, update `TOOL_NAME_KEYS` (Task 3), re-run `npm test`, and record it. If `account/chatgptAuthTokens/refresh` or `attestation/generate` appears and the turn still completed, record it; a failed turn after one is a **STOP**.
@@ -6296,7 +7035,7 @@ Expected: 8 pass (≈ 15–25 min). Act on the output:
 Run: `cd companiond && COMPANION_ITEST=1 COMPANION_ITEST_LIVE=1 node --test --test-concurrency=1 itest/codeMode.itest.ts`
 Expected: 4 pass, the same values as recorded in Task 8 (profile probe, gate). Any difference is recorded; a newly open check is a STOP.
 
-- [ ] **Step 4: Record the outcome.** Only if Steps 1–3 all passed (the self-check suite, every live test, the exec-cell gate twice, no token on disk, no STOP condition): set in `companiond/src/codex/codexSeatbelt.ts`
+- [ ] **Step 4: Record the outcome.** Only if Steps 1–3 all passed (the self-check suite, every live test, the exec-cell gate twice, no token on disk, no STOP condition): set in `companiond/src/codex/codexSeatbelt.ts`. A live test that skipped (for example "not signed in") counts as **not passed** for this flip; only the owner-only sign-in test may be skipped (plan review M-12).
 
 ```ts
 /** Set in Task 10 on measured success of the end-to-end suites and the exec-cell gate (findings: "M4 Codex measurements"). */
@@ -6321,10 +7060,10 @@ Date: <date>. macOS <version>, Codex 0.166.0. `COMPANION_ITEST=1 node --test --t
 - Tool surface as the model reports it: <reply, in full>
 - Interrupt mid-call (notifications/cancelled dropped): <JSON>
 - Resume after a turn rebinds to another root: <JSON>
-- Relay tokens on disk (review I4): <JSON>
+- Relay tokens on disk (review I4): <JSON>. Not measured: unified logging and `RUST_LOG` output.
 - Exec-cell gate, final run: <JSON>
 - Server requests, `_meta` key names, item types, notification methods: <JSON>
-- Loopback 443 (review I5): <value from Task 8 and Step 3; "deny holds" or "recorded: reachable">
+- Local addresses on 443 (review I5, plan review I-7): <values from Task 8 and Step 3 — loopback, ::1, 0.0.0.0, own IP>
 - Codex's own command sandbox (its sandbox-exec nested in the Codex profile, spec §16): exercised <yes, how / no — no commandExecution item started>.
 - `CODEX_SEATBELT_MEASURED`: <"ok" | "stopped" and why>.
 ```
@@ -6393,8 +7132,11 @@ interface CompanionCodex { host: CodexHost; acceptor: RelayAcceptor; close(): Pr
 
 // src/codex/codexHost.ts — exactly as in Task 9's Interfaces block:
 // HostState, AuthState, RootBinding, ItemSummary, HostEvent, SecurityCheckError, HostNotReadyError, TurnBusyError,
-// CodexHostOptions, class CodexHost { on, state, start, stop, auth, login, openThread, startTurn, interrupt, activeTurn }
-// Changed from the first M4a plan: makeLaunch takes no arguments; prepare, broker and relayBinary are required;
+// CodexHostOptions, class CodexHost { on, state, start, clearSecurityStop, stop, auth, login, openThread, closeThread,
+//   startTurn, interrupt, activeTurn }
+// M4b must: call closeThread at thread end; show "Security check failed" and call clearSecurityStop only after the owner
+// acknowledges it; never call mcpServerStatus/list for a thread without serverName (it spends the relay token).
+// Changed from the first M4a plan: makeLaunch takes no arguments; makeLoginLaunch, prepare, broker and relayBinary are required;
 // BindingMode / BINDING_MODE / threadConfigOverride / processConfigArgs no longer exist (one process per root, the
 // binding is the per-thread relay override). M4b passes RootBinding { root, launch: buildReadonlyLaunch(...) } as before.
 ```
