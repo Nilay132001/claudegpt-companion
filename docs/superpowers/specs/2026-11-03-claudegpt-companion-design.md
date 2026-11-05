@@ -498,9 +498,10 @@ No single layer is trusted, including the Codex sandbox (R1).
      never as a path or host); the hosts (`<site>.atlassian.net/_edge/tenant_info` and
      `api.atlassian.com/ex/jira/<cloudId>/rest/api/3/…`) and every path template are fixed in code; the
      token is scoped to `read:jira-work` and `read:jira-user`; the validator re-serialises every line in
-     both directions. The profile denies file reads beyond its runtime, every write, exec beyond Node,
-     loopback and the keychain and trust services (measured: HTTPS `status 200`; port 80, loopback 443,
-     a `$HOME` read and a `/tmp` write all `EPERM`, `itest/jiraProfile.itest.ts`).
+     both directions. The profile denies file reads beyond its runtime, every write, exec beyond Node and
+     loopback (measured: HTTPS `status 200`; port 80, loopback 443, a `$HOME` read and a `/tmp` write all
+     `EPERM`, `itest/jiraProfile.itest.ts`). It denies the keychain and trust services by construction
+     (`(deny default)` and a mach list with no keychain or trust services); that is not measured.
      *Controller ruling (a):* Node runs with `--use-bundled-ca`, because Node 26 defaults to the system CA
      store, which needs the trust services the profile denies. So a Jira site behind a TLS-intercepting
      proxy with a private root CA does not connect; the app shows "Jira could not be reached".
@@ -763,10 +764,13 @@ configured anywhere.
 and Codex reaches it through the existing relay, acceptor and a validator of its own, exactly like
 `companion-readonly` (§2). A thread's `companion-jira` entry in `config.toml` is inert (like the jail's);
 the per-thread override points it at the relay with a one-time token only while the owner has Jira set up.
-`setJira(null)` (Remove, or a new credential) revokes every thread's Jira grant at once, including a
-running turn's; the thread rebinds (or not) at its next turn. This fails closed (controller ruling (b)):
-if Codex ever re-execs the relay with the spent token, the acceptor refuses it and the host latches a
-security stop.
+`setJira(null)` (Remove, or a new credential) revokes every loaded thread's Jira grant at once, including a
+running turn's; the thread rebinds (or not) at its next turn. A thread still opening keeps its new Jira
+grant until `thread/start` (or `thread/resume`) returns, because Codex's relay connects during that call
+and a token revoked under it would reach the acceptor as unknown (a false security stop); the open then
+revokes that grant and marks the thread to rebind, before any model turn can run (final review I-1). This
+fails closed (controller ruling (b)): if Codex ever re-execs the relay with the spent token, the acceptor
+refuses it and the host latches a security stop. An unknown token is always a security stop.
 
 **Token.** An Atlassian **scoped** API token with `read:jira-work` and `read:jira-user` only, created by
 the owner, used with the account email as HTTP Basic auth. The "No API keys" non-goal means OpenAI API
@@ -818,9 +822,16 @@ SYNTHETIC FIXTURE `companion-jira` behind the real relay, acceptor and Jira vali
 - (d) with the Jira grant revoked under a loaded thread (what `setJira(null)` does), the binding closed
   (`revoked`); a later `mcpServerStatus/list` by `serverName` for that thread still answered with the three
   tools from Codex's cache and did **not** re-exec the relay (no refused connection, so no security stop).
-So the self-check proves no write tool is visible. Not measured here (needs a ChatGPT sign-in): a real
-model turn calling a Jira tool, and a tool call on a thread whose Jira grant was revoked mid-turn; both
-are in the owner checklist (`docs/manual/m6-checklist.md`) or left as recorded gaps.
+So the self-check proves no write tool is visible.
+
+**Not measured (owner checklist, `docs/manual/m6-checklist.md`, or recorded gaps):**
+- the real `src/jira/main.ts` behind the real acceptor with a live model turn (needs a ChatGPT sign-in
+  and a Jira site; the itest uses a synthetic server);
+- a tool call on a thread whose Jira grant was revoked mid-turn (needs a sign-in);
+- whether Atlassian accepts a scoped token as HTTP Basic auth on `api.atlassian.com/ex/jira/<cloudId>`
+  (no test contacts Atlassian);
+- the keychain and trust-service denial of the `companion-jira` profile, which holds by construction
+  (§7.1.9 (xii)).
 
 ## 12. Testing strategy
 
