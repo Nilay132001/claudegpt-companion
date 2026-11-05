@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appPaths, ensureAppDirs } from "../../../companiond/src/app/appPaths.ts";
-import { findCodex } from "../../../companiond/src/codex/codexInstall.ts";
+import { findCodex, readVendorDir } from "../../../companiond/src/codex/codexInstall.ts";
 import { codexEnv, sbplString } from "../../../companiond/src/codex/codexSeatbelt.ts";
 import { buildCodexConfigToml, writeCodexConfig } from "../../../companiond/src/codex/config.ts";
 import { RuntimeGuard, type GuardAlert } from "../../../companiond/src/codex/guard.ts";
@@ -151,7 +151,8 @@ async function runTurn(h: Host, threadId: string, text: string, opts: { timeoutM
 
 async function main(): Promise<void> {
   if (process.platform !== "darwin") throw new Error("macOS only");
-  const install = findCodex();
+  // STEP1_CODEX_VENDOR=<vendor dir>: LABELLED PROBE of another Codex build (same readVendorDir checks as the pin).
+  const install = process.env.STEP1_CODEX_VENDOR ? readVendorDir(process.env.STEP1_CODEX_VENDOR) : findCodex();
   const paths = ensureAppDirs(appPaths(os.homedir()));
   tmpRoot = tempDir("cgc-step1-");
   const relayDir = path.join(tmpRoot, "r");
