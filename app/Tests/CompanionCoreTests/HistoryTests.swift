@@ -61,6 +61,39 @@ import Testing
         await m.recordLoad?.value
         #expect(m.contextText(for: "u1") == "CTX-u1")
         #expect(m.records["u1"]?.items.count == 1)
+        #expect(d.calls.contains("history.turns:session:s1:limit:1"), "\(d.calls)")
+    }
+
+    @Test func turnCompletedMergesOnlyTheNewestRecord() async {
+        let d = FakeDaemon()
+        d.turnsStore = [turn("u0", q: "before", a: "old")]
+        let m = await started(d)
+        m.records["u0"] = turn("u0", q: "kept as is")
+        await m.ask("why")
+        d.turnsStore = [turn("u0", q: "changed"), turn("u1", q: "why", a: "because")]
+        m.handle(.turnCompleted(TurnCompleted(sessionId: "s1", threadId: "t1", turnId: "u1", status: "completed", error: nil)))
+        await m.recordLoad?.value
+        #expect(m.records["u1"]?.contextBlock == "CTX-u1")
+        #expect(m.records["u0"]?.question == "kept as is") // older records are not re-read
+    }
+
+    @Test func failedNewChatRetriesTheCancelledRestore() async {
+        let d = FakeDaemon()
+        d.turnsStore = [turn("u1")]
+        d.turnsGate = true
+        d.newChatError = DaemonError(code: DaemonErrorCode.turnBusy, message: "busy")
+        let m = AppModel(connector: { d.connection })
+        let start = Task { await m.start() }
+        for _ in 0..<200 where d.gateResume == nil { await Task.yield() }
+        #expect(d.gateResume != nil)
+        await m.newChat() // cancels the suspended restore, then fails
+        d.gateResume?.resume()
+        await start.value
+        await m.chatLoad?.value
+        #expect(m.errorMessage == "GPT is still answering. Wait or press Stop.")
+        #expect(m.currentMessages.map(\.text) == ["SYNTHETIC FIXTURE q", "SYNTHETIC FIXTURE a"])
+        #expect(m.records["u1"] != nil)
+        #expect(d.calls.filter { $0 == "history.turns:session:s1" }.count == 2)
     }
 
     @Test func newChatCallsTheDaemonAndEmptiesTheChat() async {
@@ -104,8 +137,21 @@ import Testing
         #expect(m.pastChat?.messages.map(\.text) == ["old q", "old a"])
         #expect(m.currentMessages.map(\.text) == ["SYNTHETIC FIXTURE q", "SYNTHETIC FIXTURE a"])
         #expect(!d.calls.contains { $0.hasPrefix("chat.send") })
+        #expect(m.records["o1"] != nil)
         m.closePastChat()
         #expect(m.pastChat == nil)
+        #expect(m.records["o1"] == nil)
+        #expect(m.records["u1"] != nil)
+    }
+
+    @Test func closingAPastChatKeepsRecordsTheCurrentChatShows() async {
+        let d = FakeDaemon()
+        d.turnsStore = [turn("u1", thread: "t1")]
+        let m = await started(d)
+        await m.loadHistory()
+        await m.openPastChat(m.history!.chats[0]) // the current thread, opened from History
+        m.closePastChat()
+        #expect(m.records["u1"]?.contextBlock == "CTX-u1")
     }
 
     @Test func askClosesAPastChat() async {

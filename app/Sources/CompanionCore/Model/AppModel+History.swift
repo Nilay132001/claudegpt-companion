@@ -30,12 +30,12 @@ extension AppModel {
         }
     }
 
-    /// After a reply ends: the daemon now holds its context block and items.
+    /// After a reply ends: the daemon now holds its context block and items. Only the newest turn is read and merged.
     func refreshRecords(sessionId sid: String) {
         guard let api else { return }
         let gen = generation, token = chatTokens[sid, default: 0]
         recordLoad = Task {
-            guard let turns = try? await api.historyTurns(sessionId: sid).turns,
+            guard let turns = try? await api.historyTurns(sessionId: sid, limit: 1).turns,
                   self.generation == gen, self.chatTokens[sid, default: 0] == token else { return }
             for t in turns { self.records[t.turnId] = t }
         }
@@ -55,6 +55,9 @@ extension AppModel {
             threadNotices[sid] = nil
         } catch {
             errorMessage = Self.describe(error)
+            // The restore cancelled above did not finish: read the current chat again.
+            loadedChats.remove(sid)
+            chatLoad = Task { await self.loadCurrentChat(sessionId: sid) }
         }
     }
 
@@ -92,6 +95,11 @@ extension AppModel {
 
     public func closePastChat() {
         pastToken += 1
+        if let thread = pastChat?.summary.threadId {
+            // Its records were added by openPastChat; keep those the current chats still show.
+            let shown = Set(conversations.values.flatMap { $0.messages.compactMap(\.turnId) })
+            records = records.filter { $0.value.threadId != thread || shown.contains($0.key) }
+        }
         pastChat = nil
     }
 

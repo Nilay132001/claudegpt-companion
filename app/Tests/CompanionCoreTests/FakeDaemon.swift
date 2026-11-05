@@ -146,17 +146,17 @@ import Foundation
         for t in turnsStore { current[t.sessionId] = t.threadId }
         return HistoryList(chats: chats, currentThreads: current, enabled: historyEnabled)
     }
-    func historyTurns(sessionId: String) async throws -> HistoryTurns {
-        calls.append("history.turns:session:\(sessionId)")
+    func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns {
+        calls.append("history.turns:session:\(sessionId)" + (limit.map { ":limit:\($0)" } ?? ""))
         if turnsGate {
             turnsGate = false
             await withCheckedContinuation { gateResume = $0 }
             let mine = turnsStore.filter { $0.sessionId == sessionId }
-            return HistoryTurns(threadId: mine.last?.threadId, turns: mine)
+            return HistoryTurns(threadId: mine.last?.threadId, turns: Array(mine.suffix(limit ?? 200)))
         }
         let mine = turnsStore.filter { $0.sessionId == sessionId }
         guard let thread = mine.last?.threadId else { return HistoryTurns(threadId: nil, turns: []) }
-        return HistoryTurns(threadId: thread, turns: mine.filter { $0.threadId == thread })
+        return HistoryTurns(threadId: thread, turns: Array(mine.filter { $0.threadId == thread }.suffix(limit ?? 200)))
     }
     func historyTurns(threadId: String) async throws -> HistoryTurns {
         calls.append("history.turns:thread:\(threadId)")

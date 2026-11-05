@@ -109,7 +109,7 @@ struct PrivacySettings: View {
             Button("Clear All History", role: .destructive) { Task { await model.clearHistory(threadId: nil) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every stored chat, answer and sent context is removed from this Mac. This can't be undone.")
+            Text("Removes the companion's saved history. Codex keeps its own thread records. This can't be undone.")
         }
     }
     private var modeHelp: String {

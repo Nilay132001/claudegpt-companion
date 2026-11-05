@@ -25,7 +25,8 @@ public protocol DaemonAPI: Sendable {
     func chatInterrupt(sessionId: String) async throws
     func chatSent(sessionId: String) async throws -> [SentRecord]
     func historyList() async throws -> HistoryList
-    func historyTurns(sessionId: String) async throws -> HistoryTurns
+    /// The session's current chat; `limit` (1–200) keeps only the newest turns, nil means the daemon's default (200).
+    func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns
     func historyTurns(threadId: String) async throws -> HistoryTurns
     /// nil threadId clears all history.
     func historyClear(threadId: String?) async throws
@@ -67,3 +68,9 @@ public struct Connection: Sendable {
 }
 
 public typealias Connector = @Sendable () async throws -> Connection
+
+public extension DaemonAPI {
+    func historyTurns(sessionId: String) async throws -> HistoryTurns {
+        try await historyTurns(sessionId: sessionId, limit: nil)
+    }
+}

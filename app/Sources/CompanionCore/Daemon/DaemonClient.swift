@@ -139,8 +139,10 @@ extension DaemonClient: DaemonAPI {
         try await call("chat.sent", .object(["sessionId": .string(sessionId)]), as: [SentRecord].self)
     }
     public func historyList() async throws -> HistoryList { try await call("history.list", as: HistoryList.self) }
-    public func historyTurns(sessionId: String) async throws -> HistoryTurns {
-        try await call("history.turns", .object(["sessionId": .string(sessionId)]), as: HistoryTurns.self)
+    public func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns {
+        var params: [String: JSONValue] = ["sessionId": .string(sessionId)]
+        if let limit { params["limit"] = .number(Double(limit)) }
+        return try await call("history.turns", .object(params), as: HistoryTurns.self)
     }
     public func historyTurns(threadId: String) async throws -> HistoryTurns {
         try await call("history.turns", .object(["threadId": .string(threadId)]), as: HistoryTurns.self)

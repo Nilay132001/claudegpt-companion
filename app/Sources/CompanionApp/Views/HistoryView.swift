@@ -47,13 +47,13 @@ struct HistoryView: View {
             Button("Delete Chat", role: .destructive) { Task { await model.clearHistory(threadId: c.threadId) } }
             Button("Cancel", role: .cancel) {}
         } message: { _ in
-            Text("Its questions, answers and the context that was sent are removed from this Mac.")
+            Text("Removes this chat from the companion's saved history. Codex keeps its own thread records.")
         }
         .confirmationDialog("Clear all chat history?", isPresented: $confirmClearAll) {
             Button("Clear All History", role: .destructive) { Task { await model.clearHistory(threadId: nil) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every stored chat, answer and sent context is removed from this Mac. This can't be undone.")
+            Text("Removes the companion's saved history. Codex keeps its own thread records. This can't be undone.")
         }
     }
 
