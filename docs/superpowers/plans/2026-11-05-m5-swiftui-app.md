@@ -8,9 +8,9 @@
 
 **Tech Stack:** Swift 6.2 (Swift 6 language mode), SwiftUI + AppKit on macOS 26, Swift Testing (`swift test`), `Speech` (`SpeechAnalyzer` + `SpeechTranscriber`), `AVFoundation` (`AVSpeechSynthesizer`, `AVAudioEngine`), `ApplicationServices` (AX), Carbon `RegisterEventHotKey`. `companiond` (Node ≥ 24, M4b) as the child process.
 
-**Spec:** `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` v3.3 — §1 (acceptance test), §2, §3 (SwiftUI shell row), §4, §5, §6.2, §6.3, §7.4–§7.8, §8, §9, §12.3, §12.4, §14 (M5 row), §15 D2. Depends on **M4b** (`docs/superpowers/plans/2026-11-04-m4b-context-daemon.md`, "Interfaces produced for M5", Task 8's bundle). Read both before any task.
+**Spec:** `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` v3.4 — §1 (acceptance test), §2, §3 (SwiftUI shell row), §4, §5, §6.2, §6.3, §7.4–§7.8, §8, §9, §12.3, §12.4, §14 (M5 row), §15 D2. Depends on **M4b** (`docs/superpowers/plans/2026-11-04-m4b-context-daemon.md`, "Interfaces produced for M5", Task 8's bundle). Read both before any task.
 
-**Review status:** reviewed twice (2026-11-05) against the spec, the M4b plan and the M4b part 2 branch; all Critical and Important findings and the minors are applied. Not yet implemented.
+**Review status:** reviewed twice (2026-11-05) against the spec, the M4b plan and the M4b part 2 branch; all Critical and Important findings and the minors are applied. Reconciled with merged M4b (PR #10) and spec v3.4, with a scoped review of that change. Not yet implemented.
 
 ## Global Constraints
 
@@ -28,15 +28,15 @@
 - **File edits go through the editor tools,** never Bash heredocs, redirects or `tee`.
 - **If the aiptf-guard PreToolUse hook blocks a command, STOP** and report the exact command and message. Never retry it in another form.
 - **Commit trailer**, copied literally: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- **Branch** `feat/m5-swiftui-app`, cut from `main`. Tasks 1–12 build and test against fakes and can start before M4b part 2 merges. Task 4's daemon integration test enables itself once `companiond/src/daemon/main.ts` exists; Tasks 13–14 need M4b part 2 merged and the branch updated from `main`.
+- **Branch** `feat/m5-swiftui-app`, cut from `main`. M4b part 2 is on `main` (PR #10), so the daemon integration test (Task 4) runs from the start; Tasks 1–12 otherwise build and test against fakes. Task 13 re-checks the contract against whatever `main` holds then and runs the app against the real daemon.
 
-## Daemon API assumptions (reconcile when M4b part 2 merges)
+## Daemon API (reconciled with merged M4b)
 
-Copied from M4b's "Interfaces produced for M5" **as revised on `feat/m4b-part2-daemon`** (commits up to 2f59b73, 2026-11-05) and that branch's `protocol.ts` / `handlers.ts`; the revision adds `hostBusy`, `prepareStale`, `confirmRequired`, `host.acknowledgeSecurityStop`, `chat.threadReplaced`, `Prepared.sessionTitle`, the `confirmed` flag on `chat.send` and the `"abandoned"` turn status. The app relies on exactly these names and shapes and nothing else. When M4b part 2 merges, diff the **merged code** (`companiond/src/daemon/protocol.ts`, `handlers.ts`, `store/store.ts`), not the plan text, against this section and fix `DaemonModels.swift` / `DaemonClient.swift` (Tasks 2–3) where they differ (Task 13).
+**Reconciled 2026-11-05 with `main` after M4b part 2 merged (PR #10, a1947ea):** checked against the merged `companiond/src/daemon/protocol.ts` (`METHODS`, `EVENTS`, `ErrorCodes`, `SECURITY_FAILED_PREFIX`), `handlers.ts` (`buildHandlers`, `wirePrepared`, `wireEvents`, `toDaemonError`), `main.ts`, `chat/chatService.ts` (`Prepared`), `store/store.ts` (`UI_KEY`), the merged M4b plan's "Interfaces produced for M5" and spec v3.4 §7.5 / §8 "What the daemon gives the UI". Every name, param, result, notification and error code below matches the merged code. The app relies on exactly these and nothing else. Task 13 re-runs the same diff before implementation starts, in case `main` moved again.
 
 **Transport.** The app spawns `node --disable-warning=ExperimentalWarning <companiond>/src/daemon/main.ts`. JSON-RPC 2.0, one JSON object per line (UTF-8, `\n`); requests on stdin, responses and notifications on stdout; stderr is diagnostics only. The app sends no notifications. First call `daemon.hello`. Closing stdin shuts the daemon down. `result` may be `null` (`sessions.worktree`).
 
-**Errors** `{ code, message, data? }`, `message` user-presentable: `-32700` parse, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal; `1001` securityCheckFailed, `1002` hostNotReady, `1003` repoRefused, `1004` prepareExpired, `1005` turnBusy, `1006` approvalRefused (`data: { reason: "not_absolute" | "missing" | "home_or_root" | "repo_refused" | "not_toplevel" }`), `1007` unknownSession, `1008` emptyQuestion, `1009` hostBusy (capacity: show the message, try again later; the host stays ready), `1010` prepareStale (sharing mode or an approval changed since `chat.prepare`: prepare again and re-confirm), `1011` confirmRequired (an Ask-mode send without `confirmed: true`). Any other code: show `message`.
+**Errors** `{ code, message, data? }`, `message` user-presentable: `-32700` parse, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal; `1001` securityCheckFailed, `1002` hostNotReady, `1003` repoRefused, `1004` prepareExpired, `1005` turnBusy, `1006` approvalRefused (`data: { reason: "not_absolute" | "missing" | "home_or_root" | "repo_refused" | "not_toplevel" }`), `1007` unknownSession, `1008` emptyQuestion, `1009` hostBusy (capacity: show the message, try again later; the host stays ready), `1010` prepareStale (the sharing mode changed since `chat.prepare`, or an approval was revoked while the send was in progress: prepare again and re-confirm; an added approval never makes a prepare stale), `1011` confirmRequired (an Ask-mode send, or an unknown prepare while the mode is Ask, without `confirmed: true`; the prepare stays usable). Any other code: show `message`. `host.restart` answers `1001` while the host is in a security stop.
 
 **Retry rule (M4b).** A `prepareId` is used up only when its turn starts. After `1009`, `1005` or `1002` the same `prepareId` can be sent again until it expires; after `1004` or `1010` call `chat.prepare` again; after `1011` prepare again and show the sheet. **Security stop:** `HostState {state:"failed", detail}` with `detail` starting `"Security check failed"` stays until the owner presses Acknowledge, which alone sends `host.acknowledgeSecurityStop`; `host.restart` does not clear it.
 
@@ -46,7 +46,7 @@ Copied from M4b's "Interfaces produced for M5" **as revised on `feat/m4b-part2-d
 |---|---|---|
 | `daemon.hello` | `{ protocolVersion: 1 }` | `{ protocolVersion: 1, daemonVersion: string }` |
 | `daemon.shutdown` | `{}` | `{}` |
-| `host.status` / `host.restart` | `{}` | `HostState` |
+| `host.status` / `host.restart` | `{}` | `HostState` (`host.restart`: `1001` during a security stop) |
 | `host.acknowledgeSecurityStop` | `{}` | `HostState` (invalidRequest if there is no security stop) |
 | `auth.status` | `{}` | `AuthState` |
 | `auth.login` | `{}` | `{ authUrl: string }` (https) |
@@ -58,7 +58,7 @@ Copied from M4b's "Interfaces produced for M5" **as revised on `feat/m4b-part2-d
 | `privacy.get` | `{}` | `{ sharingMode, approvals: ApprovedRoot[], redactionNotice }` |
 | `privacy.setSharingMode` | `{ mode: "off" \| "ask" \| "automatic" }` | `{ sharingMode }` |
 | `privacy.approve` | `{ root, includeWorktrees: boolean }` | `ApprovedRoot` |
-| `privacy.revoke` | `{ root }` | `{ revoked: boolean, pendingClose: number }` (answers after bound threads closed; `pendingClose` not decoded) |
+| `privacy.revoke` | `{ root }` | `{ revoked: boolean, pendingClose: number }` (answers after the threads on roots no longer approved are closed; `pendingClose` = those still finishing a reply; if any is still open after 30 s and the host is ready, the daemon restarts Codex. Spec §8: the app shows it) |
 | `chat.prepare` | `{ sessionId, question }` (question ≤ 20 000 UTF-16 units) | `Prepared` |
 | `chat.send` | `{ prepareId, removeItemIds: string[], confirmed: boolean }` | `{ threadId, turnId }` |
 | `chat.interrupt` | `{ sessionId }` | `{}` |
@@ -81,13 +81,14 @@ Settings keys must match the Store's `^ui\.[a-z0-9_.]{1,64}$` (lowercase only; `
 - `ApprovedRoot`: `root, commonDir, includeWorktrees, approvedAt`.
 - `RepoLine`: `state: "bound"|"unavailable"|"none", root?, branch?, detail?`. `PreviewItem`: `id, kind, label, text, redactions`. `ContextPreview` (wire preview): `items, notes, omitted, bytes`. `Prepared`: `prepareId, sessionId, mode, preview?, needsConfirm, repo, repoNote?, sessionTitle?` (`needsConfirm` is true for every Ask prepare; `sessionTitle` and `repoNote` are null in Off; the preview sheet shows `sessionTitle` because it is sent). `SentRecord`: `sessionId, threadId, turnId, contextBlock, question, sentAt`.
 
-**Needed from M4b (or to confirm when part 2 merges)** — none blocks Tasks 1–12:
-- **N1 — abandoned turns: settled by the revision.** They arrive as `chat.turnCompleted` with `status: "abandoned"` and a user-presentable `error`; the reducer shows it as a failed reply. The app no longer guesses from `host.changed` (old ruling 15 is narrowed: only a daemon disconnect stops replies app-side).
-- **N2 — `HostBusyError`: settled** (`1009`). Like `1005` and `1002`, the reply bubble offers "Send again" with the same `prepareId`.
-- **N3 — prepare lifetime.** 10 min per the interface; the app handles `1004` and `1010` by preparing again, whatever the lifetime.
-- **N3b — confirmation flag: settled** (`confirmed`, `1011`). The app sends `confirmed: true` only from the preview sheet's Send button, `false` otherwise; on `1011` it prepares again and shows the sheet.
-- **N4 — daemon inside the bundle.** M2's `discoverToolchain` takes `codeDir` from the daemon's own location, so in the bundle the jail reads `…/ClaudeGPT Companion.app/Contents/Resources/companiond`. The path has a space; `sbString` allows it. Task 14 measures a bound tool call from the bundle.
-- **N5 — chat history.** There is no method for a thread's past turns, so the chat shows only this run's turns (ruling 4). A later `chat.history` would fill it.
+**Reconciliation results (formerly "Needed from M4b").** Nothing is left as an assumption, and M5 needs no companiond change:
+- **N1 — abandoned turns: in merged code.** `wireEvents.reportAbandoned` sends `chat.turnCompleted` with `status: "abandoned"` and `error: "Codex restarted before this reply finished. Ask again."` after `host.changed`, `auth.changed` and process alerts; the reducer shows it as a failed reply. The app does not guess from `host.changed` (ruling 15).
+- **N2 — `HostBusyError`: in merged code** (`toDaemonError` → `1009`). Like `1005` and `1002`, the reply bubble offers "Send again" with the same `prepareId`.
+- **N3 — prepare lifetime: 10 min** (merged plan text); the app handles `1004` and `1010` by preparing again, whatever the lifetime.
+- **N3b — confirmation flag: in merged code** (`chat.send` reads `confirmed` with default `false`; `1011` when the prepare needs it, or when the daemon does not know the prepare and the mode is Ask). The app sends `confirmed: true` only from the preview sheet's Send button. On `1011` it prepares again and shows the sheet; spec v3.4 allows confirming the same prepare too, and re-preparing is the simpler of the two allowed paths.
+- **N4 — daemon inside the bundle: not an API item.** `discoverToolchain` takes `codeDir` from the daemon's own location (`…/ClaudeGPT Companion.app/Contents/Resources/companiond`, a path with a space; `sbString` allows it). Task 13 Step 4 measures a bound tool call from the bundle.
+- **N5 — chat history: not needed by M5.** There is no method for a thread's past turns and M5 does not need one: the chat shows this run's turns (ruling 4), and the spec (§7.5, M4b) says earlier turns stay in the Codex thread. A history method is a later milestone's choice.
+- **N6 — revoke `pendingClose`: added to the app in this reconciliation.** Spec v3.4 §8 says "Revoke shows `pendingClose` threads still finishing". Tasks 2, 3, 7 and 11 now decode it and show it in Settings › Privacy.
 
 ## Rulings made while planning (each with what it costs if wrong)
 
@@ -469,7 +470,7 @@ git commit -m "feat(app): add the JSON-RPC codec and source rules" -m "Co-Author
 
 **Interfaces:**
 - Consumes: Task 1 (`JSONValue`, `RPCCodec.value`).
-- Produces (all `Sendable, Equatable`, decodable from the shapes in "Daemon API assumptions"): `enum DaemonErrorCode` (static `Int`s), `struct DaemonError: Error { code; message; data; var reason: String?; static let stopped }`, `HelloResult`, `enum HostState { stopped, starting, ready(warnings:), failed(detail:); var isReady }`, `enum AuthState { signedIn(planType:), signedOut, unsupported(mode:) }`, `enum SharingMode: String, CaseIterable { off, ask, automatic; var title }`, `enum SessionStatus: String { busy, idle, recent, inactive }`, `SessionSummary: Identifiable`, `Selection`, `SessionsSnapshot`, `PickerGroups`, `SyncStats`, `SyncStatus`, `enum WorktreeResolution { resolved(root:branch:isLinkedWorktree:), unavailable(reason:detail:root:candidate:) }`, `RepoChange`, `ApprovedRoot`, `PrivacyState`, `RepoLine`, `PreviewItem: Identifiable`, `ContextPreview`, `Prepared`, `SendResult`, `SentRecord`, `ItemSummary`, `ChatDelta`, `ChatItemEvent`, `TurnCompleted`, `ThreadReplaced`, `SecurityAlert: Identifiable`, `TranscriptInfo`, `WorktreeEvent`, `enum DaemonEvent { hostChanged, authChanged, sessionsChanged, sessionTranscript, sessionWorktree, syncError(String), chatDelta, chatItem, turnCompleted, threadReplaced, securityAlert, disconnected, unknown(String); static func decode(method:params:) -> DaemonEvent }`; `let daemonProtocolVersion = 1`; `DaemonErrorCode.retryable`, `.prepareAgain`, `.securityStopPrefix`; `Prepared.sessionTitle`.
+- Produces (all `Sendable, Equatable`, decodable from the shapes in "Daemon API (reconciled with merged M4b)"): `enum DaemonErrorCode` (static `Int`s), `struct DaemonError: Error { code; message; data; var reason: String?; static let stopped }`, `HelloResult`, `enum HostState { stopped, starting, ready(warnings:), failed(detail:); var isReady }`, `enum AuthState { signedIn(planType:), signedOut, unsupported(mode:) }`, `enum SharingMode: String, CaseIterable { off, ask, automatic; var title }`, `enum SessionStatus: String { busy, idle, recent, inactive }`, `SessionSummary: Identifiable`, `Selection`, `SessionsSnapshot`, `PickerGroups`, `SyncStats`, `SyncStatus`, `enum WorktreeResolution { resolved(root:branch:isLinkedWorktree:), unavailable(reason:detail:root:candidate:) }`, `RepoChange`, `ApprovedRoot`, `PrivacyState`, `RepoLine`, `PreviewItem: Identifiable`, `ContextPreview`, `Prepared`, `SendResult`, `SentRecord`, `ItemSummary`, `ChatDelta`, `ChatItemEvent`, `TurnCompleted`, `ThreadReplaced`, `SecurityAlert: Identifiable`, `TranscriptInfo`, `WorktreeEvent`, `RevokeResult { revoked; pendingClose }`, `enum DaemonEvent { hostChanged, authChanged, sessionsChanged, sessionTranscript, sessionWorktree, syncError(String), chatDelta, chatItem, turnCompleted, threadReplaced, securityAlert, disconnected, unknown(String); static func decode(method:params:) -> DaemonEvent }`; `let daemonProtocolVersion = 1`; `DaemonErrorCode.retryable`, `.prepareAgain`, `.securityStopPrefix`; `Prepared.sessionTitle`.
 
 - [ ] **Step 1: Write the failing test** — `app/Tests/CompanionCoreTests/DaemonModelsTests.swift`:
 
@@ -535,6 +536,7 @@ import Testing
         let off = try RPCCodec.value(json(#"{"prepareId":"p2","sessionId":"s1","mode":"off","needsConfirm":false,"repoNote":null,"sessionTitle":null,"repo":{"state":"none","root":null,"branch":null,"detail":null},"preview":null}"#), as: Prepared.self)
         #expect(off.preview == nil)
         #expect(off.sessionTitle == nil)
+        #expect(try RPCCodec.value(json(#"{"revoked":true,"pendingClose":2}"#), as: RevokeResult.self) == RevokeResult(revoked: true, pendingClose: 2))
         let sent = try RPCCodec.value(json(#"[{"sessionId":"s1","threadId":"t1","turnId":"u1","contextBlock":"<untrusted_data>x</untrusted_data>","question":"q","sentAt":5}]"#), as: [SentRecord].self)
         #expect(sent.first?.turnId == "u1")
     }
@@ -580,7 +582,7 @@ Expected: build FAIL — `cannot find 'HostState' in scope`.
 ```swift
 import Foundation
 
-// Codable mirrors of the M4b daemon API ("Daemon API assumptions" in the M5 plan). Extra fields are ignored.
+// Codable mirrors of the M4b daemon API ("Daemon API" section of the M5 plan). Extra fields are ignored.
 
 public let daemonProtocolVersion = 1
 
@@ -778,6 +780,16 @@ public struct ApprovedRoot: Decodable, Sendable, Equatable, Identifiable {
     public let includeWorktrees: Bool
     public let approvedAt: Double
     public var id: String { root }
+}
+
+/// privacy.revoke's answer. pendingClose = threads on the revoked root still finishing a reply (spec §7.5, §8).
+public struct RevokeResult: Decodable, Sendable, Equatable {
+    public let revoked: Bool
+    public let pendingClose: Int
+    public init(revoked: Bool, pendingClose: Int) {
+        self.revoked = revoked
+        self.pendingClose = pendingClose
+    }
 }
 
 public struct PrivacyState: Decodable, Sendable, Equatable {
@@ -1137,7 +1149,7 @@ public struct LineSplitter: Sendable {
 ```swift
 import Foundation
 
-/// The M4b daemon methods the app uses ("Daemon API assumptions"). DaemonClient is the real one; tests fake it.
+/// The M4b daemon methods the app uses ("Daemon API" section of the M5 plan). DaemonClient is the real one; tests fake it.
 public protocol DaemonAPI: Sendable {
     func hello() async throws -> HelloResult
     func shutdown() async throws
@@ -1155,7 +1167,7 @@ public protocol DaemonAPI: Sendable {
     func privacyGet() async throws -> PrivacyState
     func privacySetSharingMode(_ mode: SharingMode) async throws -> SharingMode
     func privacyApprove(root: String, includeWorktrees: Bool) async throws -> ApprovedRoot
-    func privacyRevoke(root: String) async throws -> Bool
+    func privacyRevoke(root: String) async throws -> RevokeResult
     func chatPrepare(sessionId: String, question: String) async throws -> Prepared
     /// `confirmed` is true only when the user pressed Send in the preview sheet (M4b: Ask mode refuses otherwise, 1011).
     func chatSend(prepareId: String, removeItemIds: [String], confirmed: Bool) async throws -> SendResult
@@ -1277,7 +1289,6 @@ public actor DaemonClient {
 private struct Empty: Decodable, Sendable {}
 private struct AuthLink: Decodable, Sendable { let authUrl: String }
 private struct ModeResult: Decodable, Sendable { let sharingMode: SharingMode }
-private struct Revoked: Decodable, Sendable { let revoked: Bool }
 private struct SettingValue: Decodable, Sendable { let value: String? }
 
 extension DaemonClient: DaemonAPI {
@@ -1321,8 +1332,8 @@ extension DaemonClient: DaemonAPI {
     public func privacyApprove(root: String, includeWorktrees: Bool) async throws -> ApprovedRoot {
         try await call("privacy.approve", .object(["root": .string(root), "includeWorktrees": .bool(includeWorktrees)]), as: ApprovedRoot.self)
     }
-    public func privacyRevoke(root: String) async throws -> Bool {
-        try await call("privacy.revoke", .object(["root": .string(root)]), as: Revoked.self).revoked
+    public func privacyRevoke(root: String) async throws -> RevokeResult {
+        try await call("privacy.revoke", .object(["root": .string(root)]), as: RevokeResult.self)
     }
     public func chatPrepare(sessionId: String, question: String) async throws -> Prepared {
         try await call("chat.prepare", .object(["sessionId": .string(sessionId), "question": .string(question)]), as: Prepared.self)
@@ -1665,7 +1676,11 @@ test -f "$out/Contents/Resources/companiond/src/lineBuffer.ts"
 test -d "$out/Contents/Resources/companiond/node_modules/@openai/codex"
 ```
 
-(The check for `src/daemon/main.ts` is added in Task 13, after M4b part 2 merges; until then that file does not exist and the build must stay green.)
+and, since M4b part 2 is merged, the entry point too:
+
+```bash
+test -f "$out/Contents/Resources/companiond/src/daemon/main.ts"
+```
 
 In `app/bundle/Info.plist` change `<key>CFBundleShortVersionString</key><string>0.4.0</string>` to `<key>CFBundleShortVersionString</key><string>0.5.0</string>` (ruling 17).
 
@@ -1687,7 +1702,7 @@ In `.github/workflows/tests.yml`, `app` job, before `- run: swift test` insert:
 - [ ] **Step 5: Run the tests and the bundle build**
 
 Run: `cd app && swift test --filter "DaemonLocatorTests|DaemonIntegrationTests" && cd .. && bash scripts/build-app.sh`
-Expected: `DaemonLocatorTests` PASS. `DaemonIntegrationTests` PASSES once M4b part 2 is on this branch (`companiond/src/daemon/main.ts` exists and `cd companiond && npm ci` was run); before that it is reported as skipped. `build-app.sh` ends with `built and verified: app/build/ClaudeGPT Companion.app (identity: -)`.
+Expected: `DaemonLocatorTests` PASS. `DaemonIntegrationTests` PASS (run `cd companiond && npm ci` first; on a Mac without Node ≥ 24 it is reported as skipped). `build-app.sh` ends with `built and verified: app/build/ClaudeGPT Companion.app (identity: -)`.
 If `codesign --verify --strict` refuses the bundle because of the Codex binary under `Contents/Resources` (nested code), STOP: record the exact message in the shared notes and send it to the orchestrator; do not re-sign OpenAI's binary. Until ruled, development runs with `COMPANIOND_DIR=<repo>/companiond`.
 
 - [ ] **Step 6: Commit**
@@ -1702,7 +1717,7 @@ git commit -m "feat(app): launch companiond from the bundle with the user's Node
 
 ### Task 5: Conversation reducer
 
-One Claude session's chat for this run. Deltas can arrive before `chat.send` answers (CodexHost emits as it goes; M4b part 2 notes that `turn/completed` can even come first), so events for a turn the reducer does not know yet are buffered and replayed when the turn is attached.
+One Claude session's chat for this run. Deltas can arrive before `chat.send` answers (CodexHost emits as it goes; the merged M4b interface notes that `turn/completed` can even come first), so events for a turn the reducer does not know yet are buffered and replayed when the turn is attached.
 
 **Files:**
 - Create: `app/Sources/CompanionCore/Chat/Conversation.swift`
@@ -2325,7 +2340,7 @@ public struct UISettings: Equatable, Sendable {
 - [ ] **Step 5: Run the tests**
 
 Run: `cd app && swift test --filter "UISettingsTests|HotkeySpecTests|PanelGeometryTests|DaemonIntegrationTests"`
-Expected: PASS (the integration test is skipped until M4b part 2 is on the branch).
+Expected: PASS, including the integration test's key round-trip.
 
 - [ ] **Step 6: Commit**
 
@@ -2348,6 +2363,7 @@ The one place that decides what is sent. It owns no AppKit; the shell injects tw
 **Interfaces:**
 - Consumes: Tasks 2, 3 (`DaemonAPI`, `Connection`, `Connector`), 5 (`Conversation`, `ChatMessage`, `TurnEvent`), 6 (`UISettings`).
 - Produces:
+  - Added in the M4b reconciliation: `revokeNotice`, `dismissRevokeNotice()`, `static func revokeText(_: RevokeResult) -> String?`.
   - Added after review: `authError`, `threadNotices`, `isSecurityStop`, `acknowledgeSecurityStop()`, `loadAuth()` (public, Retry), `sendAgain(_:)`, `canExplain`, `currentThreadNotice`, `dismissThreadNotice()`. `confirmPreview()` is the only path that sends `confirmed: true`.
   - `enum ConnectionState { connecting, connected(daemonVersion:), stopped(String) }`; `enum Gate { ready, connecting, daemonStopped(String), hostStarting, hostFailed(String), securityStop(String), signedOut, authUnsupported(String), authError(String), noSession }`; `struct PendingPreview: Identifiable { question; prepared; removed: Set<String>; notice: String?; var summaryLine }`; `enum SentView: Identifiable { found(SentRecord), notKept(turnId:) }`
   - `@MainActor @Observable final class AppModel` — read-only state: `connection, host, auth, snapshot, privacy, worktrees, syncs, repoBanners, alerts, syncError, conversations, settings`; settable: `draft, preview, sentView, errorMessage`; callbacks: `onSettingsChanged: ((UISettings) -> Void)?`, `onReplyCompleted: ((UUID, String) -> Void)?`; `init(connector:)`; actions: `start()`, `shutdown()`, `restartDaemon()`, `restartHost()`, `refresh()`, `pin(_:)`, `followFocus()`, `picker(query:) -> PickerGroups?`, `submitDraft()`, `ask(_:) -> Bool`, `explainLastMessage()`, `toggle(itemId:)`, `cancelPreview()`, `confirmPreview()`, `interrupt()`, `approve(root:includeWorktrees:) -> String?`, `revoke(root:)`, `setSharingMode(_:)`, `signIn() -> URL?`, `viewSent(_:)`, `setSetting(_:_:)`, `appendToDraft(_:)`, `dismiss(alert:)`, `dismissRepoBanner()`, `dismissSyncError()`, `handle(_ e: DaemonEvent)`; display (Task 7 `+Display`): `gate, selectedSessionId, selectedSession, currentMessages, currentWorktree, currentRoot, repoSummary, repoHelp, selectionLabel, syncSummary, focusMovedTitle, currentRepoBanner, unavailableRepo, redactionNotice, isAnswering, canSend`; `SecurityAlert.bannerText`, `SessionSummary.locationLine`, `RepoLine.summary`; `static let explainQuestion = "Explain Claude's last message simply."`.
@@ -2449,7 +2465,11 @@ import Foundation
         if let e = approveError { throw e }
         return ApprovedRoot(root: root, commonDir: root + "/.git", includeWorktrees: includeWorktrees, approvedAt: 1)
     }
-    func privacyRevoke(root: String) async throws -> Bool { calls.append("privacy.revoke:\(root)"); return true }
+    var revokePending = 0
+    func privacyRevoke(root: String) async throws -> RevokeResult {
+        calls.append("privacy.revoke:\(root)")
+        return RevokeResult(revoked: true, pendingClose: revokePending)
+    }
     func chatPrepare(sessionId: String, question: String) async throws -> Prepared {
         calls.append("chat.prepare:\(question)")
         let p = prepareResults.isEmpty ? Self.prepared("p-auto", needsConfirm: false, mode: .automatic) : try prepareResults.removeFirst().get()
@@ -2694,6 +2714,19 @@ import Testing
         #expect(m.gate == .ready)
     }
 
+    @Test func revokeShowsRepliesStillFinishing() async {
+        let (m, d) = await started()
+        await m.revoke(root: "/r")
+        #expect(d.calls.contains("privacy.revoke:/r"))
+        #expect(m.revokeNotice == nil) // nothing pending
+        d.revokePending = 2
+        await m.revoke(root: "/r")
+        #expect(m.revokeNotice?.hasPrefix("2 replies are still finishing") == true)
+        m.dismissRevokeNotice()
+        #expect(m.revokeNotice == nil)
+        #expect(AppModel.revokeText(RevokeResult(revoked: false, pendingClose: 3)) == nil)
+    }
+
     @Test func threadNoticesAndExplainInOff() async {
         let (m, _) = await started()
         m.handle(.threadReplaced(ThreadReplaced(sessionId: "s1", threadId: "t9", reason: "resume_refused")))
@@ -2816,6 +2849,8 @@ public final class AppModel {
     public private(set) var auth: AuthState?
     public private(set) var authError: String?
     public private(set) var threadNotices: [String: String] = [:]
+    /// Set after a revoke whose threads are still finishing (pendingClose > 0).
+    public private(set) var revokeNotice: String?
     public private(set) var snapshot: SessionsSnapshot?
     public private(set) var privacy: PrivacyState?
     public private(set) var worktrees: [String: WorktreeResolution] = [:]
@@ -3125,14 +3160,24 @@ public final class AppModel {
         }
     }
 
+    /// Spec v3.4 §8: "Revoke shows pendingClose threads still finishing; after 30 s the daemon may restart Codex."
     public func revoke(root: String) async {
         guard let api else { return }
         do {
-            _ = try await api.privacyRevoke(root: root)
+            let r = try await api.privacyRevoke(root: root)
+            revokeNotice = Self.revokeText(r)
             privacy = try await api.privacyGet()
             if let id = selectedSessionId { await loadDetail(id) }
         } catch { errorMessage = Self.describe(error) }
     }
+
+    static func revokeText(_ r: RevokeResult) -> String? {
+        guard r.revoked, r.pendingClose > 0 else { return nil }
+        let n = r.pendingClose
+        return "\(n) reply\(n == 1 ? " is" : "s are") still finishing in that repository. GPT cannot read it any more; if \(n == 1 ? "it does" : "they do") not finish within 30 seconds, Codex restarts and every conversation reopens at its next message."
+    }
+
+    public func dismissRevokeNotice() { revokeNotice = nil }
 
     public func setSharingMode(_ mode: SharingMode) async {
         guard let api else { return }
@@ -5221,6 +5266,9 @@ struct PrivacySettings: View {
             .pickerStyle(.radioGroup)
             Text(modeHelp).font(.caption).foregroundStyle(.secondary)
             Section("Approved repositories") {
+                if let notice = model.revokeNotice {
+                    Banner(text: notice, tone: .warning, onDismiss: { model.dismissRevokeNotice() })
+                }
                 if model.privacy?.approvals.isEmpty ?? true {
                     Text("None yet. GPT gets repository tools only for repositories you approve.").foregroundStyle(.secondary)
                 }
@@ -5766,7 +5814,7 @@ struct CompanionApp: App {
 - [ ] **Step 4: Build, bundle and check by hand**
 
 Run: `cd app && swift build && swift test && cd .. && bash scripts/build-app.sh && open "app/build/ClaudeGPT Companion.app"`
-Expected: all tests PASS; the bundle verifies; the panel opens at the left edge of the screen with Claude's window. Before M4b part 2 merges the panel shows "companiond is not running" with the not-found reason and a Restart button (that is the expected stopped state). Check, and note each result for the Task 14 checklist:
+Expected: all tests PASS; the bundle verifies; the panel opens at the left edge of the screen with Claude's window. With `COMPANIOND_CODEX=off` in the environment (`COMPANIOND_CODEX=off open …` does not pass it; launch the binary directly: `COMPANIOND_CODEX=off "app/build/ClaudeGPT Companion.app/Contents/MacOS/CompanionApp"`) the panel shows "Chat is off" with the daemon's reason, which checks the stopped path without Codex. Check, and note each result for the Task 14 checklist:
 - ⌥⌘G hides and shows the panel; ⌘R works when the app is active; ⌘, opens Settings with five tabs.
 - Width drags between 280 and 640 pt and is remembered after relaunch (once the daemon runs).
 - Settings › Window › Follow: the Accessibility prompt appears; with permission the panel moves with Claude's window; without it the note explains and the panel stays movable.
@@ -5783,27 +5831,21 @@ git commit -m "feat(app): add the side panel, hotkey, follow-window and app life
 
 ---
 
-### Task 13: Reconcile with M4b part 2 and run against the real daemon
+### Task 13: Re-check the daemon contract and run against the real daemon
 
-Starts only after M4b part 2 (`feat/m4b-part2-daemon`) has merged to `main`.
+M4b part 2 merged (PR #10) and this plan was reconciled with it on 2026-11-05. This task repeats that check against whatever `main` holds when implementation reaches it, then runs the app for real.
 
 **Files:**
-- Modify: `scripts/build-app.sh` (the `main.ts` check); and, only where the merged API differs from "Daemon API assumptions": `app/Sources/CompanionCore/Daemon/DaemonModels.swift`, `app/Sources/CompanionCore/Daemon/DaemonClient.swift`, `app/Sources/CompanionCore/Model/AppModel.swift`, their tests; this plan's "Daemon API assumptions" section.
+- Modify, only where `main` now differs from "Daemon API (reconciled with merged M4b)": `app/Sources/CompanionCore/Daemon/DaemonModels.swift`, `app/Sources/CompanionCore/Daemon/DaemonClient.swift`, `app/Sources/CompanionCore/Model/AppModel.swift`, their tests; that section of this plan.
 
 - [ ] **Step 1: Update the branch from main** — sync with `main` (in an app-made worktree use the `sync_with_base_branch` tool; otherwise `git fetch origin && git merge origin/main`). Then `cd companiond && npm ci && npm test`. Expected: green.
 
-- [ ] **Step 2: Diff the contract against the merged code, not the plan text** — compare `companiond/src/daemon/protocol.ts` (`METHODS`, `EVENTS`, `ErrorCodes`, `SECURITY_FAILED_PREFIX`), `handlers.ts` (`buildHandlers` param names and defaults — `chat.send`'s `confirmed`, `privacy.revoke`'s result — `wirePrepared`, `wireEvents`, `toDaemonError`) and `store/store.ts` (`UI_KEY`) against "Daemon API assumptions". For each difference: change the Swift mirror and its test first (failing test, then fix), and update the assumptions table. Confirm the settled items still hold: `"abandoned"` turn status (N1), `hostBusy` 1009 (N2), `prepareStale` 1010 and `confirmRequired` 1011 (N3, N3b), `host.acknowledgeSecurityStop`, `chat.threadReplaced`, `Prepared.sessionTitle`.
-
-Then add the entry-point check to `scripts/build-app.sh`, in the `# Verification` block after the `lineBuffer.ts` check:
-
-```bash
-test -f "$out/Contents/Resources/companiond/src/daemon/main.ts"
-```
+- [ ] **Step 2: Diff the contract against the merged code, not the plan text** — compare `companiond/src/daemon/protocol.ts` (`METHODS`, `EVENTS`, `ErrorCodes`, `SECURITY_FAILED_PREFIX`), `handlers.ts` (`buildHandlers` param names and defaults — `chat.send`'s `confirmed`, `privacy.revoke`'s `{revoked, pendingClose}` — `wirePrepared`, `wireEvents`, `toDaemonError`), `chat/chatService.ts` (`Prepared`) and `store/store.ts` (`UI_KEY`) against "Daemon API (reconciled with merged M4b)". If nothing changed since a1947ea (`git diff a1947ea origin/main -- companiond/src/daemon companiond/src/chat/chatService.ts companiond/src/store/store.ts` is empty), skip to Step 3. For each difference: change the Swift mirror and its test first (failing test, then fix), and update that section. Confirm the reconciled items still hold: `"abandoned"` turn status (N1), `hostBusy` 1009 (N2), `prepareStale` 1010 and `confirmRequired` 1011 (N3, N3b), `pendingClose` (N6), `host.acknowledgeSecurityStop` and `host.restart`'s 1001, `chat.threadReplaced`, `Prepared.sessionTitle`.
 
 - [ ] **Step 3: Full tests, including the daemon integration test**
 
 Run: `cd app && swift test`
-Expected: PASS, and `DaemonIntegrationTests/answersOverStdioThenShutsDown` now runs (not skipped).
+Expected: PASS, with `DaemonIntegrationTests/answersOverStdioThenShutsDown` run, not skipped.
 
 - [ ] **Step 4: Live run from the bundle (N4)** — `bash scripts/build-app.sh && open "app/build/ClaudeGPT Companion.app"`. With Claude Code Desktop open on a session in an approved repo:
 1. The header shows that session's title, root and live branch, status dot and "Live" sync.
@@ -5817,7 +5859,7 @@ Record the outcome lines (no reply text, repo as `<repo>`) in the shared notes f
 
 ```bash
 bash scripts/check-repo.sh
-git add scripts/build-app.sh app/Sources/CompanionCore app/Tests/CompanionCoreTests docs/superpowers/plans/2026-11-05-m5-swiftui-app.md
+git add app/Sources/CompanionCore app/Tests/CompanionCoreTests docs/superpowers/plans/2026-11-05-m5-swiftui-app.md
 git commit -m "fix(app): reconcile the daemon client with the merged M4b API" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -5877,7 +5919,7 @@ Rows marked **Owner** need the owner at the Mac (speaking, listening, signing in
 | 10 | Light and dark appearance | Agent | |
 | 11 | Ask mode: preview lists items; a removed item is absent in "View what was sent"; Cancel sends nothing | Agent | |
 | 12 | Off sends no Claude context (View what was sent shows only the repository line); Automatic needs the confirmation | Agent | |
-| 13 | An unapproved repo shows the banner; Approve works; approving the home folder is refused with the plain reason | Agent | |
+| 13 | An unapproved repo shows the banner; Approve works; approving the home folder is refused with the plain reason; revoking a repo while a reply runs in it shows "still finishing" in Settings › Privacy | Agent | |
 | 14 | Reply links are not clickable and show their URL; no image loads; clicking `path:line` in a selectable reply reaches the app's handler and opens the editor at the line; a `path:line` to a `.command` or `.app` inside the repo is only revealed in Finder | Agent | |
 | 14b | Security stop: the panel shows the reason and only "acknowledge and restart" clears it; Settings hides the restart buttons meanwhile | Agent | |
 | 14c | Ask mode refuses to send without the sheet (a send from the sheet carries `confirmed: true`); "Send again" after a busy error reuses the prepare | Agent | |
