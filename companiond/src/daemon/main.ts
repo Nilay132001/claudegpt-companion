@@ -41,6 +41,9 @@ const fatal = (what: string) => (e: unknown) => {
 process.on("uncaughtException", fatal("fatal"));
 process.on("unhandledRejection", fatal("fatal"));
 process.stdout.on("error", fatal("stdout error"));
+// A closed stderr (EPIPE) only loses log lines. Ignored, so a failed log write cannot become an uncaught exception
+// whose own log line fails again (a logging loop); a closed stdout still shuts the daemon down.
+process.stderr.on("error", () => undefined);
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => void shutdown());
 
 process.umask(0o077);
