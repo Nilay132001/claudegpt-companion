@@ -201,6 +201,34 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       return {};
     },
     "chat.sent": async (p) => d.chat.sent(str(p, "sessionId")),
+    "chat.newChat": async (p) => {
+      await d.chat.newChat(str(p, "sessionId"));
+      return {};
+    },
+    "history.list": async () => {
+      const currentThreads: Record<string, string> = {};
+      for (const s of d.bridge.snapshot().sessions) {
+        const t = d.store.getThread(s.sessionId);
+        if (t) currentThreads[s.sessionId] = t;
+      }
+      return { chats: d.store.listChats(), currentThreads, enabled: d.store.historyEnabled() };
+    },
+    "history.turns": async (p) => {
+      const hasThread = p.threadId !== undefined;
+      const hasSession = p.sessionId !== undefined;
+      if (hasThread === hasSession) throw invalid("give exactly one of threadId or sessionId");
+      const threadId = hasThread ? str(p, "threadId") : d.store.getThread(str(p, "sessionId"));
+      return { threadId, turns: threadId ? d.store.turnsForThread(threadId) : [] };
+    },
+    "history.clear": async (p) => {
+      const threadId = strOrNull(p, "threadId");
+      return { deleted: threadId === null ? d.store.deleteAllHistory() : d.store.deleteChat(threadId) };
+    },
+    "history.setEnabled": async (p) => {
+      const enabled = bool(p, "enabled");
+      d.store.setHistoryEnabled(enabled);
+      return { enabled };
+    },
     "jira.status": async () => d.jira.status(),
     "jira.configure": async (p) => {
       // Fixed messages only: the params hold the token.

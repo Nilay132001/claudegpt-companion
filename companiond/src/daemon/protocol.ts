@@ -30,7 +30,8 @@ export const METHODS = [
   "auth.status", "auth.login",
   "sessions.snapshot", "sessions.refresh", "sessions.pin", "sessions.picker", "sessions.sync", "sessions.worktree",
   "privacy.get", "privacy.setSharingMode", "privacy.approve", "privacy.revoke",
-  "chat.prepare", "chat.send", "chat.interrupt", "chat.sent",
+  "chat.prepare", "chat.send", "chat.interrupt", "chat.sent", "chat.newChat",
+  "history.list", "history.turns", "history.clear", "history.setEnabled",
   "settings.get", "settings.set",
   "jira.status", "jira.configure", "jira.clear", "jira.check",
 ] as const;

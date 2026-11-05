@@ -38,6 +38,10 @@ class FakeHost implements DaemonHost {
     this.#active.clear();
     this.set({ state: "failed", detail: `Security check failed: ${detail}` });
   }
+  finishTurn(threadId: string, turnId: string): void {
+    this.#active.delete(threadId);
+    this.emit({ type: "turnCompleted", threadId, turnId, status: "completed", error: null });
+  }
   signedInAgain(): void {
     this.#active.clear(); // every process replaced, open threads closed
     this.emit({ type: "auth", auth: { state: "signed_in", planType: null } });
@@ -462,4 +466,51 @@ test("shutdown calls the deps", async () => {
   const x = deps();
   await buildHandlers(x.d)["daemon.shutdown"]!({});
   assert.equal(x.shut(), 1);
+});
+
+test("M8: protocol lists the history methods and chat.newChat", () => {
+  for (const m of ["history.list", "history.turns", "history.clear", "history.setEnabled", "chat.newChat"]) assert.ok((METHODS as readonly string[]).includes(m), m);
+});
+
+test("M8: history.list, turns, clear, setEnabled and chat.newChat", async () => {
+  const host = new FakeHost();
+  const { d, store } = deps({ host, mode: "automatic" });
+  const h = buildHandlers(d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q1" });
+  const sent: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  host.emit({ type: "delta", threadId: sent.threadId, turnId: sent.turnId, itemId: "i", text: "answer" });
+  host.finishTurn(sent.threadId, sent.turnId);
+  const l: any = await h["history.list"]!({});
+  assert.equal(l.enabled, true);
+  assert.deepEqual(l.currentThreads, { s1: sent.threadId });
+  assert.equal(l.chats.length, 1);
+  assert.equal(l.chats[0].threadId, sent.threadId);
+  const byThread: any = await h["history.turns"]!({ threadId: sent.threadId });
+  assert.equal(byThread.threadId, sent.threadId);
+  assert.equal(byThread.turns[0].answer, "answer");
+  const bySession: any = await h["history.turns"]!({ sessionId: "s1" });
+  assert.deepEqual(bySession.turns.map((t: any) => t.turnId), [sent.turnId]);
+  assert.deepEqual(await h["history.turns"]!({ sessionId: "s2" }), { threadId: null, turns: [] });
+  for (const bad of [{}, { threadId: "t", sessionId: "s1" }]) {
+    await assert.rejects(h["history.turns"]!(bad), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+  }
+  assert.deepEqual(await h["chat.sent"]!({ sessionId: "s1" }).then((r: any) => r.map((x: any) => x.question)), ["q1"]);
+  assert.deepEqual(await h["chat.newChat"]!({ sessionId: "s1" }), {});
+  assert.equal(store.getThread("s1"), null);
+  assert.deepEqual((await h["history.list"]!({}) as any).currentThreads, {});
+  assert.deepEqual(await h["history.setEnabled"]!({ enabled: false }), { enabled: false });
+  assert.equal(store.historyEnabled(), false);
+  await assert.rejects(h["history.setEnabled"]!({ enabled: "no" }), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+  assert.deepEqual(await h["history.clear"]!({ threadId: sent.threadId }), { deleted: 1 });
+  assert.deepEqual(await h["history.clear"]!({ threadId: null }), { deleted: 0 });
+  await assert.rejects(h["history.clear"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+});
+
+test("M8: chat.newChat while a reply runs maps to turnBusy", async () => {
+  const host = new FakeHost();
+  const { d } = deps({ host, mode: "automatic" });
+  const h = buildHandlers(d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  await assert.rejects(h["chat.newChat"]!({ sessionId: "s1" }), (e: any) => toDaemonError(e).code === ErrorCodes.turnBusy);
 });
