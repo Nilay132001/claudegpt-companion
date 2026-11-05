@@ -68,15 +68,15 @@ function fakeHost() {
   };
 }
 
-function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; launchFails?: boolean; mode?: "off" | "ask" | "automatic" } = {}) {
+function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; wtFor?: (sessionId: string) => WorktreeResolution | null; launchFails?: boolean; mode?: "off" | "ask" | "automatic" } = {}) {
   const store = Store.memory();
   if (o.mode) store.setSharingMode(o.mode);
   const h = fakeHost();
   let events = o.events ?? [userText("first", "u1"), assistantText("reply", "u2")];
-  let approved = true;
+  let approved: boolean | ((root: string, gitCommonDir: string) => boolean) = true;
   const bridge: ChatBridge = {
     snapshot: () => ({ sessions: [session("s1", "Login bug"), session("s2", "Other")], selection: { sessionId: "s1", via: "focus", focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)", focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 }),
-    worktree: () => (o.wt === undefined ? resolved("/r") : o.wt),
+    worktree: (id) => (o.wtFor ? o.wtFor(id) : o.wt === undefined ? resolved("/r") : o.wt),
     events: () => events,
     hasUuid: (_id, uuid) => events.some((e) => e.uuid === uuid),
     liveBranch: async () => "feature-x",
@@ -84,7 +84,8 @@ function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; 
   const launch = (root: string): LaunchSpec => ({ command: "/usr/bin/sandbox-exec", args: ["-p", root], env: {}, cwd: root });
   let clock = 1000;
   const chat = new ChatService({
-    host: h.host, bridge, store, sharingMode: () => store.getSharingMode(), isApproved: () => approved,
+    host: h.host, bridge, store, sharingMode: () => store.getSharingMode(),
+    isApproved: (root, c) => (typeof approved === "function" ? approved(root, c) : approved),
     launchFor: async (root) => { if (o.launchFails) throw new Error("no"); return launch(root); },
     now: () => clock, prepareTtlMs: 60_000,
   });
@@ -93,7 +94,7 @@ function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; 
   return {
     chat, store, h, chatEvents,
     setEvents: (e: TranscriptEvent[]) => { events = e; },
-    setApproved: (v: boolean) => { approved = v; },
+    setApproved: (v: boolean | ((root: string, gitCommonDir: string) => boolean)) => { approved = v; },
     tickClock: (ms: number) => { clock += ms; },
   };
 }
@@ -308,17 +309,53 @@ test("thread end: closeSession closes the thread; a busy one is interrupted and 
   assert.deepEqual(chat.openSessions(), []);
 });
 
-test("closeBound closes only root-bound threads", async () => {
+test("closeRevoked closes only threads whose root is no longer approved", async () => {
   const bound = setup();
   const s = await bound.chat.send((await bound.chat.prepare("s1", "q")).prepareId, []);
   bound.h.complete(s.threadId, s.turnId);
-  await bound.chat.closeBound();
+  await bound.chat.closeRevoked(); // still approved: nothing to close
+  assert.deepEqual(bound.h.closed, []);
+  bound.setApproved(false);
+  assert.deepEqual(bound.chat.revokedThreadIds(), [s.threadId]);
+  await bound.chat.closeRevoked();
   assert.deepEqual(bound.h.closed, [s.threadId]);
+  assert.deepEqual(bound.chat.revokedThreadIds(), []);
   const none = setup({ wt: null });
   const t = await none.chat.send((await none.chat.prepare("s1", "q")).prepareId, []);
   none.h.complete(t.threadId, t.turnId);
-  await none.chat.closeBound();
+  none.setApproved(false);
+  await none.chat.closeRevoked();
   assert.deepEqual(none.h.closed, []);
+});
+
+test("revoking repo A leaves a running reply in approved repo B untouched", async () => {
+  const x = setup({ wtFor: (id) => resolved(id === "s1" ? "/a" : "/b") });
+  const a = await x.chat.send((await x.chat.prepare("s1", "q")).prepareId, []);
+  const b = await x.chat.send((await x.chat.prepare("s2", "q")).prepareId, []);
+  x.setApproved((root) => root === "/b"); // /a revoked
+  await x.chat.closeRevoked();
+  assert.deepEqual(x.h.interrupted, [a.threadId]); // A's running reply is stopped, B's is not
+  assert.deepEqual(x.h.closed, []);
+  assert.deepEqual(x.chat.revokedThreadIds(), [a.threadId]);
+  x.h.complete(a.threadId, a.turnId, "interrupted");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(x.h.closed, [a.threadId]);
+  assert.deepEqual(x.chat.revokedThreadIds(), []);
+  assert.deepEqual(x.chat.openSessions(), ["s2"]);
+  assert.equal(x.h.host.activeTurn(b.threadId), b.turnId);
+});
+
+test("closeRevoked checks a worktree with its git common dir (includeWorktrees approvals)", async () => {
+  const wt: WorktreeResolution = {
+    kind: "resolved", root: "/wt", gitDir: "/main/.git/worktrees/wt", gitCommonDir: "/main/.git", isLinkedWorktree: true,
+    branch: "main", candidate: "/wt", candidateSource: "transcript",
+  };
+  const x = setup({ wt });
+  const s = await x.chat.send((await x.chat.prepare("s1", "q")).prepareId, []);
+  x.h.complete(s.threadId, s.turnId);
+  x.setApproved((_root, c) => c === "/main/.git");
+  await x.chat.closeRevoked();
+  assert.deepEqual(x.h.closed, []);
 });
 
 test("a repository change note is sent once", async () => {
@@ -342,14 +379,15 @@ test("a sharing mode switched to Off while the thread opens sends nothing", asyn
   assert.deepEqual(chat.openSessions(), []);
 });
 
-test("closeBound tries every thread when one close fails, then reports it", async () => {
-  const { chat, h } = setup();
+test("closeRevoked tries every thread when one close fails, then reports it", async () => {
+  const { chat, h, setApproved } = setup();
   const a = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
   h.complete(a.threadId, a.turnId);
   const b = await chat.send((await chat.prepare("s2", "q")).prepareId, []);
   h.complete(b.threadId, b.turnId);
   h.setFailClose(a.threadId);
-  await assert.rejects(chat.closeBound(), AggregateError);
+  setApproved(false);
+  await assert.rejects(chat.closeRevoked(), AggregateError);
   assert.deepEqual(h.closed, [b.threadId]);
 });
 

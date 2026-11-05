@@ -147,8 +147,9 @@ sign-in (which replaces every Codex process) or a failure, conversations reopen 
 reply that was running then ends as "abandoned" and the cursor does not move. If Codex refuses the resume
 (for example the stale writer lock kept in §2), the conversation continues in a new thread, GPT loses the
 old thread's history, and the app is told (`chat.threadReplaced`). A conversation's thread is closed (its
-relay token revoked) when its Claude session leaves the list, and every root-bound thread is closed when
-an approval is revoked (§7.5); approval is re-checked at bind time, so a revoked root is never bound again.
+relay token revoked) when its Claude session leaves the list, and every thread bound to a root that is no
+longer approved is closed when an approval is revoked (§7.5; threads in other approved repos keep running);
+approval is re-checked at bind time, so a revoked root is never bound again.
 
 ## 5. Authentication
 
@@ -585,12 +586,16 @@ output before it reaches Codex.
   *M4b:* a folder that contains `$HOME` is refused as well. Approval runs SafeGit's config gate (§7.3), so
   a repo with program-valued config is refused at approval time with the visible reason.
 - **Revoke (M4b).** From the revoke on, the root is refused at bind time. The daemon re-resolves every
-  session, then closes every thread bound to the revoked root (its relay token revoked); the next message
-  reopens the conversation without that root. `privacy.revoke` answers `{ revoked, pendingClose }`, where
-  `pendingClose` counts bound threads that stayed open (a running reply keeps its thread until it ends). If
-  any of them is still open 30 s later and the host is ready, the daemon restarts the Codex host, the only
-  way to end a root's process; every conversation then reopens at its next message (§4). A host that is
-  starting, stopped or failed is left alone.
+  session, then closes every thread bound to a root that is no longer approved (checked with the thread's
+  root and git common dir, so a worktree still covered by another `includeWorktrees` approval stays); its
+  relay token is revoked and a running reply in it is interrupted. Threads in repos that are still approved
+  are not touched. The next message reopens a closed conversation without that root. `privacy.revoke`
+  answers `{ revoked, pendingClose }`, where `pendingClose` counts those revoked-root threads that stayed
+  open (a running reply keeps its thread until it ends). If any of them is still open, and its root still
+  not approved, 30 s later and the host is ready, the daemon restarts the Codex host, the only way to end a
+  root's process; every conversation then reopens at its next message (§4). A host that is starting,
+  stopped or failed is left alone. A revoke that removed no approval (`revoked: false`, an unknown root)
+  changes nothing: it answers `pendingClose: 0`, closes nothing and arms no restart.
 - **Transcript sharing mode** (global):
   - *Off* — nothing from Claude's transcript is sent; GPT gets the question (plus repo tools if approved).
     *M4b:* Off sends the repository line and the question only: no session title, no transcript, no
@@ -663,8 +668,9 @@ message bodies or tokens.
     send was in progress; prepare again (and re-confirm).
     `hostBusy` (1009, "Too many … busy"): shown as "try again later"; the same prepared message can be sent
     again, as after `turnBusy` and `hostNotReady`.
-  - A "Security check failed" stop stays until the owner presses Acknowledge
-    (`host.acknowledgeSecurityStop`); a restart does not clear it.
+  - A "Security check failed" stop, latched or not, stays until the owner presses Acknowledge
+    (`host.acknowledgeSecurityStop`): `host.restart` refuses it with `securityCheckFailed` (1001), so a
+    restart never brings Codex back past a security failure.
   - `chat.threadReplaced`: tell the user GPT lost the old thread's history (§4). A turn ending "abandoned"
     (Codex restarted) asks the user to ask again.
   - Revoke shows `pendingClose` threads still finishing; after 30 s the daemon may restart Codex (§7.5).

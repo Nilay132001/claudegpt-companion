@@ -105,8 +105,12 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       return {};
     },
     "host.status": async () => d.host.state(),
-    // A latched security stop survives a restart: start() refuses until the owner acknowledges it (M4a I-1).
+    // Every "Security check failed" stop, latched or not, needs the owner's acknowledgement: a restart would re-run
+    // the checks and could come back ready without it (spec §8). Latched stops are also refused by start() (M4a I-1).
     "host.restart": async () => {
+      if (isSecurityFailure(d.host.state())) {
+        throw new DaemonError(ErrorCodes.securityCheckFailed, "Acknowledge the security stop first.");
+      }
       await d.host.stop();
       return d.host.start();
     },
@@ -145,20 +149,25 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
     },
     "privacy.revoke": async (p) => {
       // Order matters: from here on isApproved refuses the root at bind time; noteRevoke aborts a send already past
-      // that check; the bridge re-resolves before the bound threads close (they reopen with the next message).
+      // that check; the bridge re-resolves before the revoked root's threads close (they reopen with the next
+      // message). A revoke that removed nothing changes nothing: no close, no timer.
       const revoked = d.privacy.revoke(str(p, "root"));
+      if (!revoked) return { revoked, pendingClose: 0 };
       d.chat.noteRevoke();
       await Promise.all(d.bridge.snapshot().sessions.map((s) => d.bridge.resolveNow(s.sessionId).catch(() => null)));
-      // closeBound tries every close and throws an AggregateError if any failed; its messages are not passed on.
-      await d.chat.closeBound().catch(() => log("revoke_close_failed"));
-      // The threads that survived the close: only these are waited for (a thread opened later is not ours to end).
-      const stuck = d.chat.boundThreadIds();
+      // Only threads whose root is no longer approved are closed; threads in other approved repos keep running.
+      // closeRevoked tries every close and throws an AggregateError if any failed; its messages are not passed on.
+      await d.chat.closeRevoked().catch(() => log("revoke_close_failed"));
+      // The revoked threads that survived the close: only these are waited for (a thread opened later is not ours
+      // to end, and a thread whose root is approved again by the deadline no longer needs ending).
+      const stuck = d.chat.revokedThreadIds();
       const pendingClose = stuck.length;
       if (pendingClose > 0) {
         // A running reply keeps its thread (and relay grant) open until it ends. After the deadline the host is
         // restarted, the only public way to end a root's Codex process (CodexHost has no per-root stop).
         const timer = setTimeout(() => {
-          if (!stuck.some((id) => d.chat.isOpen(id))) return;
+          const still = new Set(d.chat.revokedThreadIds());
+          if (!stuck.some((id) => still.has(id))) return;
           // Do not race a host that is starting, or restart one that was stopped or failed on its own.
           if (d.host.state().state !== "ready") {
             log("revoke_restart_skipped");

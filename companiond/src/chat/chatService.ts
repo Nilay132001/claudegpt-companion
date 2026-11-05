@@ -74,7 +74,8 @@ export interface ChatServiceDeps {
 
 interface PreparedInternal extends Prepared { question: string; title: string; expiresAt: number }
 interface Pending { sessionId: string; threadId: string; cursor: string | null; subagents: SubagentUpdate[]; repoNote: string | null }
-interface Open { threadId: string; root: string | null }
+/** `root` and `gitCommonDir` are the binding's (both null for a thread without repository tools). */
+interface Open { threadId: string; root: string | null; gitCommonDir: string | null }
 
 const MAX_QUESTION = 20_000;
 const MAX_SENT = 50;
@@ -151,7 +152,8 @@ export class ChatService {
     this.#tracker(sessionId).update(u);
   }
 
-  /** Called first thing by privacy.revoke, before the bridge re-resolves and bound threads are closed. */
+  /** Called by privacy.revoke when it removed an approval, before the bridge re-resolves and the revoked root's
+   * threads are closed. */
   noteRevoke(): void {
     this.#revokeGen++;
   }
@@ -240,23 +242,19 @@ export class ChatService {
     if (o) await this.#close(sessionId, o);
   }
 
-  /** Closes every thread bound to a root (after an approval is revoked). They reopen with the next message. */
-  async closeBound(): Promise<void> {
-    const bound = [...this.#open].filter(([, o]) => o.root !== null);
-    const results = await Promise.allSettled(bound.map(([sessionId, o]) => this.#close(sessionId, o)));
+  /** After an approval is revoked: closes every thread bound to a root that is no longer approved (checked now with
+   * isApproved, so an `includeWorktrees` approval is honoured). Threads in still-approved roots are left alone.
+   * The closed conversations reopen with the next message. */
+  async closeRevoked(): Promise<void> {
+    const revoked = [...this.#open].filter(([, o]) => this.#unapproved(o));
+    const results = await Promise.allSettled(revoked.map(([sessionId, o]) => this.#close(sessionId, o)));
     const failed = results.filter((r) => r.status === "rejected");
-    if (failed.length > 0) throw new AggregateError(failed.map((r) => r.reason), `${failed.length} of ${bound.length} threads did not close.`);
+    if (failed.length > 0) throw new AggregateError(failed.map((r) => r.reason), `${failed.length} of ${revoked.length} threads did not close.`);
   }
 
-  /** Root-bound threads still open (a deferred close waits for its turn to end). */
-  boundThreadIds(): string[] {
-    return [...this.#open.values()].filter((o) => o.root !== null).map((o) => o.threadId);
-  }
-
-  /** True while a thread this run opened is still open. */
-  isOpen(threadId: string): boolean {
-    for (const o of this.#open.values()) if (o.threadId === threadId) return true;
-    return false;
+  /** Threads still open on a root that is no longer approved (a deferred close waits for its turn to end). */
+  revokedThreadIds(): string[] {
+    return [...this.#open.values()].filter((o) => this.#unapproved(o)).map((o) => o.threadId);
   }
 
   /** Whether the prepare needs the owner's confirmation: null when the prepare is unknown (expired or never made). */
@@ -277,7 +275,7 @@ export class ChatService {
       const { text, contextBlock } = composeTurnText({
         sessionTitle: p.title, repo: repo.line, repoNote: p.repoNote, preview: p.preview, removeIds, question: p.question,
       });
-      const threadId = await this.#openThread(p.sessionId, repo.binding);
+      const threadId = await this.#openThread(p.sessionId, repo.binding, repo.gitCommonDir);
       // An approval was revoked, or the sharing mode changed, while this send waited, resolved or opened: the
       // binding may be for that root and the text was composed for the old mode. Nothing is sent.
       if (this.#revokeGen !== gen || this.#d.sharingMode() !== p.mode) {
@@ -331,7 +329,11 @@ export class ChatService {
     }
   }
 
-  async #openThread(sessionId: string, binding: RootBinding | null): Promise<string> {
+  #unapproved(o: Open): boolean {
+    return o.root !== null && !this.#d.isApproved(o.root, o.gitCommonDir ?? o.root);
+  }
+
+  async #openThread(sessionId: string, binding: RootBinding | null, gitCommonDir: string | null): Promise<string> {
     const existing = this.#d.store.getThread(sessionId);
     let threadId: string;
     try {
@@ -344,26 +346,26 @@ export class ChatService {
       this.#emit({ type: "threadReplaced", sessionId, threadId, reason: "resume_refused" });
     }
     if (threadId !== existing) this.#d.store.setThread(sessionId, threadId);
-    this.#open.set(sessionId, { threadId, root: binding?.root ?? null });
+    this.#open.set(sessionId, { threadId, root: binding?.root ?? null, gitCommonDir: binding ? gitCommonDir : null });
     this.#closeAfterTurn.delete(threadId);
     return threadId;
   }
 
-  async #repo(sessionId: string): Promise<{ line: RepoLine; binding: RootBinding | null }> {
+  async #repo(sessionId: string): Promise<{ line: RepoLine; binding: RootBinding | null; gitCommonDir: string | null }> {
     const r = this.#d.bridge.worktree(sessionId);
-    if (!r) return { line: { state: "none", root: null, branch: null, detail: null }, binding: null };
-    if (r.kind === "unavailable") return { line: { state: "unavailable", root: r.root, branch: null, detail: r.detail }, binding: null };
+    if (!r) return { line: { state: "none", root: null, branch: null, detail: null }, binding: null, gitCommonDir: null };
+    if (r.kind === "unavailable") return { line: { state: "unavailable", root: r.root, branch: null, detail: r.detail }, binding: null, gitCommonDir: null };
     // The bridge's resolution can predate a revoke: approval is checked again here, at bind time.
     if (!this.#d.isApproved(r.root, r.gitCommonDir)) {
-      return { line: { state: "unavailable", root: r.root, branch: null, detail: "This repository is not approved." }, binding: null };
+      return { line: { state: "unavailable", root: r.root, branch: null, detail: "This repository is not approved." }, binding: null, gitCommonDir: null };
     }
     try {
       const launch = await this.#d.launchFor(r.root);
       const branch = await this.#d.bridge.liveBranch(sessionId);
-      return { line: { state: "bound", root: r.root, branch, detail: null }, binding: { root: r.root, launch } };
+      return { line: { state: "bound", root: r.root, branch, detail: null }, binding: { root: r.root, launch }, gitCommonDir: r.gitCommonDir };
     } catch (e) {
       const detail = e instanceof RepoRefusedError ? e.message : "Repository tools could not start.";
-      return { line: { state: "unavailable", root: r.root, branch: null, detail }, binding: null };
+      return { line: { state: "unavailable", root: r.root, branch: null, detail }, binding: null, gitCommonDir: null };
     }
   }
 

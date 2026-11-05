@@ -77,7 +77,7 @@ class FakeHost implements DaemonHost {
     this.#active.set(threadId, turnId);
     return { turnId };
   }
-  async interrupt(): Promise<void> {}
+  async interrupt(_threadId: string): Promise<void> {}
   activeTurn(threadId: string): string | null {
     return this.#active.get(threadId) ?? null;
   }
@@ -87,19 +87,23 @@ class FakeHost implements DaemonHost {
   }
 }
 
-function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: string) => void; mode?: "off" | "ask" | "automatic"; inspectable?: boolean } = {}) {
+function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: string) => void; mode?: "off" | "ask" | "automatic"; inspectable?: boolean; twoRoots?: boolean } = {}) {
   const store = Store.memory();
   const root = tempDir(); // an approved synthetic root (the bridge resolves the session to it)
   store.putApproval({ root, commonDir: `${root}/.git`, includeWorktrees: false, approvedAt: 1 });
+  // twoRoots: session s2 is in a second approved root
+  const root2 = tempDir();
+  if (o.twoRoots) store.putApproval({ root: root2, commonDir: `${root2}/.git`, includeWorktrees: false, approvedAt: 1 });
+  const rootOf = (id: string) => (o.twoRoots && id === "s2" ? root2 : root);
   const bridgeListeners = new Set<(e: BridgeEvent) => void>();
-  const snap = () => ({ sessions: [session("s1")], selection: { sessionId: "s1", via: "focus" as const, focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)" as const, focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 });
+  const snap = () => ({ sessions: o.twoRoots ? [session("s1"), session("s2")] : [session("s1")], selection: { sessionId: "s1", via: "focus" as const, focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)" as const, focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 });
   const pins: Array<string | null> = [];
   const order: string[] = [];
   const bridge: DaemonBridge = {
-    snapshot: snap, refresh: async () => snap(), worktree: () => resolved(root), events: () => [], hasUuid: () => false, liveBranch: async () => "main",
+    snapshot: snap, refresh: async () => snap(), worktree: (id) => resolved(rootOf(id)), events: () => [], hasUuid: () => false, liveBranch: async () => "main",
     pin: (id) => { pins.push(id); return { ...snap().selection, sessionId: id, via: id ? "pin" : "focus" }; },
     syncStatus: () => ({ state: "live", stats: null, lastPollAt: 1 }),
-    resolveNow: async (id) => { order.push(`resolve:${id}`); return resolved(root); },
+    resolveNow: async (id) => { order.push(`resolve:${id}`); return resolved(rootOf(id)); },
     on: (l) => { bridgeListeners.add(l); return () => { bridgeListeners.delete(l); }; },
   };
   const host = o.host ?? new DisabledHost("off");
@@ -111,7 +115,7 @@ function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: strin
   let shut = 0;
   if (o.mode) privacy.setSharingMode(o.mode);
   const d: DaemonDeps = { host, bridge, chat, privacy, store, version: "0.4.0", shutdown: () => { shut++; }, revokeDeadlineMs: o.revokeDeadlineMs, log: o.log ?? (() => undefined) };
-  return { d, store, pins, root, order, emitBridge: (e: BridgeEvent) => bridgeListeners.forEach((l) => l(e)), shut: () => shut };
+  return { d, store, pins, root, root2, order, emitBridge: (e: BridgeEvent) => bridgeListeners.forEach((l) => l(e)), shut: () => shut };
 }
 
 test("hello checks the protocol version", async () => {
@@ -168,11 +172,24 @@ test("a security stop is cleared only by the owner's acknowledgement", async () 
   const h = buildHandlers(deps({ host }).d);
   await assert.rejects(h["host.acknowledgeSecurityStop"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.invalidRequest);
   host.securityStop("the repository tools socket was replaced");
-  const r: any = await h["host.restart"]!({});
-  assert.match(r.detail, /^Security check failed/); // a restart does not clear the latch
+  await assert.rejects(h["host.restart"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.securityCheckFailed); // a restart does not clear the latch
   assert.equal(host.cleared, 0);
+  assert.equal(host.starts, 0);
   assert.deepEqual(await h["host.acknowledgeSecurityStop"]!({}), { state: "ready", warnings: [] });
   assert.equal(host.cleared, 1);
+});
+
+test("host.restart refuses a security failure that was not latched; only the acknowledgement brings Codex back", async () => {
+  const host = new FakeHost();
+  const h = buildHandlers(deps({ host }).d);
+  host.set({ state: "failed", detail: "Security check failed: the thread's config did not match" }); // not latched
+  await assert.rejects(h["host.restart"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.securityCheckFailed);
+  assert.equal(host.starts, 0);
+  assert.equal(host.state().state, "failed");
+  assert.deepEqual(await h["host.acknowledgeSecurityStop"]!({}), { state: "ready", warnings: [] });
+  // any other failure can still be restarted
+  host.set({ state: "failed", detail: "Codex exited." });
+  assert.deepEqual(await h["host.restart"]!({}), { state: "ready", warnings: [] });
 });
 
 test("events: bridge and host events become notifications, chat events carry the session id", () => {
@@ -331,7 +348,8 @@ test("revoke: a new thread opened in the window does not trigger the restart; th
   host.openThread = async () => "thr-other";
   const p2: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
   await h["chat.send"]!({ prepareId: p2.prepareId, removeItemIds: [], confirmed: true });
-  assert.deepEqual(x.d.chat.boundThreadIds(), ["thr-other"]);
+  assert.deepEqual(x.d.chat.revokedThreadIds(), []); // thr-other is on a root that is approved again
+  assert.deepEqual(x.d.chat.openSessions(), ["s1"]);
   await new Promise((res) => setTimeout(res, 120));
   assert.equal(host.starts, 0);
   assert.deepEqual(logs, []);
@@ -364,6 +382,46 @@ test("revoke: no restart when the threads closed", async () => {
   assert.equal(r.pendingClose, 0);
   await new Promise((res) => setTimeout(res, 40));
   assert.equal(host.starts, 0);
+});
+
+test("revoke: revoking repo A leaves a running reply in approved repo B untouched and never restarts because of it", async () => {
+  const host = new FakeHost();
+  const logs: string[] = [];
+  const interrupted: string[] = [];
+  const x = deps({ host, log: (c) => logs.push(c), revokeDeadlineMs: 20, twoRoots: true });
+  const h = buildHandlers(x.d);
+  const a: any = await h["chat.send"]!({ prepareId: ((await h["chat.prepare"]!({ sessionId: "s1", question: "q" })) as any).prepareId, removeItemIds: [], confirmed: true });
+  const b: any = await h["chat.send"]!({ prepareId: ((await h["chat.prepare"]!({ sessionId: "s2", question: "q" })) as any).prepareId, removeItemIds: [], confirmed: true });
+  host.emit({ type: "turnCompleted", threadId: a.threadId, turnId: a.turnId, status: "completed", error: null });
+  // B's reply is running: closing its thread would be refused (CodexHost's TurnBusyError) and interrupt it
+  const realClose = host.closeThread.bind(host);
+  host.closeThread = async (id: string) => { if (id === b.threadId) throw new TurnBusyError(); return realClose(id); };
+  host.interrupt = async (id: string) => { interrupted.push(id); };
+  const r: any = await h["privacy.revoke"]!({ root: x.root });
+  assert.deepEqual(r, { revoked: true, pendingClose: 0 });
+  assert.deepEqual(host.closed, [a.threadId]);
+  assert.deepEqual(x.d.chat.openSessions(), ["s2"]);
+  assert.deepEqual(interrupted, []); // B's reply keeps running
+  assert.equal(host.activeTurn(b.threadId), b.turnId);
+  await new Promise((res) => setTimeout(res, 80));
+  assert.equal(host.starts, 0);
+  assert.deepEqual(logs, []);
+});
+
+test("revoke: an unknown root removes nothing and closes nothing", async () => {
+  const host = new FakeHost();
+  const logs: string[] = [];
+  const x = deps({ host, log: (c) => logs.push(c), revokeDeadlineMs: 20 });
+  const h = buildHandlers(x.d);
+  await h["chat.send"]!({ prepareId: ((await h["chat.prepare"]!({ sessionId: "s1", question: "q" })) as any).prepareId, removeItemIds: [], confirmed: true });
+  host.closeThread = async () => { throw new TurnBusyError(); };
+  const r: any = await h["privacy.revoke"]!({ root: `${x.root}-not-approved` });
+  assert.deepEqual(r, { revoked: false, pendingClose: 0 });
+  assert.deepEqual(host.closed, []);
+  assert.deepEqual(x.order, []); // nothing re-resolved
+  await new Promise((res) => setTimeout(res, 80));
+  assert.equal(host.starts, 0);
+  assert.deepEqual(logs, []);
 });
 
 test("shutdown calls the deps", async () => {
