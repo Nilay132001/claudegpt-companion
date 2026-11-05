@@ -30,7 +30,7 @@ export function relayHeader(socketPath: string): string {
 
 export interface BuiltRelay { binary: string; sha256: string }
 
-export function buildRelay(o: { socketPath: string; outFile: string; source?: string }): BuiltRelay {
+export function buildRelay(o: { socketPath: string; outFile: string; source?: string; developerDir?: string }): BuiltRelay {
   const header = relayHeader(o.socketPath);
   const work = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "cgc-relay-build-"));
   try {
@@ -40,13 +40,16 @@ export function buildRelay(o: { socketPath: string; outFile: string; source?: st
     try {
       execFileSync("/usr/bin/xcrun", ["clang", "-O2", "-Wall", "-Wextra", "-Werror", "-include", h, "-o", built, o.source ?? RELAY_SOURCE], {
         stdio: ["ignore", "ignore", "ignore"], timeout: 120_000,
+        // A minimal environment: nothing from the caller's shell reaches the compiler.
+        env: { PATH: "/usr/bin:/bin", HOME: os.homedir(), ...(o.developerDir ? { DEVELOPER_DIR: o.developerDir } : {}) },
       });
     } catch {
       // The compiler's output holds local paths: never shown.
       throw new RelaySetupError("The relay did not build. Install the Xcode command-line tools.");
     }
     const staged = `${o.outFile}.tmp-${process.pid}`;
-    fs.copyFileSync(built, staged);
+    fs.rmSync(staged, { force: true });
+    fs.copyFileSync(built, staged, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(staged, 0o500);
     fs.renameSync(staged, o.outFile);
     return { binary: o.outFile, sha256: crypto.createHash("sha256").update(fs.readFileSync(o.outFile)).digest("hex") };

@@ -31,7 +31,7 @@ before(() => {
 interface Peer { connections: number; received: Buffer[]; afterHandshake: Buffer[]; relayProofOk: boolean | null }
 
 /** The companiond side: hello, check the relay's proof, send `readerProof` and `ready`, then echo with a prefix. */
-async function fakeAcceptor(token: string, o: { readerProof?: (nonce: Buffer) => string; ready?: string; closeAfterHello?: boolean } = {}): Promise<{ peer: Peer; close: () => Promise<void> }> {
+async function fakeAcceptor(token: string, o: { hello?: (nonce: Buffer) => string; readerProof?: (nonce: Buffer, relayProof: string) => string; ready?: string; closeAfterHello?: boolean; silent?: boolean } = {}): Promise<{ peer: Peer; close: () => Promise<void> }> {
   fs.rmSync(sock, { force: true });
   const peer: Peer = { connections: 0, received: [], afterHandshake: [], relayProofOk: null };
   const conns = new Set<net.Socket>();
@@ -42,14 +42,16 @@ async function fakeAcceptor(token: string, o: { readerProof?: (nonce: Buffer) =>
     let open = false;
     let buf = Buffer.alloc(0);
     c.on("error", () => {});
-    c.write(helloLine(nonce));
-    if (o.closeAfterHello) {
-      c.destroy();
-      return;
-    }
+    const hello = o.hello ? o.hello(nonce) : helloLine(nonce);
+    if (o.closeAfterHello) c.end(hello); // hello, then FIN: the relay's proof can still arrive
+    else c.write(hello);
     c.on("end", () => c.end());
     c.on("data", (chunk: Buffer) => {
       peer.received.push(chunk);
+      if (o.closeAfterHello) {
+        if (Buffer.concat(peer.received).length >= PROOF_BYTES) c.destroy(); // only after the proof is in
+        return;
+      }
       if (open) {
         peer.afterHandshake.push(chunk);
         c.write(Buffer.concat([Buffer.from("echo:"), chunk]));
@@ -60,7 +62,9 @@ async function fakeAcceptor(token: string, o: { readerProof?: (nonce: Buffer) =>
       peer.relayProofOk = buf.subarray(0, PROOF_BYTES).toString("latin1") === `${proof(token, nonce, "relay")}\n`;
       const rest = buf.subarray(PROOF_BYTES);
       if (rest.length > 0) peer.afterHandshake.push(rest);
-      c.write(`${o.readerProof ? o.readerProof(nonce) : proof(token, nonce, "reader")}\n${o.ready ?? "OK\n"}`);
+      if (o.silent) return;
+      const theirs = buf.subarray(0, PROOF_BYTES - 1).toString("latin1");
+      c.write(`${o.readerProof ? o.readerProof(nonce, theirs) : `${proof(token, nonce, "reader")}\n`}${o.ready ?? "OK\n"}`);
       open = true;
     });
   });
@@ -102,11 +106,62 @@ test("full handshake, then bytes flow both ways; the token never crosses the soc
 
 test("a wrong reader proof: exit 66 and no stdin byte reaches the socket", { skip }, async () => {
   const token = newToken();
-  const a = await fakeAcceptor(token, { readerProof: () => "0".repeat(64) });
+  const a = await fakeAcceptor(token, { readerProof: () => `${"0".repeat(64)}\n` });
   const r = runRelay({ CGC_RELAY_TOKEN: token });
   r.p.stdin?.write("SYNTHETIC FIXTURE must not be forwarded\n");
   assert.equal(await within(r.exit, 8000), 66);
   assert.deepEqual(a.peer.afterHandshake, []);
+  await a.close();
+});
+
+const flip = (h: string) => `${h.slice(0, -1)}${h.endsWith("0") ? "1" : "0"}`;
+const badProofs: Array<[string, (token: string) => (nonce: Buffer, relayProof: string) => string]> = [
+  ["the relay's own proof reflected back", () => (_n, rp) => `${rp}\n`],
+  ["a proof over a different nonce", (t) => () => `${proof(t, newNonce(), "reader")}\n`],
+  ["a proof wrong only in its last byte", (t) => (n) => `${flip(proof(t, n, "reader"))}\n`],
+  ["a proof with no trailing newline", (t) => (n) => `${proof(t, n, "reader")}X`],
+];
+for (const [name, make] of badProofs) {
+  test(`handshake refused: ${name} (exit 66, nothing forwarded)`, { skip }, async () => {
+    const token = newToken();
+    const a = await fakeAcceptor(token, { readerProof: make(token) });
+    const r = runRelay({ CGC_RELAY_TOKEN: token });
+    r.p.stdin?.write("SYNTHETIC FIXTURE must not be forwarded\n");
+    assert.equal(await within(r.exit, 8000), 66);
+    await sleep(100);
+    assert.equal(Buffer.concat(a.peer.received).length, PROOF_BYTES);
+    assert.deepEqual(a.peer.afterHandshake, []);
+    await a.close();
+  });
+}
+
+const badHellos: Array<[string, (nonce: Buffer) => string]> = [
+  ["wrong prefix", (n) => `CGC2 ${n.toString("hex")}\n`],
+  ["uppercase nonce", (n) => `CGC1 ${n.toString("hex").toUpperCase()}\n`],
+  ["non-hex nonce", () => `CGC1 ${"g".repeat(64)}\n`],
+  ["no newline", (n) => `CGC1 ${n.toString("hex")}X`],
+];
+for (const [name, hello] of badHellos) {
+  test(`malformed hello (${name}): exit 66, the relay sends nothing`, { skip }, async () => {
+    const token = newToken();
+    const a = await fakeAcceptor(token, { hello });
+    const r = runRelay({ CGC_RELAY_TOKEN: token });
+    r.p.stdin?.write("SYNTHETIC FIXTURE must not be forwarded\n");
+    assert.equal(await within(r.exit, 8000), 66);
+    await sleep(100);
+    assert.equal(Buffer.concat(a.peer.received).length, 0);
+    await a.close();
+  });
+}
+
+test("a silent peer: exit 66 within the one handshake deadline", { skip }, async () => {
+  const token = newToken();
+  const a = await fakeAcceptor(token, { silent: true });
+  const t0 = Date.now();
+  const r = runRelay({ CGC_RELAY_TOKEN: token });
+  assert.equal(await within(r.exit, 8000), 66);
+  assert.ok(Date.now() - t0 < 7000);
+  assert.equal(Buffer.concat(a.peer.received).length, PROOF_BYTES);
   await a.close();
 });
 
@@ -134,6 +189,7 @@ test("nothing listening: exit 69; closed during the handshake: exit 66", { skip 
   assert.equal(await within(runRelay({ CGC_RELAY_TOKEN: newToken() }).exit, 5000), 69);
   const a = await fakeAcceptor(newToken(), { closeAfterHello: true });
   assert.equal(await within(runRelay({ CGC_RELAY_TOKEN: newToken() }).exit, 8000), 66);
+  assert.equal(Buffer.concat(a.peer.received).length, PROOF_BYTES);
   await a.close();
 });
 

@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef RELAY_SOCKET
@@ -29,7 +30,22 @@
 #define NONCE_LEN 32
 #define HELLO "CGC1 "
 #define HELLO_LEN 5
-#define WAIT_MS 5000
+#define HANDSHAKE_MS 5000 // one deadline for the whole handshake, computed once
+
+// The path must fit sun_path with its NUL; the run-time check in main() stays as a second guard.
+_Static_assert(sizeof(RELAY_SOCKET) <= sizeof(((struct sockaddr_un *)0)->sun_path), "RELAY_SOCKET does not fit sun_path");
+
+// A wipe the optimiser cannot drop (memset on a dying buffer can be removed).
+static void wipe(void *p, size_t n) {
+  volatile unsigned char *v = (volatile unsigned char *)p;
+  while (n-- > 0) *v++ = 0;
+}
+
+static long long now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static int write_all(int fd, const char *p, size_t n) {
   while (n > 0) {
@@ -44,11 +60,13 @@ static int write_all(int fd, const char *p, size_t n) {
   return 0;
 }
 
-// Reads exactly n bytes; each wait is at most ms. 0 on success, -1 on EOF, error, POLLNVAL or timeout.
-static int read_exact(int fd, char *p, size_t n, int ms) {
+// Reads exactly n bytes before the absolute deadline (now_ms() scale). 0 on success, -1 on EOF, error, POLLNVAL or timeout.
+static int read_exact(int fd, char *p, size_t n, long long deadline) {
   while (n > 0) {
+    long long left = deadline - now_ms();
+    if (left <= 0) return -1;
     struct pollfd q = {fd, POLLIN, 0};
-    int r = poll(&q, 1, ms);
+    int r = poll(&q, 1, (int)left);
     if (r < 0 && errno == EINTR) continue;
     if (r <= 0 || (q.revents & POLLNVAL)) return -1;
     ssize_t got = read(fd, p, n);
@@ -88,7 +106,8 @@ static void proof(const char *token, const unsigned char *nonce, const char *lab
     out_hex[2 * i] = digits[mac[i] >> 4];
     out_hex[2 * i + 1] = digits[mac[i] & 15];
   }
-  memset(mac, 0, sizeof mac);
+  wipe(mac, sizeof mac);
+  wipe(msg, sizeof msg);
 }
 
 static int same(const char *a, const char *b, size_t n) {
@@ -112,6 +131,7 @@ int main(void) {
 
   const char *t = getenv("CGC_RELAY_TOKEN");
   if (t == NULL || strlen(t) != TOKEN_LEN || !is_hex(t, TOKEN_LEN)) return 64;
+  long long deadline = now_ms() + HANDSHAKE_MS;
   memcpy(token, t, TOKEN_LEN + 1);
   unsetenv("CGC_RELAY_TOKEN"); // note: the initial env stays readable through KERN_PROCARGS2 (spec §7.1.9 residual risk)
 
@@ -129,18 +149,19 @@ int main(void) {
     goto done;
   }
 
-  if (read_exact(s, hello, sizeof hello, WAIT_MS) != 0) goto done;
+  if (read_exact(s, hello, sizeof hello, deadline) != 0) goto done;
   if (memcmp(hello, HELLO, HELLO_LEN) != 0 || hello[sizeof hello - 1] != '\n' || !is_hex(hello + HELLO_LEN, HEX_LEN)) goto done;
   unhex(hello + HELLO_LEN, nonce, NONCE_LEN);
   proof(token, nonce, "relay", mine);
   mine[HEX_LEN] = '\n';
   if (write_all(s, mine, sizeof mine) != 0) goto done; // the peer went away mid-handshake: 66
-  if (read_exact(s, theirs, sizeof theirs, WAIT_MS) != 0 || theirs[HEX_LEN] != '\n') goto done;
+  if (read_exact(s, theirs, sizeof theirs, deadline) != 0 || theirs[HEX_LEN] != '\n') goto done;
   proof(token, nonce, "reader", want);
   if (!same(theirs, want, HEX_LEN)) goto done;
-  if (read_exact(s, ready, sizeof ready, WAIT_MS) != 0 || memcmp(ready, "OK\n", 3) != 0) goto done;
-  memset(token, 0, sizeof token);
-  memset(want, 0, sizeof want);
+  if (read_exact(s, ready, sizeof ready, deadline) != 0 || memcmp(ready, "OK\n", 3) != 0) goto done;
+  wipe(token, sizeof token);
+  wipe(want, sizeof want);
+  wipe(mine, sizeof mine);
 
   for (;;) {
     struct pollfd p[2] = {{s, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
@@ -171,6 +192,8 @@ int main(void) {
   }
 
 done:
-  memset(token, 0, sizeof token);
+  wipe(token, sizeof token);
+  wipe(want, sizeof want);
+  wipe(mine, sizeof mine);
   return rc;
 }
