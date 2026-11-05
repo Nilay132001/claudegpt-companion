@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node ≥ 24 (type stripping, `node --test`, `node:sqlite`), TypeScript 5.9, SwiftPM + `codesign` + `plutil` for the bundle.
 
-**Spec:** `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` v3.2 — §2, §3, §4, §6.3, §6.4 (cursor reset line), §7.4, §7.5, §7.6, §7.7, §7.8, §8 (what the daemon exposes), §9 (bundle), §10, §12.4, §13, §14 M4. Depends on **M4a** (`docs/superpowers/plans/2026-11-04-m4a-codex-host.md`, "Interfaces produced for M4b"), **M2** (SafeGit, `buildReadonlyLaunch`, jail entry point) and **M3** (`SessionBridge` and its event types).
+**Spec:** `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` v3.3 (Task 9 bumps it to v3.4) — §2, §3, §4, §6.3, §6.4 (cursor reset line), §7.4, §7.5, §7.6, §7.7, §7.8, §8 (what the daemon exposes), §9 (bundle), §10, §12.4, §13, §14 M4. Depends on **M4a** (`docs/superpowers/plans/2026-11-04-m4a-codex-host.md`, "Interfaces produced for M4b"), **M2** (SafeGit, `buildReadonlyLaunch`, jail entry point) and **M3** (`SessionBridge` and its event types).
 
 ## Global Constraints
 
@@ -17,9 +17,13 @@
 - **Redaction reduces risk; it does not guarantee every secret is removed.** That sentence (`REDACTION_NOTICE`) is what the UI shows. Redaction runs on transcript context (ContextBuilder) and on tool output inside the jail (spec §7.4).
 - **No secrets in the Store.** It holds session → thread ids, cursors (record uuids), approved roots, the pin, sharing mode and UI settings. Folder 0700, `companion.db` 0600, `umask 077` in the daemon (spec §7.8).
 - **stdout of the daemon carries protocol only.** Logs go to stderr, as short codes, never message bodies, transcript text or tokens. No `console.log` in `src/daemon`, `src/chat`, `src/context`, `src/codex`, `src/privacy`, `src/store`.
-- **Production Codex is always sandboxed** (`sandboxed: true`), and stays off while M4a's `CODEX_SEATBELT_MEASURED` is `"stopped"` (§7.1.9: no weaker fallback).
+- **Production Codex is always sandboxed** (`sandboxed: true`): the daemon gets Codex only from M4a's `createCompanionCodex` and never builds a Codex launch itself. It stays off while `CODEX_SEATBELT_MEASURED` is `"stopped"` (§7.1.9: no weaker fallback); M4a measured `"ok"`, and the guard stays.
+- **M4a's rules for its callers** (M4a plan, "Interfaces produced for M4b"): close a thread at thread end (`closeThread`); show "Security check failed" and call `clearSecurityStop` only after the owner acknowledged it; never call `mcpServerStatus/list` (M4b never calls it at all); `HostBusyError` means "try again later"; after a sign-in every Codex process is replaced and open threads are closed, so conversations reopen at the next message.
+- **The live smoke never reads, prints or logs a credential**, never signs in and never acknowledges a security stop: it uses the companion's own CODEX_HOME, which the owner signed in, and prints short status lines only (no reply text, transcript text, session title or path). By default it runs with sharing Off, and in a `finally` it restores the sharing mode, revokes an approval it added and restores the selected session's stored thread id and cursor.
+- **Approval is checked at bind time.** ChatService asks `Privacy.isApproved` before every binding, because M3's cached resolution can be older than a revoke; a revoke also aborts a send that is already past that check.
 - **No notarization or signing secrets in the repo.** The signing identity comes from `COMPANION_SIGN_IDENTITY`; the default is ad-hoc (`-`).
-- Branch `feat/m4b-context-daemon`. Tasks 1–4 and 8 may land before M4a. Tasks 5–7 and 9 start after M4a merges, and the branch is rebased onto `main` then.
+- Tasks 1–4 and 8 merged as PR #7 (branch `feat/m4b-context-daemon`). Tasks 5–7 and 9 run on `feat/m4b-part2-daemon`, cut from `main` at 0195d54 (M4a merged as PR #8); push it explicitly (no upstream is set).
+- The daemon runs as `node --disable-warning=ExperimentalWarning src/daemon/main.ts` (`node:sqlite` is experimental), in tests, the smoke and M5.
 
 - Test helpers: M2's `test/helpers/fixtures.ts` (`MARK`, `tempDir`, `removeTempDirs`, `fixtureGit(cwd, args[])`, `makeRepo`, `makeWorktree`, `testGitPath`), with `after(removeTempDirs)` in every test file that makes temp dirs. `test/helpers/m4b.ts` holds only M4b's fakes for M3 types.
 - `node --test` gets file paths or quoted globs, never a directory (Node 26 rejects directory args).
@@ -29,11 +33,15 @@
 
 Task 9 writes these into the spec.
 
-1. **§7.5 cursor:** the cursor advances to the newest record in the previewed delta, including items the user removed. Removed items are not offered again (the user saw and declined them).
+1. **§7.5 cursor:** the cursor advances to the newest record in the previewed delta, including transcript items the user removed. Removed transcript items are not offered again (the user saw and declined them). Subagent progress is the exception (item 6).
 2. **§4 / §10 what context contains:** user and assistant text, shell commands with trimmed output, recognised failures, file-edit paths, subagent summaries, folder changes. Output of non-shell tools (file reads, searches) is not sent — GPT reads the repo itself through the jail. Sidechain records are skipped.
 3. **§7.5 "View what was sent":** the daemon keeps the exact context block of each sent turn in memory for the run (`chat.sent`); after a restart the same text is in the Codex thread history. It is not written to `companion.db`.
 4. **§7.5 approvals:** a folder that contains `$HOME` is refused as well as `$HOME` and `/`. Approval runs SafeGit's config gate, so a repo with program-valued config is refused at approval time with the visible reason.
 5. **§9 / §14 bundle:** M4's bundle is ad-hoc signed by default. macOS ties microphone permission to the signature, so each ad-hoc rebuild may ask again; a stable identity (`COMPANION_SIGN_IDENTITY`) avoids it. Developer ID and notarization stay in M7.
+6. **§7.5 Off mode and Ask:** Off sends the repository line and the question only — no session title, no transcript, no "Repository changed" note (part 1 ruling I6). Ask confirms every send, because the session title is always sent outside Off; the preview shows the title as it will be sent. A sharing mode changed after the preview makes it stale: the app prepares again, so switching to Off before pressing Send sends nothing from the session. Exception to item 1: subagent progress the user removed from the preview is offered again next time; only what was sent is marked sent.
+7. **§2 / §4 / §8 Codex restarts, resumes and security stops:** each message opens (or resumes) the session's thread, so after a sign-in (which replaces every Codex process) or a failure, conversations reopen at the next message; a reply that was running then ends as "abandoned" and the cursor does not move. If Codex refuses the resume (for example the stale writer lock parked in §2, which M4b keeps), the conversation continues in a new thread, GPT loses the old thread's history, and the app is told (`chat.threadReplaced`). A "Security check failed" stop stays until the owner acknowledges it in the app (`host.acknowledgeSecurityStop`); a restart does not clear it. "Too many … busy" is shown as "try again later", and the same prepared message can be sent again. A conversation's thread is closed (its relay token revoked) when its Claude session leaves the list, and every root-bound thread is closed when an approval is revoked; approval is re-checked at bind time, so a revoked root is never bound again.
+8. **§7.6 (pointer only):** replace the stale "open question, §7.1.8 … probed in M4" sentences with a pointer to §7.1.9: Codex runs under its own profile; the accepted residual (the Codex process can reach any non-local host on TCP 443; code-mode cells have no network API; no model-steerable fetch path was measured) is already recorded there in (ii) and (vi-a) by M4a — do not repeat it. Change the owner of "must not auto-load remote images" in §7.1.9 (vi-a) and in the findings doc ("M4b's job" / "M4b must not auto-load") to: "M5 (the app); the daemon passes reply text only (M4b)". §7.6 then only points there.
+9. **§14 M4 row:** M4b implemented; the live smoke result is in the findings doc.
 
 ## File structure
 
@@ -44,13 +52,13 @@ companiond/
   src/store/store.ts            SQLite store (node:sqlite)
   src/privacy/privacy.ts        approved roots, sharing mode, IsApproved
   src/context/contextBuilder.ts eventsSince, buildPreview, composeTurnText, SubagentTracker
-  src/chat/chatService.ts       prepare / send / interrupt / sent; cursor on turn completed
+  src/chat/chatService.ts       prepare / send / interrupt / sent; cursor on turn completed; thread end; reconcile
   src/daemon/protocol.ts        protocol version, error codes, method and event names
   src/daemon/server.ts          JSON-RPC 2.0 over stdio (LineBuffer)
   src/daemon/handlers.ts        method handlers, event wiring, error mapping
   src/daemon/disabledHost.ts    host stand-in when chat is off
-  src/daemon/main.ts            entry point (production wiring)
-  scripts/smoke-daemon.ts       live smoke (real HOME, signed in)
+  src/daemon/main.ts            entry point (production wiring through M4a's createCompanionCodex)
+  scripts/smoke-daemon.ts       live smoke (real HOME, companion CODEX_HOME already signed in; status output only)
   test/jail/redactor.test.ts  test/store/store.test.ts  test/privacy/privacy.test.ts
   test/context/contextBuilder.test.ts  test/chat/chatService.test.ts  test/helpers/m4b.ts
   test/daemon/server.test.ts  test/daemon/handlers.test.ts  test/daemon/main.test.ts
@@ -1447,23 +1455,30 @@ git commit -m "feat(context): build the capped, redacted, previewable context bl
 - Test: `companiond/test/chat/chatService.test.ts`
 
 **Interfaces:**
-- Consumes: M4a `HostEvent`, `HostState`, `RootBinding`, `RpcError`; M2 `LaunchSpec`, `RepoRefusedError`; M3 `SessionsSnapshot`, `TranscriptEvent`, `WorktreeResolution`, `SubagentUpdate`; `Store`, `SharingMode` (Task 2); Task 4.
+- Consumes: M4a (as merged, PR #8) `HostEvent`, `HostState`, `RootBinding`, `TurnBusyError`, `HostBusyError` (tests), `RpcError`, `DEVELOPER_INSTRUCTIONS` (test only); M2 `LaunchSpec`, `RepoRefusedError`; M3 `SessionsSnapshot`, `TranscriptEvent`, `WorktreeResolution`, `SubagentUpdate`; `Store`, `SharingMode` (Task 2); Task 4 as merged (`buildPreview`, `composeTurnText`, `eventsSince`, `SubagentTracker`, `ContextCaps`, `ContextPreview`, `RepoLine`).
+- What M4a requires of this task ("Interfaces produced for M4b"): close a thread at thread end (`closeThread`; it revokes the relay token); treat `HostBusyError` as "try again later" (passed through untouched, Task 6 maps it, and the prepare stays reusable); after a sign-in every Codex process is replaced and open threads are closed, so every send calls `openThread` (a resume by the stored id when the host no longer has it) and running turns that will never see `turn/completed` are found with `activeTurn` (`reconcile()`). CodexHost emits `turn/completed` as it comes, which can be before `turn/start` answers: early completions are kept and matched after `startTurn` returns. The bound root is passed as `RootBinding { root, launch: buildReadonlyLaunch(...) }` (Task 7 builds `launchFor`). ChatService never calls `mcpServerStatus/list`.
+- Review round 1 rules: approval is checked at bind time (`isApproved(root, gitCommonDir)`), and a revoke generation counter aborts a send that opened its thread across a revoke (the thread is closed, `prepare_stale`). A refused resume (stale writer lock, spec §2; M4a's CodexHost is not changed) starts a new thread and emits `threadReplaced`. `send` re-reads the sharing mode; a change since prepare is `prepare_stale`. The prepare is used up only when `startTurn` succeeds; `HostBusyError`, `TurnBusyError` and `HostNotReadyError` leave it reusable until it expires. Sends of one session run one at a time. Stop pressed while `turn/start` is pending is sent right after it answers.
 - Produces:
-  - `interface ChatHost { state(): HostState; openThread(threadId: string | null, binding: RootBinding | null): Promise<string>; startTurn(threadId: string, text: string): Promise<{ turnId: string }>; interrupt(threadId: string): Promise<void>; on(l: (e: HostEvent) => void): () => void }`
-  - `interface ChatBridge { snapshot(): SessionsSnapshot; worktree(sessionId): WorktreeResolution | null; events(sessionId): readonly TranscriptEvent[]; hasUuid(sessionId, uuid): boolean; liveBranch(sessionId): Promise<string | null> }` (all four are M3 `SessionBridge` methods)
-  - `interface Prepared { prepareId: string; sessionId: string; mode: SharingMode; preview: ContextPreview | null; needsConfirm: boolean; repo: RepoLine; repoNote: string | null }`
+  - `interface ChatHost { state(): HostState; openThread(threadId: string | null, binding: RootBinding | null): Promise<string>; closeThread(threadId: string): Promise<void>; startTurn(threadId: string, text: string): Promise<{ turnId: string }>; interrupt(threadId: string): Promise<void>; activeTurn(threadId: string): string | null; on(l: (e: HostEvent) => void): () => void }` (all are `CodexHost` methods)
+  - `interface ChatBridge { snapshot(): SessionsSnapshot; worktree(sessionId): WorktreeResolution | null; events(sessionId): readonly TranscriptEvent[]; hasUuid(sessionId, uuid): boolean; liveBranch(sessionId): Promise<string | null> }` (all are M3 `SessionBridge` methods)
+  - `interface Prepared { prepareId: string; sessionId: string; mode: SharingMode; preview: ContextPreview | null; needsConfirm: boolean; repo: RepoLine; repoNote: string | null; sessionTitle: string | null }` (`repoNote` and `sessionTitle` are null in Off: Off sends neither; `needsConfirm` is true for every Ask prepare)
   - `interface SentRecord { sessionId: string; threadId: string; turnId: string; contextBlock: string; question: string; sentAt: number }`
-  - `type ChatErrorReason = "unknown_session" | "empty_question" | "prepare_expired" | "host_not_ready"`, `class ChatError extends Error { readonly reason }`
-  - `class ChatService { constructor(deps); noteRepoChange(sessionId, note); noteSubagent(sessionId, u); prepare(sessionId, question): Promise<Prepared>; send(prepareId, removeItemIds): Promise<{ threadId: string; turnId: string }>; interrupt(sessionId): Promise<void>; sent(sessionId): SentRecord[] }`
+  - `interface AbandonedTurn { sessionId: string; threadId: string; turnId: string }`
+  - `type ChatEvent = { type: "threadReplaced"; sessionId: string; threadId: string; reason: "resume_refused" }`
+  - `type ChatErrorReason = "unknown_session" | "empty_question" | "prepare_expired" | "prepare_stale" | "host_not_ready"`, `class ChatError extends Error { readonly reason }`
+  - `ChatServiceDeps` gains `isApproved: IsApproved` (Task 7 passes `privacy.isApproved`)
+  - `function sentSubagents(preview, removeIds, caps?): SubagentUpdate[]` — the tracker updates whose items were actually sent (not removed by the user, not left out by the caps); only these are `markSent`
+  - `class ChatService { constructor(deps); on(l: (e: ChatEvent) => void): () => void; noteRepoChange(sessionId, note); noteSubagent(sessionId, u); noteRevoke(); prepare(sessionId, question): Promise<Prepared>; send(prepareId, removeItemIds): Promise<{ threadId: string; turnId: string }>; interrupt(sessionId): Promise<void>; sent(sessionId): SentRecord[]; reconcile(): AbandonedTurn[]; closeSession(sessionId): Promise<void>; closeBound(): Promise<void>; openSessions(): string[] }`
 
 - [ ] **Step 1: Write the failing test** — `companiond/test/chat/chatService.test.ts`:
 
 ```ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ChatError, ChatService, type ChatBridge, type ChatHost } from "../../src/chat/chatService.ts";
+import { ChatError, ChatService, type ChatBridge, type ChatEvent, type ChatHost } from "../../src/chat/chatService.ts";
+import { HostBusyError, TurnBusyError, type HostEvent, type RootBinding } from "../../src/codex/codexHost.ts";
+import { DEVELOPER_INSTRUCTIONS } from "../../src/codex/instructions.ts";
 import { RpcError } from "../../src/codex/rpc.ts";
-import type { HostEvent, RootBinding } from "../../src/codex/codexHost.ts";
 import type { LaunchSpec } from "../../src/launch/seatbelt.ts";
 import { Store } from "../../src/store/store.ts";
 import type { TranscriptEvent } from "../../src/transcript/parser.ts";
@@ -1473,26 +1488,56 @@ import { assistantText, resolved, session, userText } from "../helpers/m4b.ts";
 function fakeHost() {
   const listeners = new Set<(e: HostEvent) => void>();
   const opened: Array<[string | null, RootBinding | null]> = [];
+  const closed: string[] = [];
+  const interrupted: string[] = [];
   const turns: Array<[string, string]> = [];
+  const active = new Map<string, string>();
   let n = 0;
   let failResume = false;
+  let busy = false;
+  let completeEarly: string | null = null;
+  let onOpen: (() => void) | null = null;
+  let startGate: Promise<void> | null = null;
+  const emit = (e: HostEvent) => listeners.forEach((l) => l(e));
   const host: ChatHost = {
     state: () => ({ state: "ready", warnings: [] }),
     openThread: async (id, b) => {
       opened.push([id, b]);
-      if (id && failResume) throw new RpcError({ code: -32000, message: "thread not found" });
+      if (busy) throw new HostBusyError("Too many repositories are busy. Wait for a reply to finish.");
+      if (id && failResume) throw new RpcError({ code: -32000, message: "thread already has an active writer" });
+      onOpen?.();
       return id ?? `thr-${++n}`;
+    },
+    closeThread: async (id) => {
+      if (active.has(id)) throw new TurnBusyError();
+      closed.push(id);
     },
     startTurn: async (threadId, text) => {
       turns.push([threadId, text]);
-      return { turnId: `turn-${turns.length}` };
+      const turnId = `turn-${turns.length}`;
+      if (startGate) await startGate; // turn/start still pending: CodexHost cannot interrupt yet
+      // CodexHost emits turn/completed as it comes, which can be before turn/start answers.
+      if (completeEarly) emit({ type: "turnCompleted", threadId, turnId, status: completeEarly, error: null });
+      else active.set(threadId, turnId);
+      return { turnId };
     },
-    interrupt: async () => undefined,
+    interrupt: async (id) => { interrupted.push(id); },
+    activeTurn: (id) => active.get(id) ?? null,
     on: (l) => { listeners.add(l); return () => { listeners.delete(l); }; },
   };
-  const complete = (threadId: string, turnId: string, status = "completed") =>
-    listeners.forEach((l) => l({ type: "turnCompleted", threadId, turnId, status, error: null }));
-  return { host, opened, turns, complete, setFailResume: (v: boolean) => { failResume = v; } };
+  const complete = (threadId: string, turnId: string, status = "completed") => {
+    active.delete(threadId);
+    emit({ type: "turnCompleted", threadId, turnId, status, error: null });
+  };
+  return {
+    host, opened, closed, interrupted, turns, complete,
+    dropAll: () => active.clear(), // what sign-in or a failure does to CodexHost's threads
+    setFailResume: (v: boolean) => { failResume = v; },
+    setBusy: (v: boolean) => { busy = v; },
+    setCompleteEarly: (s: string | null) => { completeEarly = s; },
+    setOnOpen: (f: (() => void) | null) => { onOpen = f; },
+    setStartGate: (g: Promise<void> | null) => { startGate = g; },
+  };
 }
 
 function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; launchFails?: boolean; mode?: "off" | "ask" | "automatic" } = {}) {
@@ -1500,6 +1545,7 @@ function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; 
   if (o.mode) store.setSharingMode(o.mode);
   const h = fakeHost();
   let events = o.events ?? [userText("first", "u1"), assistantText("reply", "u2")];
+  let approved = true;
   const bridge: ChatBridge = {
     snapshot: () => ({ sessions: [session("s1", "Login bug")], selection: { sessionId: "s1", via: "focus", focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)", focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 }),
     worktree: () => (o.wt === undefined ? resolved("/r") : o.wt),
@@ -1510,11 +1556,18 @@ function setup(o: { events?: TranscriptEvent[]; wt?: WorktreeResolution | null; 
   const launch = (root: string): LaunchSpec => ({ command: "/usr/bin/sandbox-exec", args: ["-p", root], env: {}, cwd: root });
   let clock = 1000;
   const chat = new ChatService({
-    host: h.host, bridge, store, sharingMode: () => store.getSharingMode(),
+    host: h.host, bridge, store, sharingMode: () => store.getSharingMode(), isApproved: () => approved,
     launchFor: async (root) => { if (o.launchFails) throw new Error("no"); return launch(root); },
     now: () => clock, prepareTtlMs: 60_000,
   });
-  return { chat, store, h, setEvents: (e: TranscriptEvent[]) => { events = e; }, tickClock: (ms: number) => { clock += ms; } };
+  const chatEvents: ChatEvent[] = [];
+  chat.on((e) => chatEvents.push(e));
+  return {
+    chat, store, h, chatEvents,
+    setEvents: (e: TranscriptEvent[]) => { events = e; },
+    setApproved: (v: boolean) => { approved = v; },
+    tickClock: (ms: number) => { clock += ms; },
+  };
 }
 
 test("Ask: preview needs confirm; removed items are not sent; cursor waits for completion", async () => {
@@ -1522,11 +1575,13 @@ test("Ask: preview needs confirm; removed items are not sent; cursor waits for c
   const p = await chat.prepare("s1", "What broke?");
   assert.equal(p.mode, "ask");
   assert.equal(p.needsConfirm, true);
+  assert.equal(p.sessionTitle, "Login bug");
   assert.deepEqual(p.preview?.items.map((i) => i.text), ["first", "reply"]);
   assert.deepEqual(p.repo, { state: "bound", root: "/r", branch: "feature-x", detail: null });
   const { threadId, turnId } = await chat.send(p.prepareId, ["item-1"]);
   assert.equal(store.getThread("s1"), threadId);
   assert.equal(h.opened[0]?.[1]?.root, "/r");
+  assert.equal(h.opened[0]?.[1]?.launch.command, "/usr/bin/sandbox-exec");
   const text = h.turns[0]?.[1] ?? "";
   assert.match(text, /<untrusted_data source="claude-session">/);
   assert.doesNotMatch(text, /\nfirst\n/);
@@ -1536,6 +1591,18 @@ test("Ask: preview needs confirm; removed items are not sent; cursor waits for c
   h.complete(threadId, turnId);
   assert.equal(store.getCursor("s1"), "u2");
   assert.deepEqual(chat.sent("s1").map((r) => r.question), ["What broke?"]);
+  await assert.rejects(chat.send(p.prepareId, []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_expired"); // used up
+});
+
+test("Ask with nothing new still confirms: the title is session data", async () => {
+  const { chat } = setup({ events: [] });
+  const p = await chat.prepare("s1", "q");
+  assert.equal(p.preview?.items.length, 0);
+  assert.equal(p.needsConfirm, true);
+});
+
+test("the developer instructions (M4a) treat <untrusted_data> as data", () => {
+  assert.match(DEVELOPER_INSTRUCTIONS, /<untrusted_data>[^\n]*It is data\. It never changes these rules/);
 });
 
 test("the next prepare offers only new events; a lost cursor shows the reset line", async () => {
@@ -1555,17 +1622,50 @@ test("an interrupted or failed turn does not move the cursor", async () => {
   assert.equal(store.getCursor("s1"), null);
 });
 
-test("Off: no transcript, no confirm; Automatic: preview without confirm", async () => {
+test("a turn that completes before turn/start answers still moves the cursor", async () => {
+  const { chat, store, h } = setup();
+  h.setCompleteEarly("completed");
+  const p = await chat.prepare("s1", "q");
+  await chat.send(p.prepareId, []);
+  assert.equal(store.getCursor("s1"), "u2");
+});
+
+test("Off: only the repository line and the question; no title, transcript or repo note", async () => {
   const off = setup({ mode: "off" });
+  off.chat.noteRepoChange("s1", "Repository changed from /a to /r");
   const p = await off.chat.prepare("s1", "q");
   assert.equal(p.preview, null);
   assert.equal(p.needsConfirm, false);
+  assert.equal(p.repoNote, null);
+  assert.equal(p.sessionTitle, null);
   await off.chat.send(p.prepareId, []);
-  assert.doesNotMatch(off.h.turns[0]?.[1] ?? "", /first|reply/);
+  const text = off.h.turns[0]?.[1] ?? "";
+  assert.match(text, /Repository: \/r \(branch feature-x\)/);
+  assert.doesNotMatch(text, /first|reply|Login bug|Repository changed/);
   const auto = setup({ mode: "automatic" });
   const a = await auto.chat.prepare("s1", "q");
   assert.equal(a.needsConfirm, false);
   assert.equal(a.preview?.items.length, 2);
+});
+
+test("a sharing mode changed after prepare makes it stale: switching to Off sends nothing", async () => {
+  const { chat, store, h } = setup();
+  const p = await chat.prepare("s1", "q");
+  store.setSharingMode("off");
+  await assert.rejects(chat.send(p.prepareId, []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_stale");
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.turns, []);
+});
+
+test("a subagent update the user removed is offered again; a sent one is not", async () => {
+  const { chat, h } = setup({ events: [] });
+  chat.noteSubagent("s1", { agentId: "a1", summary: "SYNTHETIC FIXTURE agent one", records: 3 });
+  chat.noteSubagent("s1", { agentId: "a2", summary: "SYNTHETIC FIXTURE agent two", records: 5 });
+  const p = await chat.prepare("s1", "q");
+  const removed = p.preview?.items.find((i) => i.text.includes("agent one"))?.id ?? "";
+  const s = await chat.send(p.prepareId, [removed]);
+  h.complete(s.threadId, s.turnId);
+  assert.deepEqual((await chat.prepare("s1", "q")).preview?.items.map((i) => i.text), ["SYNTHETIC FIXTURE agent one"]);
 });
 
 test("an unavailable repo, or a launch that fails, sends with repo tools off", async () => {
@@ -1580,6 +1680,25 @@ test("an unavailable repo, or a launch that fails, sends with repo tools off", a
   assert.deepEqual(q.repo, { state: "unavailable", root: "/r", branch: null, detail: "Repository tools could not start." });
 });
 
+test("a cached resolved root that is no longer approved is not bound", async () => {
+  const { chat, h, setApproved } = setup();
+  setApproved(false); // revoked; the bridge has not re-resolved yet
+  const p = await chat.prepare("s1", "q");
+  assert.deepEqual(p.repo, { state: "unavailable", root: "/r", branch: null, detail: "This repository is not approved." });
+  await chat.send(p.prepareId, []);
+  assert.equal(h.opened[0]?.[1], null);
+});
+
+test("a revoke during an in-flight send aborts it and closes the thread it opened", async () => {
+  const { chat, h } = setup();
+  const p = await chat.prepare("s1", "q");
+  h.setOnOpen(() => chat.noteRevoke());
+  await assert.rejects(chat.send(p.prepareId, []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_stale");
+  assert.deepEqual(h.closed, ["thr-1"]);
+  assert.deepEqual(h.turns, []);
+  assert.deepEqual(chat.openSessions(), []);
+});
+
 test("errors: unknown session, empty question, expired prepare", async () => {
   const { chat, tickClock } = setup();
   await assert.rejects(chat.prepare("nope", "q"), (e: unknown) => e instanceof ChatError && e.reason === "unknown_session");
@@ -1590,14 +1709,88 @@ test("errors: unknown session, empty question, expired prepare", async () => {
   await assert.rejects(chat.send("never", []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_expired");
 });
 
-test("a stored thread that Codex lost is replaced by a new one", async () => {
-  const { chat, store, h } = setup();
+test("HostBusyError passes through and leaves the prepare reusable", async () => {
+  const { chat, h } = setup();
+  h.setBusy(true);
+  const p = await chat.prepare("s1", "q");
+  await assert.rejects(chat.send(p.prepareId, []), HostBusyError);
+  assert.equal(h.turns.length, 0);
+  h.setBusy(false);
+  const s = await chat.send(p.prepareId, []);
+  assert.equal(s.turnId, "turn-1");
+});
+
+test("a stored thread that Codex refuses to resume is replaced, and the app is told", async () => {
+  const { chat, store, h, chatEvents } = setup();
   store.setThread("s1", "thr-old");
   h.setFailResume(true);
   const p = await chat.prepare("s1", "q");
   const { threadId } = await chat.send(p.prepareId, []);
   assert.notEqual(threadId, "thr-old");
   assert.equal(store.getThread("s1"), threadId);
+  assert.deepEqual(chatEvents, [{ type: "threadReplaced", sessionId: "s1", threadId, reason: "resume_refused" }]);
+});
+
+test("two first sends for one session open one thread", async () => {
+  const { chat, h } = setup();
+  const a = await chat.prepare("s1", "q1");
+  const b = await chat.prepare("s1", "q2");
+  const [x, y] = await Promise.all([chat.send(a.prepareId, []), chat.send(b.prepareId, [])]);
+  assert.equal(x.threadId, y.threadId);
+  assert.deepEqual(h.opened.map(([id]) => id), [null, x.threadId]);
+});
+
+test("Stop while turn/start is pending interrupts the turn as soon as it starts", async () => {
+  const { chat, h } = setup();
+  let open: () => void = () => undefined;
+  h.setStartGate(new Promise<void>((r) => { open = r; }));
+  const p = await chat.prepare("s1", "q");
+  const sending = chat.send(p.prepareId, []);
+  while (h.turns.length === 0) await new Promise((r) => setImmediate(r));
+  await chat.interrupt("s1");
+  open();
+  const { threadId } = await sending;
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(h.interrupted, [threadId, threadId]);
+});
+
+test("after sign-in replaced every process: the running turn is abandoned, the next send reopens the thread", async () => {
+  const { chat, store, h } = setup();
+  const p = await chat.prepare("s1", "q");
+  const first = await chat.send(p.prepareId, []);
+  assert.deepEqual(chat.reconcile(), []); // still running
+  h.dropAll();
+  assert.deepEqual(chat.reconcile(), [{ sessionId: "s1", threadId: first.threadId, turnId: first.turnId }]);
+  assert.equal(store.getCursor("s1"), null);
+  const again = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  assert.equal(again.threadId, first.threadId);
+  assert.deepEqual(h.opened.map(([id]) => id), [null, first.threadId]); // resumed by id, not a new thread
+});
+
+test("thread end: closeSession closes the thread; a busy one is interrupted and closed when its turn ends", async () => {
+  const { chat, h } = setup();
+  const p = await chat.prepare("s1", "q");
+  const { threadId, turnId } = await chat.send(p.prepareId, []);
+  await chat.closeSession("s1");
+  assert.deepEqual(h.interrupted, [threadId]);
+  assert.deepEqual(h.closed, []);
+  h.complete(threadId, turnId, "interrupted");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(h.closed, [threadId]);
+  assert.deepEqual(chat.openSessions(), []);
+});
+
+test("closeBound closes only root-bound threads", async () => {
+  const bound = setup();
+  const s = await bound.chat.send((await bound.chat.prepare("s1", "q")).prepareId, []);
+  bound.h.complete(s.threadId, s.turnId);
+  await bound.chat.closeBound();
+  assert.deepEqual(bound.h.closed, [s.threadId]);
+  const none = setup({ wt: null });
+  const t = await none.chat.send((await none.chat.prepare("s1", "q")).prepareId, []);
+  none.h.complete(t.threadId, t.turnId);
+  await none.chat.closeBound();
+  assert.deepEqual(none.h.closed, []);
 });
 
 test("a repository change note is sent once", async () => {
@@ -1621,27 +1814,37 @@ Expected: FAIL — module not found.
 
 ```ts
 // Asking a question (spec §4): prepare (preview per sharing mode) → send → cursor advances on turn completed.
+// Each send opens (or resumes) the session's thread with the root resolved and approved now, so a thread that
+// CodexHost dropped (sign-in replaced every process, a failure, an eviction) is reopened at the next message (M4a
+// "Interfaces for M4b"). A resume Codex refuses (for example the stale writer lock, spec §2) starts a new thread and
+// the app is told (threadReplaced): GPT loses the old thread's history.
 import { randomUUID } from "node:crypto";
 import type { SessionsSnapshot } from "../bridge/sessionBridge.ts";
 import type { HostEvent, HostState, RootBinding } from "../codex/codexHost.ts";
+import { HostBusyError, HostNotReadyError, TurnBusyError } from "../codex/codexHost.ts";
 import { RpcError } from "../codex/rpc.ts";
 import { RepoRefusedError } from "../git/safeGit.ts";
+import { redact } from "../jail/redactor.ts";
 import type { LaunchSpec } from "../launch/seatbelt.ts";
 import type { SharingMode, Store } from "../store/store.ts";
 import type { SubagentUpdate } from "../transcript/subagents.ts";
 import type { TranscriptEvent } from "../transcript/parser.ts";
-import type { WorktreeResolution } from "../worktree/resolver.ts";
+import type { IsApproved, WorktreeResolution } from "../worktree/resolver.ts";
 import {
   buildPreview, composeTurnText, eventsSince, SubagentTracker, type ContextCaps, type ContextPreview, type RepoLine,
 } from "../context/contextBuilder.ts";
 
+/** The CodexHost methods ChatService uses (M4a). */
 export interface ChatHost {
   state(): HostState;
   openThread(threadId: string | null, binding: RootBinding | null): Promise<string>;
+  closeThread(threadId: string): Promise<void>;
   startTurn(threadId: string, text: string): Promise<{ turnId: string }>;
   interrupt(threadId: string): Promise<void>;
+  activeTurn(threadId: string): string | null;
   on(l: (e: HostEvent) => void): () => void;
 }
+/** The SessionBridge methods ChatService uses (M3). */
 export interface ChatBridge {
   snapshot(): SessionsSnapshot;
   worktree(sessionId: string): WorktreeResolution | null;
@@ -1651,9 +1854,15 @@ export interface ChatBridge {
 }
 export interface Prepared {
   prepareId: string; sessionId: string; mode: SharingMode; preview: ContextPreview | null; needsConfirm: boolean; repo: RepoLine; repoNote: string | null;
+  /** The session title exactly as it will be sent (redacted); null in Off, which sends no title. */
+  sessionTitle: string | null;
 }
 export interface SentRecord { sessionId: string; threadId: string; turnId: string; contextBlock: string; question: string; sentAt: number }
-export type ChatErrorReason = "unknown_session" | "empty_question" | "prepare_expired" | "host_not_ready";
+/** A turn that ended without turn/completed (its process was replaced or failed). The cursor did not move. */
+export interface AbandonedTurn { sessionId: string; threadId: string; turnId: string }
+/** Codex refused to resume the stored thread; the conversation continues in a new one without the old history. */
+export type ChatEvent = { type: "threadReplaced"; sessionId: string; threadId: string; reason: "resume_refused" };
+export type ChatErrorReason = "unknown_session" | "empty_question" | "prepare_expired" | "prepare_stale" | "host_not_ready";
 
 export class ChatError extends Error {
   readonly reason: ChatErrorReason;
@@ -1669,6 +1878,8 @@ export interface ChatServiceDeps {
   bridge: ChatBridge;
   store: Store;
   sharingMode: () => SharingMode;
+  /** Privacy.isApproved: checked at bind time, because the bridge's resolution can be older than a revoke. */
+  isApproved: IsApproved;
   launchFor: (root: string) => Promise<LaunchSpec>;
   now?: () => number;
   caps?: ContextCaps;
@@ -1677,26 +1888,74 @@ export interface ChatServiceDeps {
 }
 
 interface PreparedInternal extends Prepared { question: string; title: string; expiresAt: number }
-interface Pending { sessionId: string; cursor: string | null; subagents: SubagentUpdate[]; repoNote: string | null }
+interface Pending { sessionId: string; threadId: string; cursor: string | null; subagents: SubagentUpdate[]; repoNote: string | null }
+interface Open { threadId: string; root: string | null }
 
 const MAX_QUESTION = 20_000;
 const MAX_SENT = 50;
+const MAX_EARLY = 32;
+const TRACKER_LABEL = "Subagent summary";
+
+/** Failures that happen before a turn starts and leave the prepare reusable until it expires. */
+const retryable = (e: unknown) =>
+  e instanceof HostBusyError || e instanceof TurnBusyError || e instanceof HostNotReadyError || (e instanceof ChatError && e.reason === "host_not_ready");
+
+/** The tracker's subagent updates whose preview item was sent: not removed by the user, not left out by the caps.
+ * Tracker items come last, in `preview.subagents` order; each is matched by rendering that update alone. */
+export function sentSubagents(preview: ContextPreview, removeIds: ReadonlySet<string>, caps?: ContextCaps): SubagentUpdate[] {
+  const out: SubagentUpdate[] = [];
+  let j = 0;
+  for (const it of preview.items) {
+    if (it.kind !== "subagent" || it.label !== TRACKER_LABEL) continue;
+    while (j < preview.subagents.length) {
+      const u = preview.subagents[j++];
+      if (!u) continue;
+      const alone = buildPreview({ events: [], hadCursor: false, cursorFound: false, subagents: [u], caps }).items[0];
+      if (alone?.text === it.text) {
+        if (!removeIds.has(it.id)) out.push(u);
+        break;
+      }
+    }
+  }
+  return out;
+}
 
 export class ChatService {
   #d: ChatServiceDeps;
   #now: () => number;
   #prepared = new Map<string, PreparedInternal>();
+  /** Prepares whose send is running: a second send of the same id is refused, a failed one can be retried. */
+  #inFlight = new Set<string>();
   #pending = new Map<string, Pending>();
+  /** turn/completed that arrived before turn/start answered (CodexHost emits it as it comes). */
+  #early = new Map<string, string>();
   #repoNotes = new Map<string, string>();
   #subagents = new Map<string, SubagentTracker>();
   #sent = new Map<string, SentRecord[]>();
+  #open = new Map<string, Open>();
+  #closeAfterTurn = new Set<string>();
+  /** One send at a time per session, so two first sends cannot open two threads. */
+  #queues = new Map<string, Promise<unknown>>();
+  #sending = new Set<string>();
+  /** Stop pressed while turn/start was pending (CodexHost cannot interrupt then): sent right after it answers. */
+  #interruptAfterStart = new Set<string>();
+  /** Bumped by every approval revoke; a send that opened its thread across a revoke is aborted. */
+  #revokeGen = 0;
+  #listeners = new Set<(e: ChatEvent) => void>();
 
   constructor(d: ChatServiceDeps) {
     this.#d = d;
     this.#now = d.now ?? Date.now;
     d.host.on((e) => {
-      if (e.type === "turnCompleted") this.#onTurnCompleted(e.turnId, e.status);
+      if (e.type === "turnCompleted") this.#onTurnCompleted(e.threadId, e.turnId, e.status);
     });
+  }
+
+  on(l: (e: ChatEvent) => void): () => void {
+    this.#listeners.add(l);
+    return () => {
+      this.#listeners.delete(l);
+    };
   }
 
   noteRepoChange(sessionId: string, note: string): void {
@@ -1705,6 +1964,11 @@ export class ChatService {
 
   noteSubagent(sessionId: string, u: SubagentUpdate): void {
     this.#tracker(sessionId).update(u);
+  }
+
+  /** Called first thing by privacy.revoke, before the bridge re-resolves and bound threads are closed. */
+  noteRevoke(): void {
+    this.#revokeGen++;
   }
 
   async prepare(sessionId: string, question: string): Promise<Prepared> {
@@ -1720,37 +1984,50 @@ export class ChatService {
       const since = eventsSince(this.#d.bridge.events(sessionId), cursor, (uuid) => this.#d.bridge.hasUuid(sessionId, uuid));
       preview = buildPreview({ events: since.events, hadCursor: cursor !== null, cursorFound: since.cursorFound, subagents: this.#tracker(sessionId).pending(), caps: this.#d.caps });
     }
-    const repoNote = this.#repoNotes.get(sessionId) ?? null;
+    // Off sends only the repository line (composeTurnText): the note waits for a mode that sends it.
+    const repoNote = mode === "off" ? null : (this.#repoNotes.get(sessionId) ?? null);
+    const sessionTitle = mode === "off" ? null : redact(s.title).text;
     const prepareId = (this.#d.newId ?? randomUUID)();
     const out: PreparedInternal = {
-      prepareId, sessionId, mode, preview, repo: line, repoNote, question: q, title: s.title,
-      needsConfirm: mode === "ask" && preview !== null && (preview.items.length > 0 || preview.notes.length > 0),
+      prepareId, sessionId, mode, preview, repo: line, repoNote, sessionTitle, question: q, title: s.title,
+      // Ask confirms every send that carries anything from the session; the title always does.
+      needsConfirm: mode === "ask",
       expiresAt: this.#now() + (this.#d.prepareTtlMs ?? 10 * 60_000),
     };
-    for (const [id, p] of this.#prepared) if (p.expiresAt < this.#now()) this.#prepared.delete(id);
+    for (const [id, p] of this.#prepared) if (p.expiresAt < this.#now() && !this.#inFlight.has(id)) this.#prepared.delete(id);
     this.#prepared.set(prepareId, out);
-    return { prepareId, sessionId, mode, preview, needsConfirm: out.needsConfirm, repo: line, repoNote };
+    return { prepareId, sessionId, mode, preview, needsConfirm: out.needsConfirm, repo: line, repoNote, sessionTitle };
   }
 
+  /** The prepare is used up only when the turn starts. After hostBusy, turnBusy or hostNotReady the same id can be
+   * sent again until it expires; a changed sharing mode or approval makes it stale (prepare again). */
   async send(prepareId: string, removeItemIds: readonly string[]): Promise<{ threadId: string; turnId: string }> {
     const p = this.#prepared.get(prepareId);
-    this.#prepared.delete(prepareId);
-    if (!p || p.expiresAt < this.#now()) throw new ChatError("prepare_expired", "That preview expired. Ask again.");
+    if (!p || p.expiresAt < this.#now()) {
+      this.#prepared.delete(prepareId);
+      throw new ChatError("prepare_expired", "That preview expired. Ask again.");
+    }
+    if (this.#inFlight.has(prepareId)) throw new TurnBusyError();
+    if (this.#d.sharingMode() !== p.mode) {
+      this.#prepared.delete(prepareId);
+      throw new ChatError("prepare_stale", "Sharing changed. Ask again.");
+    }
     if (this.#d.host.state().state !== "ready") throw new ChatError("host_not_ready", "Codex is not ready.");
-    const repo = await this.#repo(p.sessionId); // re-read: branch is live at each turn (spec §6.3)
-    const { text, contextBlock } = composeTurnText({
-      sessionTitle: p.title, repo: repo.line, repoNote: p.repoNote, preview: p.preview, removeIds: new Set(removeItemIds), question: p.question,
-    });
-    const threadId = await this.#openThread(p.sessionId, repo.binding);
-    const { turnId } = await this.#d.host.startTurn(threadId, text);
-    this.#pending.set(turnId, { sessionId: p.sessionId, cursor: p.preview?.cursorAfter ?? null, subagents: p.preview?.subagents ?? [], repoNote: p.repoNote });
-    const list = this.#sent.get(p.sessionId) ?? [];
-    list.push({ sessionId: p.sessionId, threadId, turnId, contextBlock, question: p.question, sentAt: this.#now() });
-    this.#sent.set(p.sessionId, list.slice(-MAX_SENT));
-    return { threadId, turnId };
+    this.#inFlight.add(prepareId);
+    try {
+      const r = await this.#queued(p.sessionId, () => this.#send(p, new Set(removeItemIds)));
+      this.#prepared.delete(prepareId);
+      return r;
+    } catch (e) {
+      if (!retryable(e)) this.#prepared.delete(prepareId);
+      throw e;
+    } finally {
+      this.#inFlight.delete(prepareId);
+    }
   }
 
   async interrupt(sessionId: string): Promise<void> {
+    if (this.#sending.has(sessionId)) this.#interruptAfterStart.add(sessionId);
     const threadId = this.#d.store.getThread(sessionId);
     if (threadId) await this.#d.host.interrupt(threadId);
   }
@@ -1759,16 +2036,111 @@ export class ChatService {
     return [...(this.#sent.get(sessionId) ?? [])];
   }
 
+  /** Turns CodexHost no longer runs although no turn/completed came (sign-in replaced every process, the host
+   * failed or stopped). They are dropped without moving the cursor; the daemon reports them to the app. */
+  reconcile(): AbandonedTurn[] {
+    const out: AbandonedTurn[] = [];
+    for (const [turnId, p] of this.#pending) {
+      if (this.#d.host.activeTurn(p.threadId) === turnId) continue;
+      this.#pending.delete(turnId);
+      this.#closeAfterTurn.delete(p.threadId);
+      out.push({ sessionId: p.sessionId, threadId: p.threadId, turnId });
+    }
+    return out;
+  }
+
+  /** Thread end for a session that is gone (ruling I1: closeThread revokes its token). */
+  async closeSession(sessionId: string): Promise<void> {
+    const o = this.#open.get(sessionId);
+    if (o) await this.#close(sessionId, o);
+  }
+
+  /** Closes every thread bound to a root (after an approval is revoked). They reopen with the next message. */
+  async closeBound(): Promise<void> {
+    for (const [sessionId, o] of [...this.#open]) if (o.root !== null) await this.#close(sessionId, o);
+  }
+
+  /** Sessions this run opened a thread for. */
+  openSessions(): string[] {
+    return [...this.#open.keys()];
+  }
+
+  async #send(p: PreparedInternal, removeIds: ReadonlySet<string>): Promise<{ threadId: string; turnId: string }> {
+    const gen = this.#revokeGen;
+    this.#sending.add(p.sessionId);
+    try {
+      const repo = await this.#repo(p.sessionId); // re-read: branch is live at each turn (spec §6.3)
+      const { text, contextBlock } = composeTurnText({
+        sessionTitle: p.title, repo: repo.line, repoNote: p.repoNote, preview: p.preview, removeIds, question: p.question,
+      });
+      const threadId = await this.#openThread(p.sessionId, repo.binding);
+      if (this.#revokeGen !== gen) {
+        // An approval was revoked while this send resolved or opened: its binding may be for that root.
+        const o = this.#open.get(p.sessionId);
+        if (o?.threadId === threadId) this.#open.delete(p.sessionId);
+        await this.#d.host.closeThread(threadId).catch(() => undefined);
+        throw new ChatError("prepare_stale", "An approval changed. Ask again.");
+      }
+      const { turnId } = await this.#d.host.startTurn(threadId, text);
+      const pending: Pending = {
+        sessionId: p.sessionId, threadId, cursor: p.preview?.cursorAfter ?? null,
+        subagents: p.preview ? sentSubagents(p.preview, removeIds, this.#d.caps) : [], repoNote: p.repoNote,
+      };
+      const list = this.#sent.get(p.sessionId) ?? [];
+      list.push({ sessionId: p.sessionId, threadId, turnId, contextBlock, question: p.question, sentAt: this.#now() });
+      this.#sent.set(p.sessionId, list.slice(-MAX_SENT));
+      const early = this.#early.get(turnId);
+      this.#pending.set(turnId, pending);
+      if (early !== undefined) {
+        this.#early.delete(turnId);
+        this.#onTurnCompleted(threadId, turnId, early);
+      }
+      if (this.#interruptAfterStart.delete(p.sessionId)) void this.#d.host.interrupt(threadId).catch(() => undefined);
+      return { threadId, turnId };
+    } finally {
+      this.#sending.delete(p.sessionId);
+      this.#interruptAfterStart.delete(p.sessionId);
+    }
+  }
+
+  #queued<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.#queues.get(sessionId) ?? Promise.resolve()).then(fn);
+    const tail = run.then(() => undefined, () => undefined);
+    this.#queues.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.#queues.get(sessionId) === tail) this.#queues.delete(sessionId);
+    });
+    return run;
+  }
+
+  async #close(sessionId: string, o: Open): Promise<void> {
+    try {
+      await this.#d.host.closeThread(o.threadId);
+      if (this.#open.get(sessionId) === o) this.#open.delete(sessionId);
+    } catch (e) {
+      if (!(e instanceof TurnBusyError)) throw e;
+      // A reply is running: stop it, then close when its turn/completed arrives.
+      this.#closeAfterTurn.add(o.threadId);
+      if (this.#sending.has(sessionId)) this.#interruptAfterStart.add(sessionId);
+      await this.#d.host.interrupt(o.threadId);
+    }
+  }
+
   async #openThread(sessionId: string, binding: RootBinding | null): Promise<string> {
     const existing = this.#d.store.getThread(sessionId);
     let threadId: string;
     try {
       threadId = await this.#d.host.openThread(existing, binding);
     } catch (e) {
+      // Only a JSON-RPC refusal of thread/resume starts a new thread (Codex lost it, or the stale writer lock of
+      // spec §2: M4b keeps that gap and tells the app). Security failures, HostBusyError and TurnBusyError re-throw.
       if (!existing || !(e instanceof RpcError)) throw e;
-      threadId = await this.#d.host.openThread(null, binding); // Codex no longer has the old thread
+      threadId = await this.#d.host.openThread(null, binding);
+      this.#emit({ type: "threadReplaced", sessionId, threadId, reason: "resume_refused" });
     }
     if (threadId !== existing) this.#d.store.setThread(sessionId, threadId);
+    this.#open.set(sessionId, { threadId, root: binding?.root ?? null });
+    this.#closeAfterTurn.delete(threadId);
     return threadId;
   }
 
@@ -1776,6 +2148,10 @@ export class ChatService {
     const r = this.#d.bridge.worktree(sessionId);
     if (!r) return { line: { state: "none", root: null, branch: null, detail: null }, binding: null };
     if (r.kind === "unavailable") return { line: { state: "unavailable", root: r.root, branch: null, detail: r.detail }, binding: null };
+    // The bridge's resolution can predate a revoke: approval is checked again here, at bind time.
+    if (!this.#d.isApproved(r.root, r.gitCommonDir)) {
+      return { line: { state: "unavailable", root: r.root, branch: null, detail: "This repository is not approved." }, binding: null };
+    }
     try {
       const launch = await this.#d.launchFor(r.root);
       const branch = await this.#d.bridge.liveBranch(sessionId);
@@ -1795,9 +2171,31 @@ export class ChatService {
     return t;
   }
 
-  #onTurnCompleted(turnId: string, status: string): void {
+  #emit(e: ChatEvent): void {
+    for (const l of this.#listeners) {
+      try {
+        l(e);
+      } catch {
+        // a listener bug must not stop the others
+      }
+    }
+  }
+
+  #onTurnCompleted(threadId: string, turnId: string, status: string): void {
+    if (this.#closeAfterTurn.delete(threadId)) {
+      for (const [sessionId, o] of this.#open) {
+        if (o.threadId === threadId) void this.#close(sessionId, o).catch(() => undefined);
+      }
+    }
     const p = this.#pending.get(turnId);
-    if (!p) return;
+    if (!p) {
+      this.#early.set(turnId, status);
+      for (const k of this.#early.keys()) {
+        if (this.#early.size <= MAX_EARLY) break;
+        this.#early.delete(k);
+      }
+      return;
+    }
     this.#pending.delete(turnId);
     if (status !== "completed") return; // spec §4.7: the cursor moves only when the turn completes
     if (p.cursor) this.#d.store.setCursor(p.sessionId, p.cursor);
@@ -1829,8 +2227,10 @@ git commit -m "feat(chat): prepare, preview and send turns; advance the cursor o
 - Test: `companiond/test/daemon/server.test.ts`, `companiond/test/daemon/handlers.test.ts`
 
 **Interfaces:**
-- Consumes: `LineBuffer`; M4a `CodexHost` types, `SecurityCheckError`, `HostNotReadyError`, `TurnBusyError`; M3 `BridgeEvent`, `SessionsSnapshot`, `Selection`, `SyncStatus`, `pickerGroups`; M2 `RepoRefusedError`; Tasks 2–5; `REDACTION_NOTICE`.
-- Produces: the M5 contract — see "Interfaces produced for M5" at the end; plus `DaemonServer`, `DaemonError`, `buildHandlers(deps)`, `wireEvents(deps, notify)`, `toDaemonError(e)`, `DisabledHost`.
+- Consumes: `LineBuffer`; M4a `CodexHost` types, `SecurityCheckError`, `HostNotReadyError`, `TurnBusyError`, `HostBusyError`, `clearSecurityStop`; M3 `BridgeEvent`, `SessionsSnapshot`, `Selection`, `SyncStatus`, `pickerGroups`; M2 `RepoRefusedError`; Tasks 2–5; `REDACTION_NOTICE`.
+- Produces: the M5 contract — see "Interfaces produced for M5" at the end; plus `DaemonServer`, `DaemonError`, `buildHandlers(deps)`, `wireEvents(deps, notify)`, `toDaemonError(e)`, `isSecurityFailure(state)`, `wirePrepared(p)`, `ABANDONED_STATUS`, `SECURITY_FAILED_PREFIX`, `DisabledHost`.
+- M4a rules this task implements: `HostBusyError` → its own code `hostBusy` (1009, "try again later"; the host stays ready). A host failure whose detail starts with "Security check failed" is shown as is, and `clearSecurityStop()` is called **only** by `host.acknowledgeSecurityStop`, which the app sends after the owner acknowledged it (it then calls `start()`); `host.restart` never clears the latch. Thread end: a session that leaves the snapshot has its thread closed; revoking an approval closes every root-bound thread (they reopen with the next message). After any `host` or `auth` event, or a `process` alert, turns CodexHost no longer runs (sign-in replaced every process, a failure) are reported as `chat.turnCompleted` with status `"abandoned"`. Nothing here calls `mcpServerStatus/list`.
+- Review round 1 rules: `privacy.revoke` runs, in this order, `privacy.revoke` (isApproved refuses the root from now on), `chat.noteRevoke()` (aborts sends already past that check), `await` re-resolution of every listed session, then `closeBound()`. `prepare_stale` → `prepareStale` (1010). ChatService's `threadReplaced` → `chat.threadReplaced`. `chat.prepare` returns the preview without `subagents` and `cursorAfter` (raw, unredacted daemon-only data).
 
 - [ ] **Step 1: Write the failing tests** — `companiond/test/daemon/server.test.ts`:
 
@@ -1903,9 +2303,10 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import type { BridgeEvent } from "../../src/bridge/sessionBridge.ts";
 import { ChatService } from "../../src/chat/chatService.ts";
-import type { HostEvent } from "../../src/codex/codexHost.ts";
+import { HostBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
+import { RpcError } from "../../src/codex/rpc.ts";
 import { DisabledHost } from "../../src/daemon/disabledHost.ts";
-import { buildHandlers, toDaemonError, wireEvents, type DaemonBridge, type DaemonDeps, type DaemonHost } from "../../src/daemon/handlers.ts";
+import { ABANDONED_STATUS, buildHandlers, toDaemonError, wireEvents, type DaemonBridge, type DaemonDeps, type DaemonHost } from "../../src/daemon/handlers.ts";
 import { DAEMON_PROTOCOL_VERSION, ErrorCodes } from "../../src/daemon/protocol.ts";
 import { Privacy } from "../../src/privacy/privacy.ts";
 import { Store } from "../../src/store/store.ts";
@@ -1914,26 +2315,103 @@ import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
 
-function deps() {
+/** A CodexHost stand-in: ready, with a latch like CodexHost's security stop (M4a I-1). */
+class FakeHost implements DaemonHost {
+  listeners = new Set<(e: HostEvent) => void>();
+  latched: string | null = null;
+  cleared = 0;
+  starts = 0;
+  closed: string[] = [];
+  busy = false;
+  #state: HostState = { state: "ready", warnings: [] };
+  #active = new Map<string, string>();
+  #n = 0;
+  emit(e: HostEvent): void {
+    this.listeners.forEach((l) => l(e));
+  }
+  set(s: HostState): void {
+    this.#state = s;
+    this.emit({ type: "host", state: s });
+  }
+  securityStop(detail: string): void {
+    this.latched = detail;
+    this.#active.clear();
+    this.set({ state: "failed", detail: `Security check failed: ${detail}` });
+  }
+  signedInAgain(): void {
+    this.#active.clear(); // every process replaced, open threads closed
+    this.emit({ type: "auth", auth: { state: "signed_in", planType: null } });
+  }
+  state(): HostState {
+    return this.#state;
+  }
+  async start(): Promise<HostState> {
+    this.starts++;
+    this.set(this.latched !== null ? { state: "failed", detail: `Security check failed: ${this.latched}` } : { state: "ready", warnings: [] });
+    return this.#state;
+  }
+  async stop(): Promise<void> {
+    this.#active.clear();
+    this.set({ state: "stopped" });
+  }
+  clearSecurityStop(): void {
+    this.cleared++;
+    this.latched = null;
+  }
+  async auth() {
+    return { state: "signed_in" as const, planType: null };
+  }
+  async login() {
+    return { authUrl: "https://auth.example.test/x" };
+  }
+  async openThread(id: string | null): Promise<string> {
+    if (this.busy) throw new HostBusyError("Too many repositories are busy. Wait for a reply to finish.");
+    return id ?? `thr-${++this.#n}`;
+  }
+  async closeThread(id: string): Promise<void> {
+    this.closed.push(id);
+    this.order?.push(`close:${id}`);
+  }
+  order: string[] | null = null;
+  async startTurn(threadId: string): Promise<{ turnId: string }> {
+    const turnId = `turn-${++this.#n}`;
+    this.#active.set(threadId, turnId);
+    return { turnId };
+  }
+  async interrupt(): Promise<void> {}
+  activeTurn(threadId: string): string | null {
+    return this.#active.get(threadId) ?? null;
+  }
+  on(l: (e: HostEvent) => void): () => void {
+    this.listeners.add(l);
+    return () => { this.listeners.delete(l); };
+  }
+}
+
+function deps(o: { host?: DaemonHost } = {}) {
   const store = Store.memory();
+  const root = tempDir(); // an approved synthetic root (the bridge resolves the session to it)
+  store.putApproval({ root, commonDir: `${root}/.git`, includeWorktrees: false, approvedAt: 1 });
   const bridgeListeners = new Set<(e: BridgeEvent) => void>();
-  const hostListeners = new Set<(e: HostEvent) => void>();
   const snap = () => ({ sessions: [session("s1")], selection: { sessionId: "s1", via: "focus" as const, focusedSessionId: "s1", focusLabel: "Claude focus (from Claude's records)" as const, focusMovedTo: null, pinnedMissing: false }, desktopRecordsError: null, refreshedAt: 1 });
   const pins: Array<string | null> = [];
+  const order: string[] = [];
   const bridge: DaemonBridge = {
-    snapshot: snap, refresh: async () => snap(), worktree: () => resolved("/r"), events: () => [], hasUuid: () => false, liveBranch: async () => "main",
+    snapshot: snap, refresh: async () => snap(), worktree: () => resolved(root), events: () => [], hasUuid: () => false, liveBranch: async () => "main",
     pin: (id) => { pins.push(id); return { ...snap().selection, sessionId: id, via: id ? "pin" : "focus" }; },
     syncStatus: () => ({ state: "live", stats: null, lastPollAt: 1 }),
-    resolveNow: async () => resolved("/r"),
+    resolveNow: async (id) => { order.push(`resolve:${id}`); return resolved(root); },
     on: (l) => { bridgeListeners.add(l); return () => { bridgeListeners.delete(l); }; },
   };
-  const base = new DisabledHost("off");
-  const host: DaemonHost = { ...Object.fromEntries(["state", "start", "stop", "auth", "login", "openThread", "startTurn", "interrupt"].map((k) => [k, (base as any)[k].bind(base)])), on: (l: (e: HostEvent) => void) => { hostListeners.add(l); return () => { hostListeners.delete(l); }; } } as DaemonHost;
+  const host = o.host ?? new DisabledHost("off");
   const privacy = new Privacy(store, { inspect: async () => { throw new Error("nope"); } }, tempDir());
-  const chat = new ChatService({ host, bridge, store, sharingMode: () => privacy.sharingMode(), launchFor: async () => { throw new Error("x"); } });
+  const chat = new ChatService({
+    host, bridge, store, sharingMode: () => privacy.sharingMode(), isApproved: privacy.isApproved,
+    launchFor: async (r) => ({ command: "/usr/bin/sandbox-exec", args: ["-p", r], env: {}, cwd: r }),
+  });
   let shut = 0;
   const d: DaemonDeps = { host, bridge, chat, privacy, store, version: "0.4.0", shutdown: () => { shut++; } };
-  return { d, store, pins, emitBridge: (e: BridgeEvent) => bridgeListeners.forEach((l) => l(e)), emitHost: (e: HostEvent) => hostListeners.forEach((l) => l(e)), shut: () => shut };
+  return { d, store, pins, root, order, emitBridge: (e: BridgeEvent) => bridgeListeners.forEach((l) => l(e)), shut: () => shut };
 }
 
 test("hello checks the protocol version", async () => {
@@ -1976,18 +2454,101 @@ test("chat errors map to codes; host not ready is reported", async () => {
   assert.deepEqual(await h["host.status"]!({}), { state: "failed", detail: "off" });
 });
 
+test("HostBusyError is 'try again later', not a failure", async () => {
+  const host = new FakeHost();
+  host.busy = true;
+  const h = buildHandlers(deps({ host }).d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] }), (e: any) => toDaemonError(e).code === ErrorCodes.hostBusy);
+  assert.equal(host.state().state, "ready");
+});
+
+test("a security stop is cleared only by the owner's acknowledgement", async () => {
+  const host = new FakeHost();
+  const h = buildHandlers(deps({ host }).d);
+  await assert.rejects(h["host.acknowledgeSecurityStop"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.invalidRequest);
+  host.securityStop("the repository tools socket was replaced");
+  const r: any = await h["host.restart"]!({});
+  assert.match(r.detail, /^Security check failed/); // a restart does not clear the latch
+  assert.equal(host.cleared, 0);
+  assert.deepEqual(await h["host.acknowledgeSecurityStop"]!({}), { state: "ready", warnings: [] });
+  assert.equal(host.cleared, 1);
+});
+
 test("events: bridge and host events become notifications, chat events carry the session id", () => {
-  const { d, store, emitBridge, emitHost } = deps();
+  const { d, store, emitBridge } = deps({ host: new FakeHost() });
+  const host = d.host as FakeHost;
   const got: Array<[string, any]> = [];
   wireEvents(d, (m, p) => got.push([m, p]));
   store.setThread("s1", "thr-1");
   emitBridge({ type: "worktree", sessionId: "s1", resolution: resolved("/r"), change: { from: "/a", to: "/r", banner: "Claude is now in /r (main)", contextNote: "Repository changed from /a to /r" } });
-  emitHost({ type: "delta", threadId: "thr-1", turnId: "u1", itemId: "i1", text: "Hi" });
-  emitHost({ type: "alert", threadId: "thr-1", turnId: "u1", kind: "guard", detail: "Codex started a commandExecution item" });
-  emitHost({ type: "host", state: { state: "starting" } });
+  host.emit({ type: "delta", threadId: "thr-1", turnId: "u1", itemId: "i1", text: "Hi" });
+  host.emit({ type: "alert", threadId: "thr-1", turnId: "u1", kind: "guard", detail: "Codex started a commandExecution item" });
+  host.emit({ type: "host", state: { state: "starting" } });
   assert.deepEqual(got.map(([m]) => m), ["session.worktree", "chat.delta", "security.alert", "host.changed"]);
   assert.equal(got[1]?.[1].sessionId, "s1");
   assert.equal(got[2]?.[1].sessionId, "s1");
+});
+
+test("after a sign-in replaced every process, the running turn is reported as abandoned", async () => {
+  const x = deps({ host: new FakeHost() });
+  const host = x.d.host as FakeHost;
+  const got: Array<[string, any]> = [];
+  wireEvents(x.d, (m, p) => got.push([m, p]));
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  host.signedInAgain();
+  assert.deepEqual(got.map(([m]) => m), ["auth.changed", "chat.turnCompleted"]);
+  assert.deepEqual({ ...got[1]?.[1], error: null }, { sessionId: "s1", threadId: s.threadId, turnId: s.turnId, status: ABANDONED_STATUS, error: null });
+  assert.equal(x.store.getCursor("s1"), null);
+});
+
+test("chat.prepare sends the preview without raw subagent updates or the cursor; a stale prepare has its own code", async () => {
+  const x = deps({ host: new FakeHost() });
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  assert.deepEqual(Object.keys(p.preview).sort(), ["bytes", "items", "notes", "omitted"]);
+  assert.equal(p.repo.state, "bound");
+  await h["privacy.setSharingMode"]!({ mode: "off" });
+  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] }), (e: any) => toDaemonError(e).code === ErrorCodes.prepareStale);
+});
+
+test("a refused resume is reported as chat.threadReplaced", async () => {
+  const host = new FakeHost();
+  const x = deps({ host });
+  const got: Array<[string, any]> = [];
+  wireEvents(x.d, (m, p) => got.push([m, p]));
+  x.store.setThread("s1", "thr-old");
+  host.openThread = async (id: string | null) => {
+    if (id) throw new RpcError({ code: -32000, message: "thread already has an active writer" });
+    return "thr-new";
+  };
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  assert.deepEqual(got.filter(([m]) => m === "chat.threadReplaced"), [["chat.threadReplaced", { sessionId: "s1", threadId: "thr-new", reason: "resume_refused" }]]);
+});
+
+test("thread end: a session that leaves the list and a revoked approval close threads", async () => {
+  const x = deps({ host: new FakeHost() });
+  const host = x.d.host as FakeHost;
+  host.order = x.order;
+  wireEvents(x.d, () => undefined);
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  host.emit({ type: "turnCompleted", threadId: s.threadId, turnId: s.turnId, status: "completed", error: null });
+  await h["privacy.revoke"]!({ root: x.root });
+  assert.deepEqual(host.closed, [s.threadId]);
+  assert.deepEqual(x.order, ["resolve:s1", `close:${s.threadId}`]); // re-resolved before the close
+  assert.equal(((await h["chat.prepare"]!({ sessionId: "s1", question: "q" })) as any).repo.state, "unavailable");
+  const p2: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  const s2: any = await h["chat.send"]!({ prepareId: p2.prepareId, removeItemIds: [] });
+  host.emit({ type: "turnCompleted", threadId: s2.threadId, turnId: s2.turnId, status: "completed", error: null });
+  x.emitBridge({ type: "sessions", snapshot: { ...x.d.bridge.snapshot(), sessions: [] } });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(host.closed, [s.threadId, s.threadId]);
 });
 
 test("shutdown calls the deps", async () => {
@@ -2022,11 +2583,17 @@ export const ErrorCodes = {
   approvalRefused: 1006,
   unknownSession: 1007,
   emptyQuestion: 1008,
+  hostBusy: 1009,
+  prepareStale: 1010,
 } as const;
+
+/** HostState.failed.detail starts with this when the app must show "Security check failed" and wait for the
+ * owner's acknowledgement (host.acknowledgeSecurityStop) before Codex may start again. */
+export const SECURITY_FAILED_PREFIX = "Security check failed";
 
 export const METHODS = [
   "daemon.hello", "daemon.shutdown",
-  "host.status", "host.restart",
+  "host.status", "host.restart", "host.acknowledgeSecurityStop",
   "auth.status", "auth.login",
   "sessions.snapshot", "sessions.refresh", "sessions.pin", "sessions.picker", "sessions.sync", "sessions.worktree",
   "privacy.get", "privacy.setSharingMode", "privacy.approve", "privacy.revoke",
@@ -2037,7 +2604,7 @@ export const METHODS = [
 export const EVENTS = [
   "host.changed", "auth.changed",
   "sessions.changed", "session.transcript", "session.worktree", "session.syncError",
-  "chat.delta", "chat.item", "chat.turnCompleted",
+  "chat.delta", "chat.item", "chat.turnCompleted", "chat.threadReplaced",
   "security.alert",
 ] as const;
 ```
@@ -2134,7 +2701,8 @@ export class DaemonServer {
 `companiond/src/daemon/disabledHost.ts`:
 
 ```ts
-// Stands in for CodexHost when chat cannot run (COMPANIOND_CODEX=off, Codex not installed, §7.1.9 not passed).
+// Stands in for CodexHost when chat cannot run (COMPANIOND_CODEX=off, not macOS, Codex not installed, the relay did
+// not build, or CODEX_SEATBELT_MEASURED is "stopped"). Every chat call is refused; nothing is spawned.
 import { HostNotReadyError, type AuthState, type HostEvent, type HostState, type RootBinding } from "../codex/codexHost.ts";
 
 export class DisabledHost {
@@ -2149,6 +2717,7 @@ export class DisabledHost {
     return this.state();
   }
   async stop(): Promise<void> {}
+  clearSecurityStop(): void {}
   async auth(): Promise<AuthState> {
     throw new HostNotReadyError();
   }
@@ -2158,10 +2727,14 @@ export class DisabledHost {
   async openThread(_threadId: string | null, _binding: RootBinding | null): Promise<string> {
     throw new HostNotReadyError();
   }
+  async closeThread(_threadId: string): Promise<void> {}
   async startTurn(_threadId: string, _text: string): Promise<{ turnId: string }> {
     throw new HostNotReadyError();
   }
   async interrupt(_threadId: string): Promise<void> {}
+  activeTurn(_threadId: string): string | null {
+    return null;
+  }
   on(_l: (e: HostEvent) => void): () => void {
     return () => undefined;
   }
@@ -2174,14 +2747,14 @@ export class DisabledHost {
 // Method handlers and event wiring for the daemon API (M5 contract in protocol.ts and the M4b plan).
 import type { BridgeEvent, SessionsSnapshot, SyncStatus } from "../bridge/sessionBridge.ts";
 import { pickerGroups, type Selection } from "../bridge/selection.ts";
-import { ChatError, type ChatBridge, type ChatHost, type ChatService } from "../chat/chatService.ts";
-import { HostNotReadyError, SecurityCheckError, TurnBusyError, type AuthState, type HostState } from "../codex/codexHost.ts";
+import { ChatError, type ChatBridge, type ChatHost, type ChatService, type Prepared } from "../chat/chatService.ts";
+import { HostBusyError, HostNotReadyError, SecurityCheckError, TurnBusyError, type AuthState, type HostState } from "../codex/codexHost.ts";
 import { RepoRefusedError } from "../git/safeGit.ts";
 import { REDACTION_NOTICE } from "../jail/redactor.ts";
 import { ApprovalRefusedError, type Privacy } from "../privacy/privacy.ts";
 import { SHARING_MODES, StoreError, type SharingMode, type Store } from "../store/store.ts";
 import type { WorktreeResolution } from "../worktree/resolver.ts";
-import { DAEMON_PROTOCOL_VERSION, ErrorCodes } from "./protocol.ts";
+import { DAEMON_PROTOCOL_VERSION, ErrorCodes, SECURITY_FAILED_PREFIX } from "./protocol.ts";
 import { DaemonError, type MethodHandler } from "./server.ts";
 
 export interface DaemonBridge extends ChatBridge {
@@ -2191,13 +2764,18 @@ export interface DaemonBridge extends ChatBridge {
   syncStatus(sessionId: string): SyncStatus;
   resolveNow(sessionId: string): Promise<WorktreeResolution | null>;
 }
+/** The CodexHost surface the daemon uses (M4a). clearSecurityStop is called only by host.acknowledgeSecurityStop. */
 export interface DaemonHost extends ChatHost {
   start(): Promise<HostState>;
   stop(): Promise<void>;
+  clearSecurityStop(): void;
   auth(): Promise<AuthState>;
   login(): Promise<{ authUrl: string }>;
 }
 export interface DaemonDeps { host: DaemonHost; bridge: DaemonBridge; chat: ChatService; privacy: Privacy; store: Store; version: string; shutdown(): void }
+
+export const ABANDONED_STATUS = "abandoned";
+const ABANDONED_TEXT = "Codex restarted before this reply finished. Ask again.";
 
 const invalid = (message: string) => new DaemonError(ErrorCodes.invalidParams, message);
 function str(p: Record<string, unknown>, k: string, max = 4096): string {
@@ -2221,16 +2799,31 @@ function strArray(p: Record<string, unknown>, k: string): string[] {
   return v as string[];
 }
 
+export function isSecurityFailure(s: HostState): boolean {
+  return s.state === "failed" && s.detail.startsWith(SECURITY_FAILED_PREFIX);
+}
+
+/** What chat.prepare sends to the app: the preview without the raw subagent updates and the cursor (daemon-only). */
+export function wirePrepared(p: Prepared): unknown {
+  if (!p.preview) return p;
+  const { items, notes, omitted, bytes } = p.preview;
+  return { ...p, preview: { items, notes, omitted, bytes } };
+}
+
 export function toDaemonError(e: unknown): DaemonError {
   if (e instanceof DaemonError) return e;
   if (e instanceof SecurityCheckError) return new DaemonError(ErrorCodes.securityCheckFailed, e.message);
   if (e instanceof HostNotReadyError) return new DaemonError(ErrorCodes.hostNotReady, e.message);
+  if (e instanceof HostBusyError) return new DaemonError(ErrorCodes.hostBusy, e.message); // capacity: try again later
   if (e instanceof TurnBusyError) return new DaemonError(ErrorCodes.turnBusy, e.message);
   if (e instanceof RepoRefusedError) return new DaemonError(ErrorCodes.repoRefused, e.message);
   if (e instanceof ApprovalRefusedError) return new DaemonError(ErrorCodes.approvalRefused, e.message, { reason: e.reason });
   if (e instanceof StoreError) return new DaemonError(ErrorCodes.invalidParams, e.message);
   if (e instanceof ChatError) {
-    const code = { unknown_session: ErrorCodes.unknownSession, empty_question: ErrorCodes.emptyQuestion, prepare_expired: ErrorCodes.prepareExpired, host_not_ready: ErrorCodes.hostNotReady }[e.reason];
+    const code = {
+      unknown_session: ErrorCodes.unknownSession, empty_question: ErrorCodes.emptyQuestion, prepare_expired: ErrorCodes.prepareExpired,
+      prepare_stale: ErrorCodes.prepareStale, host_not_ready: ErrorCodes.hostNotReady,
+    }[e.reason];
     return new DaemonError(code, e.message);
   }
   return new DaemonError(ErrorCodes.internal, "companiond: internal error");
@@ -2250,8 +2843,14 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       return {};
     },
     "host.status": async () => d.host.state(),
+    // A latched security stop survives a restart: start() refuses until the owner acknowledges it (M4a I-1).
     "host.restart": async () => {
       await d.host.stop();
+      return d.host.start();
+    },
+    "host.acknowledgeSecurityStop": async () => {
+      if (!isSecurityFailure(d.host.state())) throw new DaemonError(ErrorCodes.invalidRequest, "There is no security stop to acknowledge.");
+      d.host.clearSecurityStop();
       return d.host.start();
     },
     "auth.status": async () => d.host.auth(),
@@ -2283,11 +2882,15 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       return a;
     },
     "privacy.revoke": async (p) => {
+      // Order matters: from here on isApproved refuses the root at bind time; noteRevoke aborts a send already past
+      // that check; the bridge re-resolves before the bound threads close (they reopen with the next message).
       const revoked = d.privacy.revoke(str(p, "root"));
-      reresolveAll();
+      d.chat.noteRevoke();
+      await Promise.all(d.bridge.snapshot().sessions.map((s) => d.bridge.resolveNow(s.sessionId).catch(() => null)));
+      await d.chat.closeBound().catch(() => undefined);
       return { revoked };
     },
-    "chat.prepare": async (p) => d.chat.prepare(str(p, "sessionId"), str(p, "question", 20_000)),
+    "chat.prepare": async (p) => wirePrepared(await d.chat.prepare(str(p, "sessionId"), str(p, "question", 20_000))),
     "chat.send": async (p) => d.chat.send(str(p, "prepareId", 200), strArray(p, "removeItemIds")),
     "chat.interrupt": async (p) => {
       await d.chat.interrupt(str(p, "sessionId"));
@@ -2305,9 +2908,13 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
 export function wireEvents(d: DaemonDeps, notify: (method: string, params: unknown) => void): () => void {
   const offBridge = d.bridge.on((e) => {
     switch (e.type) {
-      case "sessions":
+      case "sessions": {
+        // Thread end for sessions that are no longer listed.
+        const listed = new Set(e.snapshot.sessions.map((s) => s.sessionId));
+        for (const id of d.chat.openSessions()) if (!listed.has(id)) void d.chat.closeSession(id).catch(() => undefined);
         notify("sessions.changed", e.snapshot);
         return;
+      }
       case "transcript":
         notify("session.transcript", { sessionId: e.sessionId, kind: e.batch.kind, dropped: e.batch.kind === "reset" ? e.batch.dropped : 0, stats: e.stats });
         return;
@@ -2323,14 +2930,23 @@ export function wireEvents(d: DaemonDeps, notify: (method: string, params: unkno
         return;
     }
   });
+  // A failure, a stop or a sign-in (every Codex process replaced, M4a N-2) ends running turns without
+  // turn/completed: the app hears about them here; the next send reopens the thread.
+  const reportAbandoned = () => {
+    for (const a of d.chat.reconcile()) {
+      notify("chat.turnCompleted", { sessionId: a.sessionId, threadId: a.threadId, turnId: a.turnId, status: ABANDONED_STATUS, error: ABANDONED_TEXT });
+    }
+  };
   const offHost = d.host.on((e) => {
     const sessionId = "threadId" in e && e.threadId ? d.store.sessionForThread(e.threadId) : null;
     switch (e.type) {
       case "host":
         notify("host.changed", e.state);
+        reportAbandoned();
         return;
       case "auth":
         notify("auth.changed", e.auth);
+        reportAbandoned();
         return;
       case "delta":
         notify("chat.delta", { sessionId, threadId: e.threadId, turnId: e.turnId, itemId: e.itemId, text: e.text });
@@ -2343,12 +2959,18 @@ export function wireEvents(d: DaemonDeps, notify: (method: string, params: unkno
         return;
       case "alert":
         notify("security.alert", { sessionId, threadId: e.threadId, turnId: e.turnId, kind: e.kind, detail: e.detail });
+        // A process alert can come with no host or auth event after it (a failed re-read after sign-in).
+        if (e.kind === "process") reportAbandoned();
         return;
     }
+  });
+  const offChat = d.chat.on((e) => {
+    if (e.type === "threadReplaced") notify("chat.threadReplaced", { sessionId: e.sessionId, threadId: e.threadId, reason: e.reason });
   });
   return () => {
     offBridge();
     offHost();
+    offChat();
   };
 }
 ```
@@ -2375,8 +2997,9 @@ git commit -m "feat(daemon): add the JSON-RPC API for the SwiftUI app" -m "Co-Au
 - Test: `companiond/test/daemon/main.test.ts`
 
 **Interfaces:**
-- Consumes: everything above; M3 `SessionBridge`, `defaultClaudePaths`; M2 `discoverToolchain`, `buildReadonlyLaunch`; M4a `CodexHost`, `findCodex`, `buildCodexLaunch`, `CODEX_SEATBELT_MEASURED`, `COMPANION_ALLOWLIST`.
-- Produces: `node src/daemon/main.ts` — the process M5 spawns. Env `COMPANIOND_CODEX=off` disables chat (diagnostics and tests).
+- Consumes: everything above; M3 `SessionBridge`, `defaultClaudePaths`; M2 `discoverToolchain`, `buildReadonlyLaunch`; M4a `appPaths`, `ensureAppDirs`, `AppDirError`, `createCompanionCodex` (the production wiring: relay build, acceptor, sandboxed validator, Codex under its profile with `sandboxed: true`; the daemon then calls `host.start()` and on shutdown `close()`), `CODEX_SEATBELT_MEASURED` (now `"ok"`; the guard that refuses while it is `"stopped"` stays), `CodexInstallError`, `RelaySetupError`. The daemon never builds a Codex launch or a `CodexHost` itself.
+- Produces: `node --disable-warning=ExperimentalWarning src/daemon/main.ts` — the process M5 spawns (`node:sqlite` is experimental; the flag keeps stderr to short codes). Env `COMPANIOND_CODEX=off` disables chat (diagnostics and tests). `Store.open` requires a 0700 data folder owned by the user; `ensureAppDirs` makes it. ChatService gets `isApproved: privacy.isApproved`.
+- Review round 1: `uncaughtException`, `unhandledRejection` and a stdout `error` (EPIPE when the app quits) log `companiond: <code> (<error name>)` only, never Node's default stack trace, then shut down with exit 1; SIGTERM, SIGINT and SIGHUP shut down with exit 0. Shutdown runs whatever was set up so far, newest first. The `CODEX_SEATBELT_MEASURED` guard's detail does not start with "Security check failed" (there is nothing to acknowledge).
 
 - [ ] **Step 1: Write the failing test** — `companiond/test/daemon/main.test.ts`:
 
@@ -2395,16 +3018,19 @@ const src = fileURLToPath(new URL("../../src/", import.meta.url));
 
 test("the daemon answers over stdio with a fresh home and chat off, then shuts down", async () => {
   const home = tempDir();
-  const child = spawn(process.execPath, [path.join(src, "daemon", "main.ts")], {
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(src, "daemon", "main.ts")], {
     env: { PATH: "/usr/bin:/bin", HOME: home, COMPANIOND_CODEX: "off" }, stdio: ["pipe", "pipe", "pipe"],
   });
+  let stderr = "";
+  child.stderr.on("data", (c: Buffer) => { stderr += c.toString("utf8"); });
   const lb = new LineBuffer();
-  const replies = new Map<number, any>();
   const waiters = new Map<number, (m: any) => void>();
+  const notifications: any[] = [];
   child.stdout.on("data", (c: Buffer) => {
     for (const l of lb.push(c)) {
-      const m = JSON.parse(l);
-      if (m.id !== undefined) { replies.set(m.id, m); waiters.get(m.id)?.(m); }
+      const m = JSON.parse(l); // stdout carries protocol only: every line is JSON
+      if (m.id !== undefined) waiters.get(m.id)?.(m);
+      else notifications.push(m);
     }
   });
   let id = 0;
@@ -2415,6 +3041,7 @@ test("the daemon answers over stdio with a fresh home and chat off, then shuts d
   });
   assert.equal((await call("daemon.hello", { protocolVersion: 1 })).result.protocolVersion, 1);
   assert.deepEqual((await call("host.status")).result, { state: "failed", detail: "Chat is off (COMPANIOND_CODEX=off)." });
+  assert.equal((await call("host.acknowledgeSecurityStop")).error.code, -32600);
   assert.equal((await call("sessions.refresh")).result.desktopRecordsError, "Claude Desktop sessions not found");
   assert.equal((await call("privacy.get")).result.sharingMode, "ask");
   const exited = new Promise<number | null>((res) => child.on("exit", (c) => res(c)));
@@ -2423,42 +3050,82 @@ test("the daemon answers over stdio with a fresh home and chat off, then shuts d
   const support = path.join(home, "Library", "Application Support", "ClaudeGPTCompanion");
   assert.equal(fs.statSync(support).mode & 0o777, 0o700);
   assert.equal(fs.statSync(path.join(support, "companion.db")).mode & 0o777, 0o600);
+  assert.doesNotMatch(stderr, /ExperimentalWarning/);
+  assert.ok(!stderr.includes(home), "stderr holds no paths");
+  for (const line of stderr.trim().split("\n")) assert.match(line, /^companiond: [a-z]/);
 });
 
-test("production wiring always sandboxes Codex and never prints to stdout", () => {
-  const main = fs.readFileSync(path.join(src, "daemon", "main.ts"), "utf8");
-  assert.match(main, /sandboxed: true/);
-  assert.doesNotMatch(main, /sandboxed: false/);
+test("a closed stdout (the app quit) logs a short code and shuts down, with no stack trace", async () => {
+  const home = tempDir();
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(src, "daemon", "main.ts")], {
+    env: { PATH: "/usr/bin:/bin", HOME: home, COMPANIOND_CODEX: "off" }, stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (c: Buffer) => { stderr += c.toString("utf8"); });
+  const exited = new Promise<number | null>((res) => child.on("exit", (c) => res(c)));
+  while (!stderr.includes("companiond: started")) await new Promise((r) => setTimeout(r, 20));
+  child.stdout.destroy();
+  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "daemon.hello", params: { protocolVersion: 1 } }) + "\n");
+  assert.equal(await exited, 1);
+  assert.match(stderr, /^companiond: stdout error \(Error\)$/m);
+  assert.match(stderr, /^companiond: stopped$/m);
+  assert.doesNotMatch(stderr, /\n\s+at /, "no stack trace");
+  assert.ok(!stderr.includes(home), "stderr holds no paths");
+});
+
+test("production wiring: createCompanionCodex only, refused while not measured, no stdout prints", () => {
+  const read = (...p: string[]) => fs.readFileSync(path.join(src, ...p), "utf8");
+  const main = read("daemon", "main.ts");
+  assert.match(main, /createCompanionCodex\(/);
   assert.match(main, /CODEX_SEATBELT_MEASURED !== "ok"/);
+  assert.match(main, /process\.on\("uncaughtException", fatal\("fatal"\)\)/);
+  assert.match(main, /process\.on\("unhandledRejection", fatal\("fatal"\)\)/);
+  assert.match(main, /process\.stdout\.on\("error", fatal\("stdout error"\)\)/);
+  assert.doesNotMatch(main, /new CodexHost\(|buildCodexLaunch\(|sandboxed: false|measurementOnly/);
+  const wiring = read("codex", "companionCodex.ts");
+  assert.match(wiring, /sandboxed: true/);
+  assert.doesNotMatch(wiring, /sandboxed: false|measurementOnly/);
   for (const dir of ["daemon", "chat", "context", "codex", "privacy", "store"]) {
     for (const f of fs.readdirSync(path.join(src, dir)).filter((x) => x.endsWith(".ts"))) {
-      assert.doesNotMatch(fs.readFileSync(path.join(src, dir, f), "utf8"), /console\.(log|info|debug)\(/, `${dir}/${f}`);
+      assert.doesNotMatch(read(dir, f), /console\.(log|info|debug)\(/, `${dir}/${f}`);
     }
   }
+  for (const dir of ["daemon", "chat"]) {
+    for (const f of fs.readdirSync(path.join(src, dir)).filter((x) => x.endsWith(".ts"))) {
+      const text = read(dir, f);
+      // M4b never lists MCP status (without serverName it spends the relay token; M4a M-10).
+      assert.doesNotMatch(text, /mcpServerStatus/, `${dir}/${f}`);
+      // Only the owner's acknowledgement clears a security stop.
+      if (f !== "handlers.ts" && f !== "disabledHost.ts") assert.doesNotMatch(text, /clearSecurityStop\(\)/, `${dir}/${f}`);
+    }
+  }
+  assert.equal(read("daemon", "handlers.ts").match(/\.clearSecurityStop\(\)/g)?.length, 1);
 });
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `cd companiond && node --test test/daemon/main.test.ts`
-Expected: FAIL — the child exits with "Cannot find module …/daemon/main.ts".
+Expected: FAIL — the child exits with "Cannot find module …/daemon/main.ts" (the first test ends with a pending promise; the wiring test fails reading `daemon/main.ts`).
 
 - [ ] **Step 3: Implement** — `companiond/src/daemon/main.ts`:
 
 ```ts
-// companiond entry point, spawned by the SwiftUI app (spec §2). stdout = protocol; stderr = short codes only.
+// companiond entry point, spawned by the SwiftUI app (spec §2) as
+// `node --disable-warning=ExperimentalWarning src/daemon/main.ts` (node:sqlite is experimental).
+// stdout = protocol; stderr = short codes only (never message bodies, transcript text, paths or tokens).
 import os from "node:os";
-import { appPaths, ensureAppDirs } from "../app/appPaths.ts";
+import { AppDirError, appPaths, ensureAppDirs } from "../app/appPaths.ts";
 import { SessionBridge } from "../bridge/sessionBridge.ts";
 import { ChatService } from "../chat/chatService.ts";
 import { defaultClaudePaths } from "../claude/paths.ts";
-import { CodexHost } from "../codex/codexHost.ts";
-import { findCodex, PINNED_CODEX_VERSION } from "../codex/codexInstall.ts";
-import { buildCodexLaunch, CODEX_SEATBELT_MEASURED } from "../codex/codexSeatbelt.ts";
-import { COMPANION_ALLOWLIST } from "../codex/serverRequests.ts";
+import { CodexInstallError } from "../codex/codexInstall.ts";
+import { CODEX_SEATBELT_MEASURED } from "../codex/codexSeatbelt.ts";
+import { createCompanionCodex } from "../codex/companionCodex.ts";
 import { buildReadonlyLaunch } from "../launch/seatbelt.ts";
-import { discoverToolchain } from "../launch/toolchain.ts";
+import { discoverToolchain, type Toolchain } from "../launch/toolchain.ts";
 import { Privacy, safeGitInspector } from "../privacy/privacy.ts";
+import { RelaySetupError } from "../relay/relayPaths.ts";
 import { Store } from "../store/store.ts";
 import { DisabledHost } from "./disabledHost.ts";
 import { buildHandlers, toDaemonError, wireEvents, type DaemonHost } from "./handlers.ts";
@@ -2466,49 +3133,83 @@ import { DaemonServer } from "./server.ts";
 
 const VERSION = "0.4.0";
 const log = (code: string) => process.stderr.write(`companiond: ${code}\n`);
+const errName = (e: unknown) => (e instanceof Error ? e.name : "error");
+
+// Shutdown runs whatever has been set up so far, newest first, then exits. A crash, an unhandled rejection or a
+// closed stdout (EPIPE when the app quits) logs a short code and the error name only, never Node's default stack
+// trace (which holds paths and message text), and still shuts down cleanly.
+const cleanup: Array<() => unknown> = [];
+let stopping = false;
+async function shutdown(code = 0): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  for (const f of cleanup.reverse()) await Promise.resolve().then(f).catch(() => undefined);
+  log("stopped");
+  process.exit(code);
+}
+const fatal = (what: string) => (e: unknown) => {
+  log(`${what} (${errName(e)})`);
+  void shutdown(1);
+};
+process.on("uncaughtException", fatal("fatal"));
+process.on("unhandledRejection", fatal("fatal"));
+process.stdout.on("error", fatal("stdout error"));
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => void shutdown());
 
 process.umask(0o077);
 const home = os.homedir();
-const paths = ensureAppDirs(appPaths(home));
-const store = Store.open(paths.dbPath);
-const toolchain = process.platform === "darwin" ? discoverToolchain() : null;
+let paths: ReturnType<typeof ensureAppDirs>;
+let store: Store;
+try {
+  paths = ensureAppDirs(appPaths(home)); // 0700 folders owned by this user; Store.open refuses anything else
+  store = Store.open(paths.dbPath);
+} catch (e) {
+  log(`startup failed (${errName(e)})`);
+  process.exit(1);
+}
+cleanup.push(() => store.close());
+let toolchain: Toolchain | null = null;
+try {
+  toolchain = process.platform === "darwin" ? discoverToolchain() : null;
+} catch (e) {
+  log(`no toolchain (${errName(e)})`);
+}
 const gitPath = toolchain?.gitPath ?? "/usr/bin/git";
 const privacy = new Privacy(store, safeGitInspector(gitPath), home);
 const bridge = new SessionBridge({ paths: defaultClaudePaths(home), isApproved: privacy.isApproved, gitPath, initialPin: store.getPin() });
+cleanup.push(() => bridge.stop());
 
-function makeHost(): DaemonHost {
-  if (process.env.COMPANIOND_CODEX === "off") return new DisabledHost("Chat is off (COMPANIOND_CODEX=off).");
-  if (CODEX_SEATBELT_MEASURED !== "ok") return new DisabledHost("Security check failed: Codex cannot run under its Seatbelt profile yet.");
+/** Production Codex: always createCompanionCodex (Codex under its Seatbelt profile, sandboxed: true, relay + acceptor
+ * + sandboxed validator). Off while CODEX_SEATBELT_MEASURED is "stopped" (spec §7.1.9: no weaker fallback). */
+async function makeHost(): Promise<{ host: DaemonHost; close: () => Promise<void> }> {
+  const off = (detail: string) => {
+    const host = new DisabledHost(detail);
+    return { host, close: () => host.stop() };
+  };
+  if (process.env.COMPANIOND_CODEX === "off") return off("Chat is off (COMPANIOND_CODEX=off).");
+  // Not "Security check failed": nothing for the owner to acknowledge, Codex simply may not start.
+  if (CODEX_SEATBELT_MEASURED !== "ok") return off("Chat is off: Codex cannot run under its Seatbelt profile yet.");
+  if (!toolchain) return off("Chat needs macOS with the Xcode command-line tools.");
   try {
-    const install = findCodex();
-    return new CodexHost({
-      paths, codexVersion: install.version, pinnedVersion: PINNED_CODEX_VERSION, allowlist: COMPANION_ALLOWLIST,
-      makeLaunch: (extraArgs) => buildCodexLaunch({ install, paths, sandboxed: true, extraArgs }),
-    });
+    const cc = await createCompanionCodex({ paths, toolchain, home });
+    return { host: cc.host, close: cc.close };
   } catch (e) {
-    return new DisabledHost(e instanceof Error ? e.message : "Codex is not installed.");
+    // These messages are written for the user and hold no paths; anything else shows its name only.
+    const known = e instanceof CodexInstallError || e instanceof RelaySetupError || e instanceof AppDirError;
+    log(`codex unavailable (${errName(e)})`);
+    return off(known ? e.message : `Codex could not start (${errName(e)}).`);
   }
 }
 
-const host = makeHost();
+const { host, close: closeHost } = await makeHost();
+cleanup.push(closeHost); // host.stop() kills every Codex process; the acceptor stops after it
 const chat = new ChatService({
-  host, bridge, store, sharingMode: () => privacy.sharingMode(),
+  host, bridge, store, sharingMode: () => privacy.sharingMode(), isApproved: privacy.isApproved,
   launchFor: async (root) => {
     if (!toolchain) throw new Error("Repository tools need macOS.");
     return buildReadonlyLaunch({ root, toolchain });
   },
 });
-
-let stopping = false;
-async function shutdown(): Promise<void> {
-  if (stopping) return;
-  stopping = true;
-  bridge.stop();
-  await host.stop();
-  store.close();
-  log("stopped");
-  process.exit(0);
-}
 
 const deps = { host, bridge, chat, privacy, store, version: VERSION, shutdown: () => void shutdown() };
 const server = new DaemonServer(process.stdin, process.stdout, buildHandlers(deps), toDaemonError, () => void shutdown());
@@ -2649,91 +3350,207 @@ git commit -m "feat(app): add a signed app bundle skeleton with usage strings" -
 - [ ] **Step 1: Smoke script** — `companiond/scripts/smoke-daemon.ts`:
 
 ```ts
-// Live smoke (spec §14 M4 "live smoke passes"). Real HOME, signed in (scripts/codex-login.ts), M4a §7.1.9 passed.
-// Usage: cd companiond && node scripts/smoke-daemon.ts [--approve <repo root>] "<question>"
-// Prints the reply to this terminal only. Exit 0 = turn completed, no security alert, repo unchanged.
+// Live smoke (spec §14 M4 "live smoke passes"). Runs the real daemon against the real HOME: the companion's own
+// CODEX_HOME, which the owner has already signed in. Never signs in, never acknowledges a security stop, never reads
+// or prints a credential, and prints short status lines only: no reply text, no transcript text, no session title,
+// no paths.
+// Usage: cd companiond && node --disable-warning=ExperimentalWarning scripts/smoke-daemon.ts [--approve <repo root>] [--include-context]
+//   --approve          approves that root for this run (revoked at the end if this run added it)
+//   --include-context  keeps the owner's sharing mode, so Claude context (title, items, notes) is sent. Without it the
+//                      run sets sharing to Off, so only the repository line and the fixed question leave the Mac.
+// Whatever happens (try/finally), the run restores the sharing mode, revokes an approval it added, stops the daemon
+// and restores the selected session's stored thread id and cursor in companion.db, so the owner's next real
+// question sees the same thread and preview as before.
+// Exit 0 = turn completed, no security alert, repo unchanged. 2 = not signed in. 1 = anything else.
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import readline from "node:readline/promises";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { appPaths } from "../src/app/appPaths.ts";
 import { LineBuffer } from "../src/lineBuffer.ts";
+import { SCHEMA_VERSION } from "../src/store/store.ts";
 
+const QUESTION = "Using the repository tools, name one file in this repository and cite it as path:line. Answer in one sentence.";
 const args = process.argv.slice(2);
 const approveAt = args.indexOf("--approve");
 const approveRoot = approveAt >= 0 ? args[approveAt + 1] : undefined;
-const question = args.filter((_, i) => i !== approveAt && i !== approveAt + 1).join(" ") || "In two sentences, what is Claude working on and which file matters most?";
+const includeContext = args.includes("--include-context");
+const say = (line: string) => process.stdout.write(`${line}\n`);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const child = spawn(process.execPath, [fileURLToPath(new URL("../src/daemon/main.ts", import.meta.url))], { stdio: ["pipe", "pipe", "inherit"] });
+class SmokeError extends Error {}
+
+const main = fileURLToPath(new URL("../src/daemon/main.ts", import.meta.url));
+// stderr is dropped: the daemon writes short codes there, but the smoke output stays status-only.
+const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", main], { stdio: ["pipe", "pipe", "ignore"] });
 const lb = new LineBuffer();
 const waiters = new Map<number, (m: any) => void>();
 const events: any[] = [];
+let dead = false;
+const exited = new Promise<void>((res) => child.on("exit", () => {
+  dead = true;
+  for (const w of waiters.values()) w({ error: { code: "exited" } });
+  res();
+}));
 child.stdout.on("data", (c: Buffer) => {
   for (const l of lb.push(c)) {
     const m = JSON.parse(l);
     if (m.id !== undefined) waiters.get(m.id)?.(m);
-    else {
-      events.push(m);
-      if (m.method === "chat.delta") process.stdout.write(m.params.text);
-    }
+    else events.push(m);
   }
 });
 let n = 0;
 async function call(method: string, params: unknown = {}): Promise<any> {
+  if (dead) throw new SmokeError(`${method}: daemon exited`);
   const id = ++n;
-  const m: any = await new Promise((res) => { waiters.set(id, res); child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n"); });
-  if (m.error) throw new Error(`${method}: ${m.error.message}`);
+  const m: any = await new Promise((res) => {
+    waiters.set(id, res);
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  });
+  waiters.delete(id);
+  if (m.error) throw new SmokeError(`${method}: error ${m.error.code}`);
   return m.result;
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Read-only git state of the approved repo. The repo's own fsmonitor and hooks are switched off. */
 const gitState = (root: string) => {
   const env = { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" };
-  const status = execFileSync("/usr/bin/git", ["-C", root, "status", "--porcelain=v1", "-uall"], { encoding: "utf8", env });
-  const index = execFileSync("/usr/bin/git", ["-C", root, "rev-parse", "--path-format=absolute", "--git-path", "index"], { encoding: "utf8", env }).trim();
+  const git = (a: string[]) => execFileSync("/usr/bin/git", ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", root, ...a], { encoding: "utf8", env });
+  const status = git(["status", "--porcelain=v1", "-uall"]);
+  const index = git(["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
   return `${status}\n${fs.statSync(index).mtimeMs}`;
 };
 
-await call("daemon.hello", { protocolVersion: 1 });
-let host = await call("host.status");
-for (let i = 0; i < 120 && host.state === "starting"; i++) { await sleep(500); host = await call("host.status"); }
-console.log(`host: ${host.state}${host.state === "failed" ? ` (${host.detail})` : ""}`);
-if (host.state !== "ready") process.exit(1);
-console.log(`auth: ${(await call("auth.status")).state}`);
-if (approveRoot) console.log(`approved: ${(await call("privacy.approve", { root: path.resolve(approveRoot), includeWorktrees: true })).root}`);
-await call("sessions.refresh");
-const snap = await call("sessions.snapshot");
-const sessionId = snap.selection.sessionId;
-if (!sessionId) { console.log("no Claude session selected"); process.exit(1); }
-const wt = await call("sessions.worktree", { sessionId });
-console.log(`session: ${snap.sessions.find((s: any) => s.sessionId === sessionId)?.title} | repo: ${wt?.kind === "resolved" ? `${wt.root} (${wt.branch})` : `unavailable: ${wt?.detail ?? "none"}`}`);
-const before = wt?.kind === "resolved" ? gitState(wt.root) : null;
-
-const p = await call("chat.prepare", { sessionId, question });
-console.log(`mode: ${p.mode} | items: ${p.preview?.items.length ?? 0} | bytes: ${p.preview?.bytes ?? 0} | notes: ${JSON.stringify(p.preview?.notes ?? [])}`);
-for (const it of p.preview?.items ?? []) console.log(`  ${it.id} [${it.label}] ${it.text.length} chars, ${it.redactions} redaction(s)`);
-if (p.needsConfirm) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ok = (await rl.question("Send this context? [y/N] ")).trim().toLowerCase() === "y";
-  rl.close();
-  if (!ok) process.exit(1);
+// The session's rows in companion.db (schema v1, Task 2), saved before the turn and put back after the daemon exits.
+type Row = Record<string, unknown>;
+interface Saved { sessionId: string; thread: Row | undefined; cursor: Row | undefined }
+const dbPath = appPaths(os.homedir()).dbPath;
+function saveRows(sessionId: string): Saved {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    if (Number((db.prepare("PRAGMA user_version").get() as Row | undefined)?.user_version) !== SCHEMA_VERSION) throw new SmokeError("companion.db schema changed; update the smoke");
+    return {
+      sessionId,
+      thread: db.prepare("SELECT codex_thread_id, updated_at FROM threads WHERE session_id = ?").get(sessionId) as Row | undefined,
+      cursor: db.prepare("SELECT uuid, updated_at FROM cursors WHERE session_id = ?").get(sessionId) as Row | undefined,
+    };
+  } finally {
+    db.close();
+  }
 }
-const { turnId } = await call("chat.send", { prepareId: p.prepareId, removeItemIds: [] });
-let done: any = null;
-for (let i = 0; i < 600 && !done; i++) { await sleep(500); done = events.find((e) => e.method === "chat.turnCompleted" && e.params.turnId === turnId); }
-const alerts = events.filter((e) => e.method === "security.alert").map((e) => e.params.detail);
-const unchanged = before === null || gitState(wt.root) === before;
-console.log(`\n\nturn: ${done?.params.status ?? "timeout"} | alerts: ${JSON.stringify(alerts)} | repo unchanged: ${unchanged}`);
-await call("daemon.shutdown").catch(() => undefined);
-process.exit(done?.params.status === "completed" && alerts.length === 0 && unchanged ? 0 : 1);
+function restoreRows(s: Saved): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("BEGIN");
+    db.prepare("DELETE FROM threads WHERE session_id = ?").run(s.sessionId);
+    db.prepare("DELETE FROM cursors WHERE session_id = ?").run(s.sessionId);
+    if (s.thread) db.prepare("INSERT INTO threads (session_id, codex_thread_id, updated_at) VALUES (?, ?, ?)").run(s.sessionId, String(s.thread.codex_thread_id), Number(s.thread.updated_at));
+    if (s.cursor) db.prepare("INSERT INTO cursors (session_id, uuid, updated_at) VALUES (?, ?, ?)").run(s.sessionId, String(s.cursor.uuid), Number(s.cursor.updated_at));
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  } finally {
+    db.close();
+  }
+}
+
+let added: string | null = null;
+let restoreMode: string | null = null;
+let saved: Saved | null = null;
+
+async function run(): Promise<number> {
+  await call("daemon.hello", { protocolVersion: 1 });
+  let host = await call("host.status");
+  for (let i = 0; i < 240 && (host.state === "starting" || host.state === "stopped"); i++) {
+    await sleep(500);
+    host = await call("host.status");
+  }
+  const security = host.state === "failed" && String(host.detail).startsWith("Security check failed");
+  say(`host: ${host.state}${security ? " (security check failed; not acknowledged by this script)" : ""}`);
+  if (host.state !== "ready") return 1;
+  const auth = (await call("auth.status")).state;
+  say(`auth: ${auth}`);
+  if (auth !== "signed_in") return 2;
+
+  const privacy = await call("privacy.get");
+  if (approveRoot) {
+    const root = fs.realpathSync.native(path.resolve(approveRoot));
+    const known = privacy.approvals.some((a: any) => a.root === root);
+    if (!known) added = (await call("privacy.approve", { root, includeWorktrees: true })).root;
+    say(`approval: ${known ? "already approved" : "added for this run"}`);
+  }
+  if (!includeContext && privacy.sharingMode !== "off") {
+    restoreMode = privacy.sharingMode;
+    await call("privacy.setSharingMode", { mode: "off" });
+  }
+  say(`sharing: ${includeContext ? privacy.sharingMode : "off"} for this run`);
+  await call("sessions.refresh");
+  const snap = await call("sessions.snapshot");
+  const sessionId: string | null = snap.selection.sessionId;
+  if (!sessionId) {
+    say("session: none selected");
+    return 1;
+  }
+  saved = saveRows(sessionId);
+  const wt = await call("sessions.worktree", { sessionId });
+  const root: string | null = wt?.kind === "resolved" ? wt.root : null;
+  const before = root ? gitState(root) : null;
+
+  const p = await call("chat.prepare", { sessionId, question: QUESTION });
+  say(`repo: ${p.repo.state} | mode: ${p.mode} | items: ${p.preview?.items.length ?? 0} | bytes: ${p.preview?.bytes ?? 0} | notes: ${p.preview?.notes.length ?? 0}`);
+  const { turnId } = await call("chat.send", { prepareId: p.prepareId, removeItemIds: [] });
+  let done: any = null;
+  for (let i = 0; i < 600 && !done; i++) {
+    await sleep(500);
+    done = events.find((e) => e.method === "chat.turnCompleted" && e.params.turnId === turnId);
+  }
+  const reply = events.filter((e) => e.method === "chat.delta" && e.params.turnId === turnId).map((e) => e.params.text).join("");
+  const tools = events.filter((e) => e.method === "chat.item" && e.params.turnId === turnId && e.params.phase === "completed" && e.params.item.type === "mcpToolCall").length;
+  const alerts = events.filter((e) => e.method === "security.alert").map((e) => e.params.kind);
+  const replaced = events.some((e) => e.method === "chat.threadReplaced");
+  const unchanged = before === null || root === null || gitState(root) === before;
+  say(`turn: ${done?.params.status ?? "timeout"} | reply chars: ${reply.length} | cites path:line: ${/[\w./-]+\.\w+:\d+/.test(reply)} | tool calls: ${tools} | alerts: ${JSON.stringify(alerts)} | thread replaced: ${replaced} | repo unchanged: ${unchanged}`);
+  return done?.params.status === "completed" && alerts.length === 0 && unchanged ? 0 : 1;
+}
+
+let code = 1;
+try {
+  code = await run();
+} catch (e) {
+  say(`error: ${e instanceof SmokeError ? e.message : e instanceof Error ? e.name : "unknown"}`);
+  code = 1;
+} finally {
+  if (restoreMode) await call("privacy.setSharingMode", { mode: restoreMode }).then(() => say("sharing: restored"), () => say("sharing: NOT restored"));
+  if (added) await call("privacy.revoke", { root: added }).then(() => say("approval: revoked"), () => say("approval: NOT revoked"));
+  await call("daemon.shutdown").catch(() => undefined);
+  await Promise.race([exited, sleep(10_000)]);
+  if (!dead) child.kill();
+  await exited;
+  if (saved) {
+    try {
+      restoreRows(saved);
+      say("companion.db: thread and cursor restored");
+    } catch (e) {
+      say(`companion.db: NOT restored (${e instanceof Error ? e.name : "error"})`);
+      code = 1;
+    }
+  }
+}
+process.exit(code);
 ```
 
-- [ ] **Step 2: Run the live smoke** (requires M4a's §7.1.9 outcome `"ok"`; if it is `"stopped"`, the smoke prints `host: failed (Security check failed: Codex cannot run under its Seatbelt profile yet.)` — record that and stop here until the owner rules).
+Run: `cd companiond && npm run typecheck` (tsconfig includes `scripts/`). Expected: PASS. The script is not run in `npm test` or CI.
 
-Run: `cd companiond && node scripts/smoke-daemon.ts --approve <the selected session's repo root> "Explain what Claude last changed and why."`
-Expected: `host: ready`, `auth: signed_in`, a preview listing, the streamed reply citing a real file as `path:line`, then `turn: completed | alerts: [] | repo unchanged: true`, exit 0.
-Record in the findings doc under "## M4 live smoke": the command (repo path as `<repo>`), mode, item count, bytes, final line. No reply text, no transcript text.
+- [ ] **Step 2: Run the live smoke** (the controller runs it; it needs macOS, the signed-in companion CODEX_HOME and `CODEX_SEATBELT_MEASURED === "ok"`). The script never calls `auth.login` and never acknowledges a security stop. If it prints `host: failed (security check failed; …)`, stop and report to the owner; if it prints `auth: signed_out` (exit 2), stop and ask the owner to sign in through the app — do not run any login step.
 
-- [ ] **Step 3: Spec and roadmap.** Apply this plan's "Spec changes" items 1–5 to the spec (§4, §7.5, §9, §10, §14). Mark M4 "done" in `docs/superpowers/plans/README.md` only after both PRs merge; for now: "M4b written".
+Run: `cd companiond && node --disable-warning=ExperimentalWarning scripts/smoke-daemon.ts --approve <the selected session's repo root>`
+Expected: `host: ready`, `auth: signed_in`, `approval: …`, `sharing: off for this run`, `repo: bound | mode: off | items: 0 | bytes: 0 | notes: 0`, then `turn: completed | reply chars: … | cites path:line: true | tool calls: ≥1 | alerts: [] | thread replaced: false | repo unchanged: true`, then `sharing: restored` (unless it already was Off), `approval: revoked` (if added), `companion.db: thread and cursor restored`, exit 0. The default run sends no Claude session data at all (Off: no title, no items, no note), does not move the cursor, and leaves the session's stored thread id and cursor as they were. Run it with `--include-context` only if the owner asked for real Claude context (title, items, notes) to be sent in the smoke; the thread and cursor are restored then too.
+Record in the findings doc under "## M4 live smoke": the command (repo path as `<repo>`), and the script's output lines as printed (they hold no reply text, transcript text, title or path).
+
+- [ ] **Step 3: Spec and roadmap.** Apply this plan's "Spec changes" items 1–9 to the spec (§2, §4, §7.1.9, §7.5, §7.6, §8, §9, §10, §14) and the findings doc, and bump the spec's status line to `v3.4 — M4b: context, privacy, store, daemon API`. Item 7 also closes the parked "Known gap — stale writer lock after a close (parked for M4b)" paragraph in spec §2 and the matching "Known gap (final review I-3, parked for M4b)" lines in the findings doc: replace "M4b decides whether `closeThread` closes a process it leaves empty" with the decision (M4b keeps the gap; a refused resume continues in a new thread, GPT loses the old thread's history, and the app is told with `chat.threadReplaced`). Item 8 is a pointer only: M4a already wrote the accepted TCP 443 residual into §7.1.9 (ii) and (vi-a) (commits 336bba5, 163f08e, 7710eb3); do not repeat it. Mark M4 "done" in `docs/superpowers/plans/README.md` only after this PR merges; for now set the M4b row to `implemented (Tasks 1–9)`.
 
 - [ ] **Step 4: Final checks and commit**
 
@@ -2748,8 +3565,8 @@ git commit -m "test(daemon): add the live smoke and record M4b spec changes" -m 
 - [ ] **Step 5: Push and open the PR**
 
 ```bash
-git push origin feat/m4b-context-daemon
-gh pr create --base main --head feat/m4b-context-daemon --title "feat: M4b — redactor, context builder, store, privacy, daemon API, app bundle" --body "Implements docs/superpowers/plans/2026-11-04-m4b-context-daemon.md on top of M4a. Spec changes listed in the plan and applied. Live smoke: findings doc, \"M4 live smoke\". Daemon API for M5: protocol.ts and the plan's \"Interfaces produced for M5\".
+git push -u origin feat/m4b-part2-daemon
+gh pr create --base main --head feat/m4b-part2-daemon --title "feat: M4b part 2 — chat service, daemon API, live smoke" --body "Implements Tasks 5–7 and 9 of docs/superpowers/plans/2026-11-04-m4b-context-daemon.md on top of M4a (PR #8) and M4b part 1 (PR #7). Spec changes listed in the plan and applied. Live smoke: findings doc, \"M4 live smoke\". Daemon API for M5: protocol.ts and the plan's \"Interfaces produced for M5\".
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 ```
@@ -2765,6 +3582,7 @@ Expected: a PR URL. The owner reviews and merges.
   - §7.5 approvals (exact match, worktrees by `--git-common-dir`, refuse `$HOME`, `/`, non-Git; revoke): Task 3; sharing modes Off/Ask/Automatic, preview, "View what was sent", 12 KB cap, never raw full transcripts: Tasks 4–5 (+ `chat.sent`).
   - §6.4 cursor "reset" preview line: Task 4; §4.7 cursor only on completion: Task 5.
   - §6.3 live branch per turn, "Repository changed from A to B" in the next turn, unavailable → repo tools off: Task 5.
+  - M4a's caller rules (closeThread at thread end, acknowledged security stop, no `mcpServerStatus/list`, `HostBusyError` → try later, reopen after sign-in): Tasks 5–7, asserted in their tests.
   - §3 Store (threads, cursors, approved roots, pins, sharing mode, UI settings), §7.8 0700/0600, no secrets: Task 2, Task 7 (umask).
   - §7.6 `<untrusted_data>` wrapping with escaping: Task 4; developer instructions: M4a Task 8.
   - §10 terminal context and failure formatting: Task 4.
@@ -2778,7 +3596,8 @@ Expected: a PR URL. The owner reviews and merges.
 ## Interfaces produced for M5
 
 ```ts
-// Transport: companiond is a child process of the SwiftUI app: `node <bundle>/companiond/src/daemon/main.ts`.
+// Transport: companiond is a child process of the SwiftUI app:
+// `node --disable-warning=ExperimentalWarning <bundle>/companiond/src/daemon/main.ts`.
 // JSON-RPC 2.0, one JSON object per line (UTF-8, "\n"), app → daemon requests on stdin, daemon → app
 // responses and notifications on stdout. stderr is short diagnostic codes only. No network port.
 // The app sends no notifications. First call must be daemon.hello. Closing stdin shuts the daemon down.
@@ -2790,13 +3609,22 @@ const ErrorCodes = {
   parseError: -32700, invalidRequest: -32600, methodNotFound: -32601, invalidParams: -32602, internal: -32603,
   securityCheckFailed: 1001, hostNotReady: 1002, repoRefused: 1003, prepareExpired: 1004, turnBusy: 1005,
   approvalRefused: 1006 /* data: { reason: ApprovalRefusal } */, unknownSession: 1007, emptyQuestion: 1008,
+  hostBusy: 1009 /* capacity ("Too many … busy"): show the message, let the user try again later; the host stays ready */,
+  prepareStale: 1010 /* the sharing mode changed since chat.prepare: prepare again (and re-confirm). A revoke is caught at bind time and by the revoke generation during a send */,
+  confirmRequired: 1011 /* Ask mode (or an unknown prepare in Ask): chat.send needs confirmed: true; the prepare stays usable */,
 };
+// chat.send retry rule: a prepareId is used up only when its turn starts. After hostBusy, turnBusy or hostNotReady the
+// same prepareId can be sent again until it expires (10 min); after prepareExpired or prepareStale call chat.prepare.
+// Security stop: HostState { state: "failed", detail } with detail starting "Security check failed" → show it and an
+// Acknowledge button; only that button sends host.acknowledgeSecurityStop. host.restart is refused with
+// securityCheckFailed (1001) while the host failed with any security-check failure.
 
 // Methods (params → result)
 "daemon.hello"            { protocolVersion: 1 }                            → { protocolVersion: 1; daemonVersion: string }
 "daemon.shutdown"         {}                                                → {}            (then the process exits 0)
 "host.status"             {}                                                → HostState
-"host.restart"            {}                                                → HostState
+"host.restart"            {}                                                → HostState   (securityCheckFailed 1001 while a security stop is shown)
+"host.acknowledgeSecurityStop" {}                                           → HostState   (clears the latch, then starts; invalidRequest if no security stop)
 "auth.status"             {}                                                → AuthState
 "auth.login"              {}                                                → { authUrl: string }   (https; the app opens it)
 "sessions.snapshot"       {}                                                → SessionsSnapshot
@@ -2808,9 +3636,9 @@ const ErrorCodes = {
 "privacy.get"             {}                                                → { sharingMode: SharingMode; approvals: ApprovedRoot[]; redactionNotice: string }
 "privacy.setSharingMode"  { mode: "off" | "ask" | "automatic" }             → { sharingMode: SharingMode }
 "privacy.approve"         { root: string; includeWorktrees: boolean }       → ApprovedRoot
-"privacy.revoke"          { root: string }                                  → { revoked: boolean }
+"privacy.revoke"          { root: string }                                  → { revoked: boolean; pendingClose: number }   (answers after sessions re-resolved and threads on roots no longer approved closed; pendingClose = still closing; after 30 s a ready host is restarted)
 "chat.prepare"            { sessionId: string; question: string }          → Prepared
-"chat.send"               { prepareId: string; removeItemIds: string[] }   → { threadId: string; turnId: string }
+"chat.send"               { prepareId: string; removeItemIds: string[]; confirmed?: boolean } → { threadId: string; turnId: string }   (confirmed: true after the user confirms the preview; required in Ask)
 "chat.interrupt"          { sessionId: string }                             → {}
 "chat.sent"               { sessionId: string }                             → SentRecord[]          ("View what was sent", this run)
 "settings.get"            { key: `ui.${string}` }                           → { value: string | null }
@@ -2825,7 +3653,11 @@ const ErrorCodes = {
 "session.syncError"   { message: string }
 "chat.delta"          { sessionId: string | null; threadId: string; turnId: string; itemId: string; text: string }
 "chat.item"           { sessionId: string | null; threadId: string; turnId: string; phase: "started" | "completed"; item: ItemSummary }
-"chat.turnCompleted"  { sessionId: string | null; threadId: string; turnId: string; status: string; error: string | null }
+"chat.turnCompleted"  { sessionId: string | null; threadId: string; turnId: string; status: string; error: string | null } // status "abandoned": Codex restarted (sign-in, failure) before the reply finished; the cursor did not move
+// Replies are plain text deltas. The app renders markdown but must not auto-load remote images or links (spec §7.1.9 (vi-a)).
+// Ordering: chat.delta, chat.item and even chat.turnCompleted for a turn can arrive before the chat.send response that
+// carries its turnId. Match them by threadId and buffer them until chat.send returns.
+"chat.threadReplaced" { sessionId: string; threadId: string; reason: "resume_refused" } // Codex refused to resume; the conversation continues in a new thread without GPT's old history: tell the user
 "security.alert"      { sessionId: string | null; threadId: string | null; turnId: string | null; kind: "guard" | "server_request" | "process"; detail: string }
 
 // Types
@@ -2837,9 +3669,10 @@ type ApprovalRefusal = "not_absolute" | "missing" | "home_or_root" | "repo_refus
 interface RepoLine { state: "bound" | "unavailable" | "none"; root: string | null; branch: string | null; detail: string | null }
 type PreviewItemKind = "user" | "assistant" | "command" | "failure" | "file_edit" | "subagent" | "folder";
 interface PreviewItem { id: string; kind: PreviewItemKind; label: string; text: string; redactions: number }
-interface ContextPreview { items: PreviewItem[]; notes: string[]; omitted: number; bytes: number; cursorAfter: string | null; subagents: SubagentUpdate[] }
-interface Prepared { prepareId: string; sessionId: string; mode: SharingMode; preview: ContextPreview | null; needsConfirm: boolean; repo: RepoLine; repoNote: string | null }
-// needsConfirm true → show the preview sheet (remove toggles → removeItemIds); false → call chat.send at once. prepareId expires after 10 min.
+interface WirePreview { items: PreviewItem[]; notes: string[]; omitted: number; bytes: number } // ContextPreview minus the daemon-only cursorAfter and raw subagents
+interface Prepared { prepareId: string; sessionId: string; mode: SharingMode; preview: WirePreview | null; needsConfirm: boolean; repo: RepoLine; repoNote: string | null; sessionTitle: string | null }
+// needsConfirm true (every Ask prepare) → show the preview sheet: sessionTitle, repo line, repoNote, notes and items
+// (remove toggles → removeItemIds); false (Off, Automatic) → call chat.send at once. prepareId expires after 10 min.
 interface SentRecord { sessionId: string; threadId: string; turnId: string; contextBlock: string; question: string; sentAt: number }
 interface ItemSummary { id: string; type: string; server: string | null; tool: string | null; status: string | null }
 // SessionsSnapshot, SessionSummary, Selection, SyncStatus, SyncStats, WorktreeResolution, RepoChange, SubagentUpdate: M3 "Interfaces produced for M4/M5".
