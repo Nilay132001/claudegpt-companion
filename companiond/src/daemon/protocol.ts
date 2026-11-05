@@ -32,6 +32,7 @@ export const METHODS = [
   "privacy.get", "privacy.setSharingMode", "privacy.approve", "privacy.revoke",
   "chat.prepare", "chat.send", "chat.interrupt", "chat.sent",
   "settings.get", "settings.set",
+  "jira.status", "jira.configure", "jira.clear", "jira.check",
 ] as const;
 
 export const EVENTS = [

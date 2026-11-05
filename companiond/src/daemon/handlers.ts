@@ -2,8 +2,10 @@
 import type { BridgeEvent, SessionsSnapshot, SyncStatus } from "../bridge/sessionBridge.ts";
 import { pickerGroups, type Selection } from "../bridge/selection.ts";
 import { ChatError, type ChatBridge, type ChatHost, type ChatService, type Prepared } from "../chat/chatService.ts";
-import { HostBusyError, HostNotReadyError, SecurityCheckError, TurnBusyError, type AuthState, type HostState } from "../codex/codexHost.ts";
+import { HostBusyError, HostNotReadyError, SecurityCheckError, TurnBusyError, type AuthState, type HostState, type JiraBinding } from "../codex/codexHost.ts";
 import { RepoRefusedError } from "../git/safeGit.ts";
+import { JiraInputError } from "../jira/credentials.ts";
+import type { JiraService } from "../jira/jiraService.ts";
 import { REDACTION_NOTICE } from "../jail/redactor.ts";
 import { ApprovalRefusedError, type Privacy } from "../privacy/privacy.ts";
 import { SHARING_MODES, StoreError, type SharingMode, type Store } from "../store/store.ts";
@@ -25,9 +27,10 @@ export interface DaemonHost extends ChatHost {
   clearSecurityStop(): void;
   auth(): Promise<AuthState>;
   login(): Promise<{ authUrl: string }>;
+  setJira(j: JiraBinding | null): void;
 }
 export interface DaemonDeps {
-  host: DaemonHost; bridge: DaemonBridge; chat: ChatService; privacy: Privacy; store: Store; version: string; shutdown(): void;
+  host: DaemonHost; bridge: DaemonBridge; chat: ChatService; privacy: Privacy; store: Store; jira: JiraService; version: string; shutdown(): void;
   /** How long a thread bound to a revoked root may stay open before the host is restarted (default 30 s). */
   revokeDeadlineMs?: number;
   /** Short codes only (no messages, no paths); defaults to stderr. */
@@ -198,6 +201,18 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       return {};
     },
     "chat.sent": async (p) => d.chat.sent(str(p, "sessionId")),
+    "jira.status": async () => d.jira.status(),
+    "jira.configure": async (p) => {
+      // Fixed messages only: the params hold the token.
+      try {
+        return d.jira.configure({ site: p.site, email: p.email, token: p.token });
+      } catch (e) {
+        if (e instanceof JiraInputError) throw invalid(e.message);
+        throw new DaemonError(ErrorCodes.internal, "Jira could not be set up.");
+      }
+    },
+    "jira.clear": async () => d.jira.clear(),
+    "jira.check": async () => d.jira.check(),
     "settings.get": async (p) => ({ value: d.store.getUiSetting(str(p, "key", 80)) }),
     "settings.set": async (p) => {
       d.store.setUiSetting(str(p, "key", 80), typeof p.value === "string" ? p.value : "");
