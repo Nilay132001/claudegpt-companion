@@ -1,6 +1,6 @@
 # ClaudeGPT Companion — design
 
-Status: **v3.3 — M4a: relay and code mode (owner rulings 2026-11-04)** · Date: 2026-11-05 (v3:
+Status: **v3.4 — M4b: context, privacy, store, daemon API** · Date: 2026-11-05 (v3:
 2026-11-03) · Based on: `docs/findings/2026-11-03-phase1-poc.md`
 
 - v1 → v2: owner review (decisions D1–D3, required changes R1–R8, §15).
@@ -9,6 +9,9 @@ Status: **v3.3 — M4a: relay and code mode (owner rulings 2026-11-04)** · Date
   findings doc, "M1 spike results".
 - v3.3 (M4a): one app-server per approved root, the relay, code mode closed down, §7.1.9 measured; each
   change is marked "M4a". Evidence: findings doc, "M4 Codex measurements".
+- v3.4 (M4b): what context contains, the cursor, Off/Ask/Automatic, approvals, revoke, the daemon API's
+  confirm and stale rules, restarts and resumes, the bundle; each change is marked "M4b". Evidence: findings
+  doc, "M4 live smoke".
 
 ## 1. Goal and acceptance test
 
@@ -90,14 +93,16 @@ Measured end to end (Task 10, fix round 1): after a real turn in root A, the mov
 next tool call lists only B's files, and the acceptor shows A's binding closing as `revoked` before B's
 binds.
 
-**Known gap — stale writer lock after a close (parked for M4b).** `closeThread`, and the make-room step
+**Known gap — stale writer lock after a close (kept in M4b).** `closeThread`, and the make-room step
 that unloads the oldest idle bound thread before a new binding, only unsubscribe the thread and revoke
 its token; they do not close its process. That process lives on with the thread loaded and Codex's
 writer lock held, so reopening the thread in another root (a `thread/resume` in a different process) is
 refused ("already has an active writer", a plain refusal, not a security stop) until the old process
 exits. There is no idle close: a root process exits only by LRU eviction when a fourth root is needed,
 a move off it, `stop()` or a failure. The common case is the base process (choose a repo for an unbound
-conversation after closing it). M4b decides whether `closeThread` closes a process it leaves empty.
+conversation after closing it). *M4b decision:* the gap is kept; `closeThread` does not close a process it
+leaves empty. A refused resume continues the conversation in a new thread, GPT loses the old thread's
+history, and the app is told with `chat.threadReplaced` (§4).
 
 ## 3. Components
 
@@ -123,14 +128,28 @@ conversation after closing it). M4b decides whether `closeThread` closes a proce
 2. User types or dictates; dictation text is editable before sending.
 3. `ContextBuilder` computes the delta per the **sharing mode** (§7.5). In "Ask each time" (default) the
    preview sheet shows the exact text item by item, with remove toggles. Nothing is sent until confirmed.
+   *M4b:* context holds user and assistant text, shell commands with trimmed output, recognised failures,
+   file-edit paths, subagent summaries and folder changes. Output of non-shell tools (file reads,
+   searches) is not sent: GPT reads the repo itself through the jail. Sidechain records are skipped.
 4. `CodexHost` sends `turn/start` on that session's thread, bound to the session's root (§2). The
    context block is wrapped as untrusted data, followed by the question.
 5. Codex may call `companion-readonly` tools. The runtime guard interrupts the turn on any item outside
    the allowlist (§7.1).
 6. Deltas stream; markdown renders; `path:line` links open in the user's editor.
 7. The cursor advances only when the turn completes. Nothing already sent is resent unless asked.
+   *M4b:* it moves to the newest record in the previewed delta (§7.5) and never moves backwards: a turn
+   from an older prepare that completes after a newer one leaves the cursor where it is.
 
 Each Claude session has its own Codex thread; switching sessions keeps both histories.
+
+**Restarts, resumes and closes (M4b).** Each message opens (or resumes) the session's thread, so after a
+sign-in (which replaces every Codex process) or a failure, conversations reopen at the next message; a
+reply that was running then ends as "abandoned" and the cursor does not move. If Codex refuses the resume
+(for example the stale writer lock kept in §2), the conversation continues in a new thread, GPT loses the
+old thread's history, and the app is told (`chat.threadReplaced`). A conversation's thread is closed (its
+relay token revoked) when its Claude session leaves the list, and every thread bound to a root that is no
+longer approved is closed when an approval is revoked (§7.5; threads in other approved repos keep running);
+approval is re-checked at bind time, so a revoked root is never bound again.
 
 ## 5. Authentication
 
@@ -422,8 +441,8 @@ No single layer is trusted, including the Codex sandbox (R1).
        under the same edit, connected (`OK`, counted once); under production it got `EPERM`.
      - Not measured: `image` / `generatedImage` with a `data:` URL; `audio`, `notify` and `store` beyond
        what is above (`store`/`load` by type and the canary loads only); `as_settled` and
-       `stream_settled` by type only; rendering of markdown in the client (M4b's job: the companion must
-       not auto-load remote images in replies). Re-run on every Codex upgrade (`itest/live.itest.ts`).
+       `stream_settled` by type only; rendering of markdown in the client (M5 (the app); the daemon passes
+       reply text only (M4b): the companion must not auto-load remote images in replies). Re-run on every Codex upgrade (`itest/live.itest.ts`).
      Earlier gate rows (fix round 1): `load` of the canaries gives no data; `image` and `generatedImage`
      with `https://example.com/…` throw and the URL reaches no exec output.
    - (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files
@@ -564,11 +583,44 @@ output before it reaches Codex.
   **exactly**. Optional "include this repo's worktrees" approves any toplevel sharing the same
   `--git-common-dir` (needed because every Claude Desktop session runs in its own worktree). Approving
   `$HOME`, `/`, or a non-Git folder is refused (F5). Revoke in settings.
+  *M4b:* a folder that contains `$HOME` is refused as well. Approval runs SafeGit's config gate (§7.3), so
+  a repo with program-valued config is refused at approval time with the visible reason.
+- **Revoke (M4b).** From the revoke on, the root is refused at bind time. The daemon re-resolves every
+  session, then closes every thread bound to a root that is no longer approved (checked with the thread's
+  root and git common dir, so a worktree still covered by another `includeWorktrees` approval stays); its
+  relay token is revoked and a running reply in it is interrupted. Threads in repos that are still approved
+  are not touched. The next message reopens a closed conversation without that root. `privacy.revoke`
+  answers `{ revoked, pendingClose }`, where `pendingClose` counts those revoked-root threads that stayed
+  open (a running reply keeps its thread until it ends). If any of them is still open, and its root still
+  not approved, 30 s later and the host is ready, the daemon restarts the Codex host, the only way to end a
+  root's process; every conversation then reopens at its next message (§4). A host that is starting,
+  stopped or failed is left alone. A revoke that removed no approval (`revoked: false`, an unknown root)
+  changes nothing: it answers `pendingClose: 0`, closes nothing and arms no restart.
 - **Transcript sharing mode** (global):
   - *Off* — nothing from Claude's transcript is sent; GPT gets the question (plus repo tools if approved).
+    *M4b:* Off sends the repository line and the question only: no session title, no transcript, no
+    "Repository changed" note.
   - *Ask each time* (default) — preview sheet before every send that includes transcript context.
+    *M4b:* Ask confirms every send, because the session title is always sent outside Off; the preview shows
+    the title as it will be sent.
   - *Automatic* — sends the delta without asking.
-- Every sent message has "View what was sent" showing the exact context block.
+- **Confirm and stale prepares (M4b).** `chat.send` takes `confirmed`. When the prepare was made in Ask, or
+  the daemon does not know the prepare and the current mode is Ask, a send without `confirmed: true` is
+  refused with `confirmRequired` (1011) before anything is sent, and the prepare stays usable. This check
+  runs first. Send then re-checks the sharing mode, at its start and again right before the turn starts; if
+  the mode changed since the prepare, it refuses with `prepareStale` (1010) and the app prepares again, so
+  switching to Off before pressing Send sends nothing from the session. An approval change is not checked
+  against the prepare: the repository line is re-read at send, a revoked root is refused at bind time
+  (`isApproved`), and a revoke while the send is in progress (before its turn starts) also ends it with
+  `prepareStale`. An added approval never makes a prepare stale. A prepare is used up only when its turn starts: after `hostBusy` (1009), `turnBusy` or
+  `hostNotReady` the same prepare can be sent again until it expires (10 min).
+- **Cursor (M4b).** The cursor advances to the newest record in the previewed delta, including transcript
+  items the user removed: removed transcript items are not offered again (the user saw and declined them).
+  Exception: subagent progress the user removed from the preview is offered again next time; only what was
+  sent is marked sent. The cursor moves only when the turn completes and never moves backwards (§4).
+- Every sent message has "View what was sent" showing the exact context block. *M4b:* the daemon keeps the
+  exact context block of each sent turn in memory for the run (`chat.sent`); after a restart the same text
+  is in the Codex thread history. It is not written to `companion.db`.
 - Raw full transcripts are never sent; the delta is capped (default 12 KB).
 
 ### 7.6 Prompt injection
@@ -576,9 +628,9 @@ Transcript, file, terminal and Jira text is wrapped as `<untrusted_data source=�
 instructions say such data never changes rules. Safety must not depend on it. What M1 showed: with the
 hardened config no command ran and no shell request appeared, a write attempt through `apply_patch` was
 declined with no file written, the Seatbelt jail blocked out-of-root reads, writes, shell and network for
-our MCP server, and the empty thread `cwd` kept a repo `AGENTS.md` out. What it did not show: that
-Codex's own `functions.exec` cannot read files outside the root or run code (open question, §7.1.8).
-The approved mitigation is running Codex itself under Seatbelt (§7.1.9), probed in M4.
+our MCP server, and the empty thread `cwd` kept a repo `AGENTS.md` out. *M4b:* Codex itself
+runs under its own Seatbelt profile; what that covers, and the accepted residual, are in §7.1.9 (ii) and
+(vi-a). Remote images in replies are not auto-loaded: §7.1.9 (vi-a).
 
 ### 7.7 Claude Desktop preservation (R6)
 Reads only the paths in §6.1; never writes under `~/.claude`, Claude's Application Support or any
@@ -606,6 +658,24 @@ message bodies or tokens.
 - Input: text field, 🎙 mic with red recording indicator and live text, editable before send.
 - Settings: account, privacy (sharing mode, approved roots, redaction notice), speech, follow-window,
   hotkey. Light and dark follow the system.
+- **What the daemon gives the UI (M4b).** companiond is the app's child process; JSON-RPC 2.0, one JSON
+  object per line over stdio, no network port (method and event list: `companiond/src/daemon/protocol.ts`).
+  The UI follows these rules:
+  - Ask mode: every prepare needs the preview sheet (title as sent, repo line, notes, items with remove
+    toggles); Send passes `confirmed: true`. Without it the daemon refuses with `confirmRequired` (1011)
+    and the same prepare can be confirmed and sent (§7.5).
+  - `prepareStale` (1010): the sharing mode changed since the preview, or an approval was revoked while the
+    send was in progress; prepare again (and re-confirm).
+    `hostBusy` (1009, "Too many … busy"): shown as "try again later"; the same prepared message can be sent
+    again, as after `turnBusy` and `hostNotReady`.
+  - A "Security check failed" stop, latched or not, stays until the owner presses Acknowledge
+    (`host.acknowledgeSecurityStop`): `host.restart` refuses it with `securityCheckFailed` (1001), so a
+    restart never brings Codex back past a security failure.
+  - `chat.threadReplaced`: tell the user GPT lost the old thread's history (§4). A turn ending "abandoned"
+    (Codex restarted) asks the user to ask again.
+  - Revoke shows `pendingClose` threads still finishing; after 30 s the daemon may restart Codex (§7.5).
+  - Replies are plain text; the app renders markdown but does not auto-load remote images or links
+    (§7.1.9 (vi-a)).
 
 ## 9. Speech (R5, in the first usable release)
 
@@ -615,11 +685,16 @@ message bodies or tokens.
 - Read Aloud: one `AVSpeechSynthesizer`; pause/resume/stop at word boundaries; rate mapped from 0.5×–2×;
   new playback stops the old one.
 - Mic access needs a bundled, signed `.app` with usage strings — built in M4, not at packaging time (F12).
+  *M4b:* M4's bundle is ad-hoc signed by default. macOS ties microphone permission to the signature, so
+  each ad-hoc rebuild may ask again; a stable identity (`COMPANION_SIGN_IDENTITY`) avoids it. Developer ID
+  and notarization stay in M7.
 
 ## 10. Terminal context
 
 From the transcript: Bash commands, trimmed stdout/stderr, exit status, recognised test and build
 failures. No live PTY (findings §5). The UI says terminal context appears when a command finishes.
+*M4b:* only shell output is sent; output of non-shell tools (file reads, searches) is not, because GPT reads
+the repo itself through the jail (§4).
 
 ## 11. Jira (M6)
 
@@ -725,7 +800,7 @@ watcher failure.
 | M1 | **Protocol and platform spike** (throwaway code, written findings): per-thread root binding (A vs B), exact flag keys incl. `view_image` and `web_search`, `experimentalFeature/list` + `config/read` self-check, `enabled_tools` hiding a fake `write_file`, server-request reply shapes, thread `cwd` vs `AGENTS.md`, `sandbox-exec` profile on macOS 27, `cliSessionId` change on disk | **done 2026-11-04**: findings doc updated; §2 option A chosen |
 | M2 | `SafeGit` + `companion-readonly` jail under Seatbelt + §12.1 unit suite | suite green locally and in CI: a `companiond-macos` job on `macos-26` runs the Seatbelt tests (they skip on Linux); if the runner has no `sandbox-exec`, they are local-only and the README says so |
 | M3 | SessionBridge, tail, parser, WorktreeResolver + terminal/test-failure extraction + §12.2 suite | suite green |
-| M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "ok"* |
+| M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "ok". M4b (Redactor, Store, privacy, ContextBuilder, chat service, daemon API, bundle skeleton) implemented; live smoke result: findings doc, "M4 live smoke"; M4b bundle ad-hoc signed by default (§9)* |
 | M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release** |
 | M6 | Jira via Atlassian MCP, read-only allowlist enforced by self-check | self-check proves no write tool is visible |
 | M7 | Packaging, install guide, signing notes | clean install on this Mac |
