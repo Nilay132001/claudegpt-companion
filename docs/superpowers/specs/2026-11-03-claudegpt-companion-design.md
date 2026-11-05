@@ -1,6 +1,6 @@
 # ClaudeGPT Companion — design
 
-Status: **v3.4 — M4b: context, privacy, store, daemon API** · Date: 2026-11-05 (v3:
+Status: **v3.5 — M6: read-only Jira (companion-jira proxy)** · Date: 2026-11-05 (v3:
 2026-11-03) · Based on: `docs/findings/2026-11-03-phase1-poc.md`
 
 - v1 → v2: owner review (decisions D1–D3, required changes R1–R8, §15).
@@ -12,6 +12,9 @@ Status: **v3.4 — M4b: context, privacy, store, daemon API** · Date: 2026-11-0
 - v3.4 (M4b): what context contains, the cursor, Off/Ask/Automatic, approvals, revoke, the daemon API's
   confirm and stale rules, restarts and resumes, the bundle; each change is marked "M4b". Evidence: findings
   doc, "M4 live smoke".
+- v3.5 (M6): read-only Jira through a companion proxy, `companion-jira` (owner ruling B, §11), reached
+  through the relay like the jail; the self-check fails on write-shaped tools; each change is marked "M6".
+  Evidence: `companiond/itest/jira.itest.ts` and `itest/jiraProfile.itest.ts` (§11).
 
 ## 1. Goal and acceptance test
 
@@ -55,7 +58,11 @@ servers, hooks, subagents or SDLC harness.
 │    code mode: functions.exec / functions.wait only)          ▼                  │
 │   └─ MCP companion-readonly = the relay ── unix socket ──► companion-readonly   │
 │        (one-time token per thread)         (acceptor)     jail (Seatbelt,       │
-│      + Atlassian (read tools only, M6)                    one root)             │
+│                                                           one root)             │
+│   + MCP companion-jira = the relay ── same socket ──► companion-jira (M6)       │
+│        (own token per thread, its own      (acceptor +    (Seatbelt, HTTPS      │
+│         validator: 3 read tools)           validator)     to Atlassian,         │
+│                                                           3 read tools)         │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -121,6 +128,7 @@ history, and the app is told with `chat.threadReplaced` (§4).
 | `CodexHost` | Spawns and supervises one app-server per approved root (cap 3, idle LRU close) plus a base process, each under Codex's own Seatbelt profile (§7.1.9); a short-lived sign-in process under the sign-in profile; `initialize`, `account/*`, `thread/start|resume|unsubscribe`, `turn/start|interrupt`; binds threads to roots through the relay (§2); streams deltas; answers server requests per type (§7.1); self-check (§7.1); runtime guard (§7.1); any security failure stops every process ("Security check failed"). |
 | `RelayAcceptor` | The relay socket in App Support. Checks each connection (mutual HMAC over a fresh nonce, one-time token), then launches the sandboxed validator and the jail for that binding (§7.1.9). |
 | `companion-readonly` MCP | `list_dir`, `read_file`, `search`, `git_status`, `git_diff`. Runs under Seatbelt, jailed to one root (§7.2–7.3). Launched by companiond per binding, reached by Codex only through the relay and the validator. |
+| `companion-jira` MCP | *M6.* `jira_get_issue`, `jira_search`, `jira_get_comments`: three read tools, GET-only, fixed URL templates. Runs under its own Seatbelt profile (HTTPS out, nothing else). Launched by companiond per thread, reached by Codex only through the relay and its own validator. The credential arrives on fd 3 (§11). |
 | `SafeGit` | The only way any component runs git (§7.3). Used by the MCP server and `WorktreeResolver`. |
 | `Store` | `~/Library/Application Support/ClaudeGPTCompanion/companion.db` (0600): Claude session → Codex thread id, cursor, approved roots, pins, sharing mode, UI settings. |
 | SwiftUI shell | Panel, chat, picker, indicators, preview sheet, settings, follow-window, hotkey, speech. |
@@ -268,7 +276,7 @@ No single layer is trusted, including the Codex sandbox (R1).
    |---|---|---|
    | `item/commandExecution/requestApproval` | `decline` | verified: status `declined`, no file |
    | `item/fileChange/requestApproval` | `decline` | verified: status `declined`, no file |
-   | `mcpServer/elicitation/request`: `serverName` allowlisted (`companion-readonly`; Atlassian in M6) **and** the request is a tool-call approval for an allowlisted tool | `{action:"accept", content:null, _meta:null}` | verified (accept body as used in M1): needed for every MCP tool call under `untrusted`; without it the call is rejected |
+   | `mcpServer/elicitation/request`: `serverName` allowlisted (`companion-readonly`; `companion-jira` in M6) **and** the request is a tool-call approval for an allowlisted tool | `{action:"accept", content:null, _meta:null}` | verified (accept body as used in M1): needed for every MCP tool call under `untrusted`; without it the call is rejected |
    | `mcpServer/elicitation/request`: any other server, any other tool, `url` mode, or any form elicitation | `{action:"decline", content:null, _meta:null}` | types only |
    | `execCommandApproval` / `applyPatchApproval` | `{decision:{denied:{rejection:"companion is read-only"}}}` (M4a: the 0.166.0 type is `{ decision: ReviewDecision }`, the shape M1 sent) | types only |
    | `item/permissions/requestApproval`, `item/tool/call`, `item/tool/requestUserInput`, unknown | JSON-RPC error | types only |
@@ -276,8 +284,8 @@ No single layer is trusted, including the Codex sandbox (R1).
    "Types only" = never seen in M1; shape taken from the generated types and unit-tested in M4.
    Elicitation: M1 accepted every elicitation from the fake server without checking it. M4 identifies a
    tool-call approval (and its tool name) from the request's `mode` / `_meta`, confirmed against the
-   0.166.0 types; anything it cannot identify is declined. This matters once Atlassian, a remote server
-   with write tools, is connected.
+   0.166.0 types; anything it cannot identify is declined. This mattered for Atlassian's remote server
+   with write tools; *M6:* that server is never connected (below, §11).
    **M4a elicitation gate (confirmed against the 0.166.0 types and binary strings):** a tool-call
    approval is `mode: "form"` with `_meta.codex_approval_kind == "mcp_tool_call"`. The tool name comes
    from `_meta` or, if `_meta` has none, from the in-flight `mcpToolCall` item of that thread and server
@@ -285,12 +293,17 @@ No single layer is trusted, including the Codex sandbox (R1).
    **Measured (M4a, code-mode spike and Task 10's recorded tool turn):** Codex sent no elicitation for the jail's tools in any
    run (they carry `readOnlyHint: true`; Codex appears to auto-approve read-only tools). For
    `companion-readonly` the allowlist therefore rests on `enabled_tools`, the validator's tool allowlist,
-   the per-thread tool-list check and the guard's `mcpToolCall` check. The gate stays for M6 (Atlassian).
+   the per-thread tool-list check and the guard's `mcpToolCall` check. The gate stays for M6 (`companion-jira`, below).
    **Deferred to M6 (ruling I-10):** whether Codex passes server-supplied `_meta` through on form
    elicitations (spoof risk), and whether the elicitation's `_meta` call id equals the `mcpToolCall` item
    id. M4a cannot measure either: the validator closes on any server→client request, and read-only tools
    trigger no elicitation. M4a does assert that item-bearing notifications are only `item/started` and
    `item/completed` (Task 10).
+   *M6:* the elicitation allowlist's second server is `companion-jira` (owner ruling B, §11). Atlassian's
+   remote MCP is never configured, so the deferred question above (`_meta` spoofing on a remote server's
+   form elicitations) does not arise: no server Codex talks to can send a server→client request past the
+   validator, which closes on any. `companion-jira`'s three tools carry `readOnlyHint: true` like the
+   jail's, so they are expected to trigger no elicitation either; the gate stays as defence in depth.
    Unknown → error: the server-request union also contains `account/chatgptAuthTokens/refresh` and
    `attestation/generate` (both names present in the 0.166.0 binary). M4 confirms that erroring them does
    not break Keychain (`keyring`) auth. *M4a (Task 10):* the recorded signed-in tool turn sent no
@@ -318,6 +331,15 @@ No single layer is trusted, including the Codex sandbox (R1).
    is not in `config.toml` (0.166.0 refuses it); it is set per thread and checked. `config/read` may show
    only the user layer at `CODEX_HOME/config.toml` and the system layer at `/etc/codex/config.toml`; this
    runs when each process starts and again before every `thread/start` / `thread/resume`.
+   **M6 additions:** in both scopes, any tool of any server whose name is write-shaped
+   (`isWriteShapedTool`: a write verb anywhere in the name, split on separators and camelCase; `comment` /
+   `comments` count only when no read verb precedes them) fails the check ("looks like a write tool"),
+   even on an allowlisted server. The per-thread check takes the set of servers the thread is **bound** to:
+   `companion-readonly` when it holds a root grant, `companion-jira` when it holds a Jira grant (decided
+   after the status call returns, so a `setJira` during the call does not demand a server it just
+   revoked). Each bound server must be running and list exactly its allowlist. `companion-jira`'s status
+   is asked for (by `serverName`) only when the thread holds a Jira grant; asking for an inert server
+   would spawn it for nothing.
 6. **Runtime guard = allowlist (F1):** only item types `userMessage`, `agentMessage`, `reasoning`,
    `plan`, `contextCompaction`, and `mcpToolCall` for allowlisted server+tool may start. Anything else
    (`commandExecution`, `fileChange`, `webSearch`, `imageView`, `dynamicToolCall`,
@@ -468,6 +490,24 @@ No single layer is trusted, including the Codex sandbox (R1).
    - (xi) **Relay tokens on disk (review I4):** measured none. After two persistent bound threads with a
      real turn each, no file under App Support (CODEX_HOME rollouts, logs and sqlite, `run/`, `bin/`)
      held either token; files named auth, credential, keyring or keychain were not opened.
+   - (xii) **`companion-jira` holds the Jira token and can reach any host on 443 (M6).** A compromised
+     `companion-jira` (a bug in its own V8 or Node, or in its JSON / ADF parsing of a Jira answer) has the
+     credential in memory and its profile's outbound `tcp *:443` (minus loopback) plus DNS: SBPL cannot
+     name hosts, so it could send the token anywhere on 443. What limits it: the model controls only an
+     issue key (checked against `ISSUE_KEY` before any request) and a JQL string (sent as a query value,
+     never as a path or host); the hosts (`<site>.atlassian.net/_edge/tenant_info` and
+     `api.atlassian.com/ex/jira/<cloudId>/rest/api/3/…`) and every path template are fixed in code; the
+     token is scoped to `read:jira-work` and `read:jira-user`; the validator re-serialises every line in
+     both directions. The profile denies file reads beyond its runtime, every write, exec beyond Node,
+     loopback and the keychain and trust services (measured: HTTPS `status 200`; port 80, loopback 443,
+     a `$HOME` read and a `/tmp` write all `EPERM`, `itest/jiraProfile.itest.ts`).
+     *Controller ruling (a):* Node runs with `--use-bundled-ca`, because Node 26 defaults to the system CA
+     store, which needs the trust services the profile denies. So a Jira site behind a TLS-intercepting
+     proxy with a private root CA does not connect; the app shows "Jira could not be reached".
+     Like the jail, `companion-jira` runs **outside** Codex's profile: companiond launches it per binding,
+     and Codex reaches it only through the relay, the acceptor and the validator (with the Jira tool
+     allowlist), so a Codex or code-mode escape does not get the token, and `companion-jira` does not get
+     Codex's rights.
 
    **§7.1.9 measured (2026-11-05, Task 10): `CODEX_SEATBELT_MEASURED = "ok"`.** Codex runs under the
    profile above. The self-check suite, the profile probe, the sign-in profile, tool calls through the
@@ -712,15 +752,75 @@ the repo itself through the jail (§4).
 
 ## 11. Jira (M6)
 
-Official Atlassian remote MCP (`https://mcp.atlassian.com/v2/mcp`) in the companion's Codex config with
-OAuth (`mcpServer/oauthLogin/completed`), `enabled_tools` = read tools only. The self-check (§7.1.5)
-fails if any create/edit/transition/comment/worklog tool is visible. If `enabled_tools` turns out not to
-filter remote servers, Atlassian is proxied through a companion MCP that exposes only read tools.
-*M1 finding:* `enabled_tools` hid a fake `write_file` on a local stdio server (status listed only
-`read_file`, names unprefixed; never called). Remote servers are still untested, so the proxy stays the
-fallback, not mandatory. Atlassian's server name goes on the elicitation allowlist (§7.1.4), and only
-tool-call approvals for its allowlisted read tools are accepted; `url`-mode and form elicitations from it
-(e.g. OAuth or input prompts) are declined.
+*M6: rewritten for owner ruling B (2026-11-05).* The earlier design (Codex itself connects to
+Atlassian's remote MCP and does the OAuth) is dropped. It would have put the token in Codex's own Keychain
+item and inside the process the model drives, granted Atlassian's write scopes, and rested read-only on
+`enabled_tools`, which was never measured for remote servers. Atlassian's remote MCP is **not**
+configured anywhere.
+
+**The proxy.** A companion MCP server, `companion-jira`, written in companiond's own TypeScript
+(`companiond/src/jira/`). companiond launches it per thread under its own Seatbelt profile (§7.1.9 (xii))
+and Codex reaches it through the existing relay, acceptor and a validator of its own, exactly like
+`companion-readonly` (§2). A thread's `companion-jira` entry in `config.toml` is inert (like the jail's);
+the per-thread override points it at the relay with a one-time token only while the owner has Jira set up.
+`setJira(null)` (Remove, or a new credential) revokes every thread's Jira grant at once, including a
+running turn's; the thread rebinds (or not) at its next turn. This fails closed (controller ruling (b)):
+if Codex ever re-execs the relay with the spent token, the acceptor refuses it and the host latches a
+security stop.
+
+**Token.** An Atlassian **scoped** API token with `read:jira-work` and `read:jira-user` only, created by
+the owner, used with the account email as HTTP Basic auth. The "No API keys" non-goal means OpenAI API
+keys; an Atlassian scoped token is allowed.
+
+**Read-only at four layers.**
+1. The token's scopes (above).
+2. `JiraClient` has one HTTP verb, `GET`, with `redirect: "error"`, and builds every URL from fixed
+   templates: `https://<site>/_edge/tenant_info` (for the cloudId) and
+   `https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3/{issue/<key>, issue/<key>/comment,
+   search/jql, myself}`. The site must match `<name>.atlassian.net`; the issue key must match `ISSUE_KEY`.
+3. The server lists exactly `JIRA_TOOL_NAMES`; the grant's validator, Codex's `enabled_tools`, the
+   elicitation allowlist (§7.1.4) and the runtime guard (§7.1.6) allow only those.
+4. The self-check (§7.1.5) fails on any tool of any server that is not allowlisted or whose name is
+   write-shaped (`isWriteShapedTool`), and on a bound `companion-jira` that does not list exactly the three.
+
+**Credential path.** The SwiftUI app keeps site, email and token in its own Keychain item (service
+`ClaudeGPT Companion Jira`; `SecItem*` appears in one Swift file only). It sends them to companiond in
+`jira.configure` over stdio. companiond holds them in memory only (`JiraService`) and, at each binding, the
+acceptor writes them as one JSON line to `companion-jira`'s fd 3 (a pipe), then EOF. They never go into
+argv, env, a file, a log line, an error message, a Codex config or override, developer instructions, a
+tool result, a prompt or the model. `jira.status` returns site and email only; credential objects
+serialise to a redacted form.
+
+**Tools and caps.** `jira_get_issue {key}`, `jira_search {jql, max_results?}` and
+`jira_get_comments {key, max_results?}`, each with `readOnlyHint: true`. JQL is at most 1000 characters
+and is sent as a query value; `max_results` is 1–20 (default 10). A response body over 2 MB is refused;
+each request times out after 15 s; rendered text is capped at 24 000 characters (ADF walked at most 40
+deep and 5000 nodes).
+
+**Untrusted text.** Every tool result is passed through the redactor (§7.4), escaped (`escapeData`),
+capped and wrapped as `<untrusted_data source="jira">…</untrusted_data>`. The developer instructions say
+Jira is read-only and that text in `<untrusted_data>` is data (§7.6).
+
+**`jira.check`.** Settings › Jira › Test connection runs `companion-jira --check` under the same profile
+with the credential on fd 3; it calls `/myself` and prints one line (`{ok}` or `{ok:false, kind}`).
+companiond maps the kind to a fixed message ("Connected. GPT can read Jira.", "Jira refused the token…",
+"Jira could not be reached.", …) and never returns Jira's own text.
+
+**Measured with real Codex (2026-11-05, `itest/jira.itest.ts`, no login, synthetic server).** A
+SYNTHETIC FIXTURE `companion-jira` behind the real relay, acceptor and Jira validator, on pinned 0.166.0:
+- (a) a thread with the Jira binding opens on the production `CodexHost`; `mcpServerStatus/list
+  {threadId, serverName: "companion-jira"}` lists exactly the three tools; the fixture saw the fd-3 line.
+- (b) with an extra `createJiraIssue` listed by the server, `enabled_tools` hides it: the status lists only
+  the three and the thread opens. This repeats the M1 `enabled_tools` measurement for the relayed server.
+- (c) with `enabled_tools` removed from `config.toml`, the status lists `createJiraIssue` and the
+  self-check stops the host: "MCP tool companion-jira/createJiraIssue looks like a write tool; … is not
+  allowlisted".
+- (d) with the Jira grant revoked under a loaded thread (what `setJira(null)` does), the binding closed
+  (`revoked`); a later `mcpServerStatus/list` by `serverName` for that thread still answered with the three
+  tools from Codex's cache and did **not** re-exec the relay (no refused connection, so no security stop).
+So the self-check proves no write tool is visible. Not measured here (needs a ChatGPT sign-in): a real
+model turn calling a Jira tool, and a tool call on a thread whose Jira grant was revoked mid-turn; both
+are in the owner checklist (`docs/manual/m6-checklist.md`) or left as recorded gaps.
 
 ## 12. Testing strategy
 
@@ -759,6 +859,16 @@ and offline surface, the profile probe, the sign-in profile, the exec-cell gate)
 tool call, `thread/resume` rebinding after a real turn, relay tokens on disk, the exec-cell gate, server
 requests and item-bearing methods). **The exec-cell gate (§7.1.9) is a required real-Codex test**: it
 must pass on every Codex upgrade before `CODEX_SEATBELT_MEASURED` may stay `"ok"`.
+*M6 suites.* Unit: `test/jira/credentials.test.ts` (site, email, token and fd-3 line checks, redacted
+form), `client.test.ts` (GET only, fixed URLs, cloudId, error mapping, size and time caps, mocked
+`fetch`), `format.test.ts` (ADF, escape, redact, cap, `<untrusted_data source="jira">`),
+`mcpServer.test.ts` and `main.test.ts` (the three tools, refusal without a credential, `--check`),
+`jiraProfile.test.ts`, `jiraService.test.ts` (memory only, fixed check messages); plus the Jira cases in
+`test/codex/{selfCheck,codexHost,config,serverRequests,guard}.test.ts` (write-shaped tools, bound servers,
+`setJira` and the second grant), `test/relay/acceptor.test.ts` (per-grant validator, fd-3 secret) and
+`test/daemon/handlers.test.ts` (`jira.*`); Swift `JiraTests` and `SourceRulesTests`. Real Codex (opt-in,
+no login, synthetic server): `itest/jira.itest.ts` (§11, rows (a)–(d)). Profile:
+`itest/jiraProfile.itest.ts` (HTTPS to `example.com` only; never a Jira site).
 - A fake MCP server exposing an extra `write_file` tool: `enabled_tools` hides it from the model and the
   self-check flags any leak.
 - Self-check passes on the real config; flipping any flag fails it; the `unified_exec` list
@@ -816,7 +926,7 @@ watcher failure.
 | M3 | SessionBridge, tail, parser, WorktreeResolver + terminal/test-failure extraction + §12.2 suite | suite green |
 | M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "ok". M4b (Redactor, Store, privacy, ContextBuilder, chat service, daemon API, bundle skeleton) implemented; live smoke result: findings doc, "M4 live smoke"; M4b bundle ad-hoc signed by default (§9)* |
 | M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release**. *M5: implemented; acceptance test: see docs/manual/m5-checklist.md* |
-| M6 | Jira via Atlassian MCP, read-only allowlist enforced by self-check | self-check proves no write tool is visible |
+| M6 | Jira, read-only, through the companion's own `companion-jira` proxy (owner ruling B, §11); read-only allowlist enforced by self-check | self-check proves no write tool is visible. *M6: implemented; self-check measured with real Codex (itest/jira.itest.ts)* |
 | M7 | Packaging, install guide, signing notes | clean install on this Mac |
 
 A short progress summary is given after each milestone.
@@ -853,7 +963,7 @@ Independent review (all accepted unless noted):
 | Claude record/transcript format changes | tolerant parser, unknown-record counts in sync status, fixtures from shapes never content |
 | Codex app-server is experimental; keys rename | pinned version, self-check refuses to run on mismatch, M1 spike |
 | `sandbox-exec` removed in a future macOS | it's the layer Codex itself depends on; tool-layer checks remain; revisit if Codex moves off it |
-| `enabled_tools` not enforced for a remote MCP | self-check compares the live tool list; proxy fallback |
+| `enabled_tools` not enforced for a remote MCP | *M6:* not applicable: no remote MCP (ruling B); the relayed Jira server is checked like the jail (§7.1.5, measured in §11) |
 | Repos with program-valued local git config are refused | clear reason shown; documented |
 | `apply_patch` cannot be disabled (M1 finding) | three layers (§7.1.8): decline `fileChange` — observed in M1; read-only sandbox — covers command execution, not tested against an approved patch; runtime guard — design layer, tested in M4. Re-check for a removal key on each Codex upgrade |
 | Codex's `functions.exec`, `collaboration.*`, `request_user_input` (at least; list truncated) stay listed despite flags; exec calls don't surface as items (M1 finding) | M4a: code mode is required for MCP tools on a ChatGPT login, so `functions.exec` / `functions.wait` stay; everything else is closed down by config and the generated catalog, verified offline at every start (§7.1.1). Exec cells stay invisible to the guard; the exec-cell gate measures that a cell is a bare isolate (§7.1.9 (vi)) |
