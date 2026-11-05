@@ -9,7 +9,8 @@ official Codex app-server. No API keys.
 - It explains code, Claude's last message, test failures and Jira tickets in plain language.
 - Microphone dictation and Read Aloud use on-device macOS speech.
 
-> Status: **Phase 1 done (proof of concept), design v2 in review.** Not usable yet.
+> Status: **Milestones M1–M7 are implemented.** You can build an installable app from source (see Install).
+> The owner checklists in `docs/manual/` are still pending.
 
 ## Docs
 
@@ -22,7 +23,7 @@ official Codex app-server. No API keys.
 Build the app and install it from a DMG: [install guide](docs/install.md). Signing and notarization notes:
 [docs/signing.md](docs/signing.md).
 
-## Try the proof of concept
+## Try the old Phase 1 proof of concept
 
 Requires macOS, Node 22+, and a ChatGPT plan that includes Codex.
 

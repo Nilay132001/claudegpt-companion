@@ -110,6 +110,8 @@ tccutil reset SpeechRecognition local.claudegptcompanion.app
 tccutil reset Accessibility local.claudegptcompanion.app
 ```
 
+Deleting the App Support folder also deletes the companion's ChatGPT sign-in state and its local database. This cannot be undone.
+
 Then delete the Keychain items in Keychain Access: the ChatGPT sign-in item that Codex made, and `ClaudeGPT Companion
 Jira`. Nothing of Claude Desktop or Claude Code was ever changed, so there is nothing to undo there.
 

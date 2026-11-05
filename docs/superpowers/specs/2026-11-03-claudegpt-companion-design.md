@@ -71,9 +71,9 @@ servers, hooks, subagents or SDLC harness.
 They live in TypeScript with `node --test`. Swift does what must be native: windows, Accessibility,
 mic, speech, with XCTest/Swift Testing once full Xcode is installed (D1).
 
-*M5:* the app runs `companiond` from `Contents/Resources/companiond` inside the bundle, with the user's
-Node 24 or newer (found at `COMPANION_NODE`, the Advanced setting, `/opt/homebrew/bin/node` or
-`/usr/local/bin/node`). Bundling Node is M7.
+*M5 (superseded by the M7 lookup order below):* the app runs `companiond` from `Contents/Resources/companiond`
+inside the bundle, with the user's Node 24 or newer (found at `COMPANION_NODE`, the Advanced setting, `/opt/homebrew/bin/node` or
+`/usr/local/bin/node`). Bundling Node was M7 (done; see the *M7* note below).
 *M7:* the bundle carries the pinned official Node.js 24 (`Contents/Resources/node`, re-signed with only the two
 JIT entitlements) and the relay source. The app runs `companiond` with the bundled Node first (`COMPANION_NODE`,
 then the bundled Node, then the Settings path, then the system paths). The jail's Node prefix is
@@ -746,9 +746,9 @@ app's environment never reach it. The daemon's stderr is discarded; the app logs
 - Mic access needs a bundled, signed `.app` with usage strings — built in M4, not at packaging time (F12).
   *M4b:* M4's bundle is ad-hoc signed by default. macOS ties microphone permission to the signature, so
   each ad-hoc rebuild may ask again; a stable identity (`COMPANION_SIGN_IDENTITY`) avoids it. Developer ID
-  and notarization stay in M7.
+  and notarization were left to M7 (done in M7: owner steps, see the *M7* note below and `docs/signing.md`).
   *M5:* the bundle contains `companiond` (Resources) and runs it with the user's Node 24 or newer (§2);
-  bundling Node is M7.
+  bundling Node was M7 (done in M7: Node is bundled, §2).
   *M7:* Developer ID and notarization are owner steps with `COMPANION_SIGN_IDENTITY` and
   `COMPANION_NOTARY_PROFILE` (`docs/signing.md`); Codex keeps OpenAI's signature.
 
