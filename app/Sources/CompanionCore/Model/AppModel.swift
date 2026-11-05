@@ -36,7 +36,7 @@ public final class AppModel {
     public private(set) var host: HostState = .starting
     public private(set) var auth: AuthState?
     public private(set) var authError: String?
-    public private(set) var threadNotices: [String: String] = [:]
+    public internal(set) var threadNotices: [String: String] = [:]
     /// Set after a revoke whose threads are still finishing (pendingClose > 0).
     public private(set) var revokeNotice: String?
     public private(set) var snapshot: SessionsSnapshot?
@@ -46,14 +46,22 @@ public final class AppModel {
     public private(set) var repoBanners: [String: String] = [:]
     public private(set) var alerts: [SecurityAlert] = []
     public private(set) var syncError: String?
-    public private(set) var conversations: [String: Conversation] = [:]
+    public internal(set) var conversations: [String: Conversation] = [:]
     public private(set) var settings = UISettings()
+    /// Stored turns by turnId: filled from restore and refreshed after each reply; feeds "Context sent".
+    public internal(set) var records: [String: TurnRecord] = [:]
+    public internal(set) var history: HistoryList?
+    public internal(set) var pastChat: PastChat?
     public var draft = ""
     public var preview: PendingPreview?
     public var sentView: SentView?
     public var errorMessage: String?
     public internal(set) var jira: JiraStatus?
     public internal(set) var jiraNote: String?
+    /// Sessions whose stored chat was loaded on this connection.
+    @ObservationIgnored var loadedChats: Set<String> = []
+    @ObservationIgnored public internal(set) var chatLoad: Task<Void, Never>?
+    @ObservationIgnored public internal(set) var recordLoad: Task<Void, Never>?
     @ObservationIgnored let jiraStore: any JiraSecretStore
 
     /// `byUser` is true only for a change made in this run (setSetting), false when settings are loaded from companiond.
@@ -77,7 +85,7 @@ public final class AppModel {
         self.jiraStore = jiraStore
     }
 
-    private var api: (any DaemonAPI)? { current?.api }
+    var api: (any DaemonAPI)? { current?.api }
     var currentAPI: (any DaemonAPI)? { current?.api }
 
     // MARK: Lifecycle
@@ -86,6 +94,7 @@ public final class AppModel {
         connection = .connecting
         generation += 1
         hostKnown = false
+        loadedChats = []
         let gen = generation
         let c: Connection
         do {
@@ -115,6 +124,7 @@ public final class AppModel {
             apply(snapshot: try await c.api.sessionsSnapshot())
             await loadJira(c.api)
             if host.isReady { await loadAuth() }
+            await chatLoad?.value
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -191,7 +201,9 @@ public final class AppModel {
     private func apply(snapshot new: SessionsSnapshot) {
         let old = snapshot?.selection.sessionId
         snapshot = new
-        guard let id = new.selection.sessionId, id != old || worktrees[id] == nil else { return }
+        guard let id = new.selection.sessionId else { return }
+        if id != old || !loadedChats.contains(id) { chatLoad = Task { await self.loadCurrentChat(sessionId: id) } }
+        guard id != old || worktrees[id] == nil else { return }
         detailLoad = Task { await self.loadDetail(id) }
     }
 
@@ -215,6 +227,7 @@ public final class AppModel {
             _ = try await api.sessionsPin(sessionId)
             apply(snapshot: try await api.sessionsSnapshot())
             await detailLoad?.value
+            await chatLoad?.value
         } catch { errorMessage = Self.describe(error) }
     }
 
@@ -243,6 +256,7 @@ public final class AppModel {
     public func ask(_ raw: String) async -> Bool {
         let q = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, let api, let sid = selectedSessionId, gate == .ready else { return false }
+        pastChat = nil // a past chat is only a view: asking always goes to the current chat
         guard q.utf16.count <= DaemonLimits.questionUTF16 else {
             errorMessage = "The question is too long. Keep it under 20,000 characters."
             return false
@@ -456,6 +470,7 @@ public final class AppModel {
         case .turnCompleted(let t):
             if let sid = route(t.sessionId, .completed(turnId: t.turnId, status: t.status, error: t.error)) {
                 maybeAutoPlay(sid, turnId: t.turnId)
+                refreshRecords(sessionId: sid)
             }
             if let id = selectedSessionId { detailLoad = Task { await self.loadDetail(id) } } // live branch after a turn
         case .securityAlert(let a):

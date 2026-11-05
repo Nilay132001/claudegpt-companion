@@ -24,6 +24,13 @@ public protocol DaemonAPI: Sendable {
     func chatSend(prepareId: String, removeItemIds: [String], confirmed: Bool) async throws -> SendResult
     func chatInterrupt(sessionId: String) async throws
     func chatSent(sessionId: String) async throws -> [SentRecord]
+    func historyList() async throws -> HistoryList
+    func historyTurns(sessionId: String) async throws -> HistoryTurns
+    func historyTurns(threadId: String) async throws -> HistoryTurns
+    /// nil threadId clears all history.
+    func historyClear(threadId: String?) async throws
+    func historySetEnabled(_ enabled: Bool) async throws -> Bool
+    func chatNewChat(sessionId: String) async throws
     func settingsGet(_ key: String) async throws -> String?
     func settingsSet(_ key: String, _ value: String) async throws
     func jiraStatus() async throws -> JiraStatus
