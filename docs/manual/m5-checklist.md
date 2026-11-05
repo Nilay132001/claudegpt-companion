@@ -23,8 +23,11 @@ Rows marked **Owner** need the owner at the Mac (speaking, listening, signing in
 | 14b | Security stop: the panel shows the reason and only "acknowledge and restart" clears it; Settings hides the restart buttons meanwhile | Agent | NOT RUN — needs the owner at the Mac (GUI clicks) |
 | 14c | Ask mode refuses to send without the sheet (a send from the sheet carries `confirmed: true`); "Send again" after a busy error reuses the prepare | Agent | NOT RUN — needs the owner at the Mac (GUI clicks) |
 | 14d | Dictation: stop a long dictation (> 20 s of speech); the last words still arrive (stop waits at most 2 s for final text) | Owner | NOT RUN — needs the owner at the Mac |
+| 14e | Dictation stops by itself when the panel shows a security stop, sign-out or a daemon stop, and when the panel is hidden | Owner | |
 | 15 | Quit stops companiond within 5 s (`pgrep -f companiond/src/daemon/main.ts` empty) | Agent | PASS (headless: app quit via osascript, no companiond within 5 s; 2026-11-05) |
 | 16 | **Primary acceptance test** (below) | Owner | NOT RUN — needs the owner at the Mac |
+
+Who: Agent = can be checked without a person once GUI automation exists; in this run every GUI row was left for the owner.
 
 ## Primary acceptance test (spec §1, §12.4)
 
