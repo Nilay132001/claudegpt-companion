@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  BASE_MCP_COMMAND, buildCodexConfigToml, OFF_FEATURES, REQUIRED_OFF_FEATURES, tomlString, tomlValue, writeCodexConfig,
+  BASE_MCP_COMMAND, buildCodexConfigToml, CODEX_PROTECTED_FILES, OFF_FEATURES, REQUIRED_OFF_FEATURES, tomlString, tomlValue, writeCodexConfig,
 } from "../../src/codex/config.ts";
 import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
 
@@ -36,4 +36,17 @@ test("the config file is written 0600", () => {
   const f = path.join(home, "config.toml");
   assert.equal(fs.readFileSync(f, "utf8"), "x = 1\n");
   assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+});
+
+test("code mode: catalog path, code_mode_host on, goals off, namespaces excluded, request_user_input off", () => {
+  const t = buildCodexConfigToml(OFF_FEATURES, { catalogPath: "/s/codex-home/companion-models.json" });
+  assert.match(t, /^model_catalog_json = "\/s\/codex-home\/companion-models\.json"$/m);
+  assert.ok(t.indexOf("model_catalog_json") < t.indexOf("[features]"), "a top-level key before any table");
+  assert.match(t, /^\[features\]\n(?:[a-z_]+ = false\n)+code_mode_host = true\ngoals = false\n/m);
+  assert.match(t, /^\[features\.code_mode\]\nexcluded_tool_namespaces = \["clock", "functions"\]$/m);
+  assert.match(t, /^\[tools\]\nexperimental_request_user_input = \{ enabled = false \}$/m);
+  assert.doesNotMatch(t, /direct_only_tool_namespaces|code_mode_host = false/);
+  assert.equal(OFF_FEATURES.includes("code_mode_host"), false);
+  assert.deepEqual(CODEX_PROTECTED_FILES, ["config.toml", "companion-models.json"]);
+  assert.match(buildCodexConfigToml(OFF_FEATURES, { catalogPath: "/c.json", excluded: ["clock"] }), /^excluded_tool_namespaces = \["clock"\]$/m);
 });

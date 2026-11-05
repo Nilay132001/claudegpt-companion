@@ -37,3 +37,11 @@ test("the installed Codex is the pinned version", { skip: process.platform !== "
   assert.equal(i.version, PINNED_CODEX_VERSION);
   assert.ok(fs.statSync(i.binary).isFile());
 });
+
+test("a symlink inside the vendor folder may not lead out of it (M-7)", () => {
+  const d = vendor({ version: "0.166.0", entrypoint: "bin/codex" }, false);
+  const outside = tempDir("cgc-outside-");
+  fs.writeFileSync(path.join(outside, "codex"), MARK);
+  fs.symlinkSync(path.join(outside, "codex"), path.join(d, "bin", "codex"));
+  assert.throws(() => readVendorDir(d), CodexInstallError);
+});

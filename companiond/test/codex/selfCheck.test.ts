@@ -4,7 +4,7 @@ import path from "node:path";
 import { OFF_FEATURES } from "../../src/codex/config.ts";
 import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
 import {
-  checkCodexHome, checkCompanionCwd, checkConfigRead, checkFeatureList, checkMcpStatus, checkThreadResponse, checkVersion,
+  checkCodeModeConfig, checkCodexHome, checkCompanionCwd, checkConfigLayers, checkConfigRead, checkFeatureList, checkThreadModel, checkMcpStatus, checkThreadResponse, checkVersion,
   mergeChecks, versionFromUserAgent, type FsProbe,
 } from "../../src/codex/selfCheck.ts";
 
@@ -17,12 +17,13 @@ const feature = (name: string, enabled = false, stage = "stable", defaultEnabled
 const goodFeatures = () => OFF_FEATURES.map((n) => (n === "unified_exec" ? feature(n, true, "stable", true) : feature(n)));
 const TOOLS = Object.fromEntries(["list_dir", "read_file", "search", "git_status", "git_diff"].map((t) => [t, { name: t }]));
 
-test("version: pinned package and userAgent must agree", () => {
-  assert.equal(versionFromUserAgent("codex_cli_rs/0.166.0 (Mac OS 27.0.1; arm64) claudegpt_companion"), "0.166.0");
+test("version: pinned package and the running binary's userAgent must agree; a missing version fails (I-11)", () => {
+  assert.equal(versionFromUserAgent("claudegpt_companion/0.166.0 (Mac OS 27.0.1; arm64) unknown (claudegpt_companion; 0.4.0)"), "0.166.0");
+  assert.equal(versionFromUserAgent("codex_cli_rs/0.166.0 (Mac OS 27.0.1; arm64)"), "0.166.0");
   assert.equal(versionFromUserAgent("something else"), null);
-  assert.deepEqual(checkVersion("0.166.0", "0.166.0", "codex_cli_rs/0.166.0").failures, []);
-  assert.equal(checkVersion("0.166.0", "0.166.0", "?").warnings.length, 1);
-  assert.equal(checkVersion("0.167.0", "0.166.0", "codex_cli_rs/0.167.0").failures.length, 2);
+  assert.deepEqual(checkVersion("0.166.0", "0.166.0", "claudegpt_companion/0.166.0 (Mac OS)"), { failures: [], warnings: [] });
+  assert.match(checkVersion("0.166.0", "0.166.0", "?").failures.join(), /did not report its version/);
+  assert.equal(checkVersion("0.167.0", "0.166.0", "claudegpt_companion/0.167.0").failures.length, 2);
 });
 
 test("config/read: all flags off, web search off, no project layer", () => {
@@ -100,4 +101,36 @@ test("thread responses: no instruction files, empty cwd, untrusted, read-only", 
   }
   assert.equal(checkThreadResponse({}, "/e").failures.length, 5);
   assert.equal(mergeChecks(checkThreadResponse({}, "/e"), { failures: [], warnings: ["w"] }).warnings.length, 1);
+});
+
+const CATALOG = "/s/codex-home/companion-models.json";
+const codeModeConfig = (features: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => ({
+  config: { features: { code_mode_host: true, goals: false, code_mode: { excluded_tool_namespaces: ["functions", "clock"] }, ...features }, model_catalog_json: CATALOG, ...extra },
+});
+
+test("code-mode config: host on, both namespaces excluded, no direct-only namespaces, the generated catalog", () => {
+  assert.deepEqual(checkCodeModeConfig(codeModeConfig(), [], CATALOG), { failures: [], warnings: [] });
+  assert.match(checkCodeModeConfig(codeModeConfig({ code_mode_host: false }), [], CATALOG).failures.join(), /code_mode_host/);
+  assert.match(checkCodeModeConfig(codeModeConfig({ code_mode: { excluded_tool_namespaces: ["clock"] } }), [], CATALOG).failures.join(), /excluded_tool_namespaces/);
+  assert.match(checkCodeModeConfig(codeModeConfig({ code_mode: { excluded_tool_namespaces: ["clock", "functions"], direct_only_tool_namespaces: ["functions"] } }), [], CATALOG).failures.join(), /direct_only_tool_namespaces/);
+  assert.match(checkCodeModeConfig(codeModeConfig({}, { model_catalog_json: "/elsewhere.json" }), [], CATALOG).failures.join(), /model_catalog_json/);
+  assert.match(checkCodeModeConfig(codeModeConfig(), [{ name: "goals", enabled: true }], CATALOG).failures.join(), /goals/);
+  assert.equal(checkCodeModeConfig({ config: {} }, [], CATALOG).failures.length, 3);
+});
+
+test("the thread's model must be one whose tool surface was checked", () => {
+  assert.deepEqual(checkThreadModel({ model: "m1" }, ["m1"]), { failures: [], warnings: [] });
+  assert.deepEqual(checkThreadModel({ thread: { model: "m1" } }, ["m1"]), { failures: [], warnings: [] });
+  assert.equal(checkThreadModel({ model: "m2" }, ["m1"]).failures.length, 1);
+  assert.equal(checkThreadModel({}, ["m1"]).failures.length, 1);
+});
+
+test("config layers: only the user layer at CODEX_HOME/config.toml and the system layer at /etc/codex (I-5)", () => {
+  const layer = (type: string, file: string | null) => ({ name: { type, file, profile: null }, version: "1", config: {}, disabledReason: null });
+  const ok = { layers: [layer("user", "/s/codex-home/config.toml"), layer("system", "/etc/codex/config.toml")] };
+  assert.deepEqual(checkConfigLayers(ok, "/s/codex-home"), { failures: [], warnings: [] });
+  assert.match(checkConfigLayers({ layers: [layer("user", "/s/codex-home/other.toml")] }, "/s/codex-home").failures.join(), /user config layer/);
+  assert.match(checkConfigLayers({ layers: [...ok.layers, layer("managed", "/s/codex-home/managed_config.toml")] }, "/s/codex-home").failures.join(), /managed config layer/);
+  assert.match(checkConfigLayers({ layers: [layer("system", "/etc/codex/config.toml")] }, "/s/codex-home").failures.join(), /no user config layer/);
+  assert.equal(checkConfigLayers({}, "/s/codex-home").failures.length, 1);
 });

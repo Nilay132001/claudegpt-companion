@@ -7,11 +7,20 @@ export const REQUIRED_OFF_FEATURES: readonly string[] = [
   "shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
   "image_generation", "multi_agent", "hooks", "memories", "view_image",
 ];
-/** Measured in Task 5 Step 1: keep only keys that `codex features list` shows on 0.166.0. */
-export const CANDIDATE_OFF_FEATURES: readonly string[] = ["code_mode_host", "sleep_tool"];
+/** Measured in Task 5 Step 1. code_mode_host left this list on 2026-11-04: code mode is ON (owner ruling). */
+export const CANDIDATE_OFF_FEATURES: readonly string[] = ["sleep_tool"];
 export const OFF_FEATURES: readonly string[] = [...REQUIRED_OFF_FEATURES, ...CANDIDATE_OFF_FEATURES];
 /** The base companion-readonly server does nothing: only a binding points it at the jail. */
 export const BASE_MCP_COMMAND = "/usr/bin/false";
+/** Code mode, closed down (owner ruling 2026-11-04; codemode-report.md "combinedB"). goals is checked through
+ * config/read only: it is not known to be listed by experimentalFeature/list. */
+export const CODE_MODE_OFF_FEATURES: readonly string[] = ["goals"];
+export const EXCLUDED_TOOL_NAMESPACES: readonly string[] = ["clock", "functions"];
+/** Generated at every start by codeMode.ts. Never a checked-in copy. */
+export const CATALOG_FILE = "companion-models.json";
+/** companiond writes these before spawn; the Codex profile denies Codex writes to them. */
+export const CODEX_PROTECTED_FILES: readonly string[] = ["config.toml", CATALOG_FILE];
+export interface CodeModeConfig { catalogPath: string; excluded?: readonly string[] }
 
 export function tomlString(s: string): string {
   let out = '"';
@@ -40,9 +49,10 @@ export function tomlValue(v: unknown): string {
   throw new TypeError(`cannot write ${typeof v} as TOML`);
 }
 
-export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES): string {
+export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES, codeMode?: CodeModeConfig): string {
   return [
     "# Written by companiond at every start. Edits are overwritten.",
+    ...(codeMode ? [`model_catalog_json = ${tomlString(codeMode.catalogPath)}`] : []),
     'cli_auth_credentials_store = "keyring"',
     'web_search = "disabled"',
     // No approval_policy here: 0.166.0 refuses `approval_policy = "untrusted"` in config.toml
@@ -52,7 +62,18 @@ export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES): str
     "",
     "[features]",
     ...off.map((k) => `${tomlKey(k)} = false`),
+    ...(codeMode ? ["code_mode_host = true", ...CODE_MODE_OFF_FEATURES.map((k) => `${tomlKey(k)} = false`)] : []),
     "",
+    ...(codeMode
+      ? [
+          "[features.code_mode]",
+          `excluded_tool_namespaces = ${tomlValue([...(codeMode.excluded ?? EXCLUDED_TOOL_NAMESPACES)])}`,
+          "",
+          "[tools]",
+          "experimental_request_user_input = { enabled = false }",
+          "",
+        ]
+      : []),
     `[mcp_servers.${tomlKey(SERVER_NAME)}]`,
     `command = ${tomlString(BASE_MCP_COMMAND)}`,
     "args = []",
@@ -61,10 +82,15 @@ export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES): str
   ].join("\n");
 }
 
-export function writeCodexConfig(codexHome: string, toml: string): void {
-  const file = path.join(codexHome, "config.toml");
+/** Atomic, 0600: a temp file in the same folder, then rename. */
+export function writeCodexHomeFile(codexHome: string, name: string, body: string): void {
+  const file = path.join(codexHome, name);
   const tmpFile = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmpFile, toml, { mode: 0o600 });
+  fs.writeFileSync(tmpFile, body, { mode: 0o600 });
   fs.chmodSync(tmpFile, 0o600);
   fs.renameSync(tmpFile, file);
+}
+
+export function writeCodexConfig(codexHome: string, toml: string): void {
+  writeCodexHomeFile(codexHome, "config.toml", toml);
 }

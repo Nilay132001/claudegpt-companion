@@ -2,6 +2,7 @@
 // Failure details never contain local paths: they reach the UI as "Security check failed: <detail>".
 import fs from "node:fs";
 import path from "node:path";
+import { EXCLUDED_TOOL_NAMESPACES } from "./config.ts";
 import type { ToolAllowlist } from "./serverRequests.ts";
 
 export interface CheckResult { failures: string[]; warnings: string[] }
@@ -30,17 +31,69 @@ export function mergeChecks(...rs: CheckResult[]): CheckResult {
   return { failures: rs.flatMap((r) => r.failures), warnings: rs.flatMap((r) => r.warnings) };
 }
 
+/** The first `name/x.y.z` token. Codex puts its own version there, under the client's originator name. */
 export function versionFromUserAgent(ua: unknown): string | null {
   if (typeof ua !== "string") return null;
-  return /\bcodex[\w-]*\/(\d+\.\d+\.\d+)\b/i.exec(ua)?.[1] ?? null;
+  return /^[\w.-]+\/(\d+\.\d+\.\d+)(?=[\s(;]|$)/.exec(ua.trim())?.[1] ?? null;
 }
 
 export function checkVersion(installed: string, pinned: string, userAgent: unknown): CheckResult {
   const r = empty();
   if (installed !== pinned) r.failures.push(`Codex ${installed} is installed; pinned is ${pinned}`);
   const ua = versionFromUserAgent(userAgent);
-  if (ua === null) r.warnings.push("app-server did not report its version; using the installed package version");
+  if (ua === null) r.failures.push("app-server did not report its version");
   else if (ua !== pinned) r.failures.push(`app-server reports Codex ${ua}; pinned is ${pinned}`);
+  return r;
+}
+
+/** Code mode is on and closed down exactly as companiond wrote it (spec §7.1.1, §7.1.5; ruling 2026-11-04). */
+export function checkCodeModeConfig(resp: unknown, featureEntries: readonly unknown[], catalogPath: string): CheckResult {
+  const r = empty();
+  const cfg = obj(obj(resp)?.config) ?? {};
+  const features = obj(cfg.features) ?? {};
+  if (features.code_mode_host !== true) r.failures.push("config/read: features.code_mode_host is not true");
+  const cm = obj(features.code_mode) ?? {};
+  const ex = Array.isArray(cm.excluded_tool_namespaces) ? cm.excluded_tool_namespaces.map(String).sort() : null;
+  if (!ex || ex.join(",") !== [...EXCLUDED_TOOL_NAMESPACES].sort().join(",")) {
+    r.failures.push("config/read: features.code_mode.excluded_tool_namespaces is not exactly the companion's list");
+  }
+  const direct = cm.direct_only_tool_namespaces;
+  if (direct !== undefined && direct !== null && !(Array.isArray(direct) && direct.length === 0)) {
+    r.failures.push("config/read: features.code_mode.direct_only_tool_namespaces is set");
+  }
+  if (cfg.model_catalog_json !== catalogPath) r.failures.push("config/read: model_catalog_json is not the companion's generated catalog");
+  for (const f of featureEntries.map(obj)) if (f?.name === "goals" && f.enabled !== false) r.failures.push("experimentalFeature/list: goals is enabled");
+  return r;
+}
+
+/** The thread runs a model whose tool surface the offline check covered (codeMode.ts). */
+export function checkThreadModel(resp: unknown, models: readonly string[]): CheckResult {
+  const r = empty();
+  const o = obj(resp);
+  const m = typeof o?.model === "string" ? o.model : obj(o?.thread)?.model;
+  if (typeof m !== "string" || !models.includes(m)) r.failures.push("the thread's model is not one whose tool surface was checked");
+  return r;
+}
+
+/** Measured on 0.166.0 (signed out, fresh home): exactly a user layer at CODEX_HOME/config.toml and a system layer at
+ * /etc/codex/config.toml. Any other layer (managed, profile, project, another file) is a failure (plan review I-5). */
+export const SYSTEM_CONFIG_FILE = "/etc/codex/config.toml";
+export function checkConfigLayers(resp: unknown, codexHome: string): CheckResult {
+  const r = empty();
+  const layers = obj(resp)?.layers;
+  if (!Array.isArray(layers)) {
+    r.failures.push("config/read returned no layers");
+    return r;
+  }
+  let user = false;
+  for (const l of layers) {
+    const name = obj(obj(l)?.name);
+    const type = typeof name?.type === "string" ? name.type : "unknown";
+    if (type === "user" && name?.file === path.join(codexHome, "config.toml")) user = true;
+    else if (type === "system" && name?.file === SYSTEM_CONFIG_FILE) continue;
+    else r.failures.push(`config/read: unexpected ${type} config layer`);
+  }
+  if (!user) r.failures.push("config/read: no user config layer for the companion's config.toml");
   return r;
 }
 

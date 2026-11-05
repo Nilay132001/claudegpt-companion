@@ -33,20 +33,24 @@ export function readVendorDir(vendorDir: string): CodexInstall {
   if (typeof meta.version !== "string" || typeof meta.entrypoint !== "string") {
     throw new CodexInstallError("codex-package.json has no version or entrypoint.");
   }
+  const contained = (p: string) => p === real || p.startsWith(real + path.sep);
   const inside = (rel: unknown): string | null => {
     if (typeof rel !== "string") return null;
     const p = path.resolve(real, rel);
-    if (p !== real && !p.startsWith(real + path.sep)) throw new CodexInstallError("codex-package.json points outside its folder.");
-    return fs.existsSync(p) ? fs.realpathSync.native(p) : null;
+    if (!contained(p)) throw new CodexInstallError("codex-package.json points outside its folder.");
+    if (!fs.existsSync(p)) return null;
+    const rp = fs.realpathSync.native(p);
+    if (!contained(rp)) throw new CodexInstallError("codex-package.json points outside its folder.");
+    return rp;
   };
   const binary = inside(meta.entrypoint);
   if (!binary) throw new CodexInstallError("The Codex binary is missing.");
-  const host = path.join(path.dirname(binary), "codex-code-mode-host");
+  const host = inside(path.relative(real, path.join(path.dirname(binary), "codex-code-mode-host")));
   return {
     version: meta.version,
     vendorDir: real,
     binary,
-    codeModeHost: fs.existsSync(host) ? fs.realpathSync.native(host) : null,
+    codeModeHost: host,
     pathDir: inside(meta.pathDir),
     resourcesDir: inside(meta.resourcesDir),
   };
