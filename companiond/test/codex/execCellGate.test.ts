@@ -68,7 +68,12 @@ test("the exec call is the one the gate wrote: one call, the exact source, a cal
   assert.equal(two.execCalls, 2);
   assert.equal(two.cell, null);
   assert.match(two.open.join(), /2 exec calls/);
-  assert.match(judgeAttempt([call("c1", `${SRC}\n`), out], "t1", SRC).open.join(), /input differs from the gate's source/);
+  // Trailing whitespace only is the same cell (measured: the model appends one "\n"); anything else differs.
+  assert.deepEqual(judgeAttempt([call("c1", `${SRC}\n`), out], "t1", SRC).open, []);
+  assert.deepEqual(judgeAttempt([call("c1", `${SRC} \r\n\t`), out], "t1", SRC).open, []);
+  assert.match(judgeAttempt([call("c1", `${SRC}\nfetch("x");`), out], "t1", SRC).open.join(), /input differs from the gate's source/);
+  assert.match(judgeAttempt([call("c1", ` ${SRC}`), out], "t1", SRC).open.join(), /input differs from the gate's source/);
+  assert.match(judgeAttempt([call("c1", SRC.replace("CGC_GATE", "CGC_GATF")), out], "t1", SRC).open.join(), /input differs from the gate's source/);
   assert.match(judgeAttempt([call("c1", { code: SRC }), out], "t1", SRC).open.join(), /unrecognised exec input/);
   assert.match(judgeAttempt([call(""), output("", line(goodCell()))], "t1", SRC).open.join(), /call id/);
   assert.match(judgeAttempt([call(undefined), out], "t1", SRC).open.join(), /call id/);

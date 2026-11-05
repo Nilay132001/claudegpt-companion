@@ -132,7 +132,8 @@ export function execOutputs(notifications: readonly Seen[], threadId: string, sr
   const only = calls.length === 1 ? calls[0] : null;
   if (only) {
     if (typeof only.input !== "string") problems.push(`unrecognised exec input shape ${INCONCLUSIVE}`);
-    else if (only.input !== src) problems.push(`the exec input differs from the gate's source ${INCONCLUSIVE}`);
+    // Trailing whitespace only is the same cell (measured 2026-11-05: the model appends one newline).
+    else if (only.input.trimEnd() !== src.trimEnd()) problems.push(`the exec input differs from the gate's source ${INCONCLUSIVE}`);
   }
   const callId = only ? id(only) : "";
   const outputs = callId === "" ? [] : outs.filter((i) => id(i) === callId).flatMap((i) => strings(i?.output));

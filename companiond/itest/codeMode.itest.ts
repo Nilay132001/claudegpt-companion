@@ -25,7 +25,7 @@ import { MARK, makeRepo, removeTempDirs, tempDir } from "../test/helpers/fixture
 import { controlRowOk } from "../test/helpers/gateEval.ts";
 import { startSession } from "./helpers/codeModeSession.ts";
 import { freshPaths, isSignedIn, ownPaths, skipUnless } from "./helpers/companion.ts";
-import { runExecCellGate } from "./helpers/execCellGate.ts";
+import { GATE_INSTRUCTIONS, runExecCellGate } from "./helpers/execCellGate.ts";
 
 after(removeTempDirs);
 const noLogin = skipUnless({ live: false });
@@ -210,7 +210,9 @@ test("signed in: list_dir through the relay, then the exec-cell gate", { skip: l
   const paths = ownPaths();
   const repo = makeRepo({ "pelican-ledger.txt": "ledger entries\n" });
   // rawEvents: the gate reads the cell's verdict from the exec call's own output (review fix round 1).
-  const s = await startSession({ paths, root: repo, rawEvents: true });
+  // GATE_INSTRUCTIONS: the production ones made the model refuse the gate cell (measured); safety never depends on
+  // them (spec §7.6), and profile, config and tools are unchanged.
+  const s = await startSession({ paths, root: repo, rawEvents: true, developerInstructions: GATE_INSTRUCTIONS });
   try {
     if (!(await isSignedIn(s.a))) return t.skip("the companion's CODEX_HOME is not signed in");
     const baseline = await s.turn("Use functions.exec to call tools.mcp__companion_readonly__list_dir({}) once, then list the file names it returned.");

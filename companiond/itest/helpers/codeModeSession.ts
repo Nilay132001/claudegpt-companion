@@ -39,7 +39,9 @@ export interface Session {
 /** rawEvents (measurement only, the exec-cell gate): thread/start with experimentalRawEvents, so the exec call and its
  * output arrive as rawResponseItem/completed notifications. An exec cell makes no item of its own (codemode-report
  * M5); the raw items are the only harness-side record of what a cell returned. Production never sets it. */
-export async function startSession(o: { paths: AppPaths; root?: string | null; jail?: LaunchSpec; rawEvents?: boolean }): Promise<Session> {
+/** developerInstructions: measurement only (the exec-cell gate). Production always sends DEVELOPER_INSTRUCTIONS, and
+ * safety never depends on them (spec §7.6), so the gate may swap them; profile, config and tools stay identical. */
+export async function startSession(o: { paths: AppPaths; root?: string | null; jail?: LaunchSpec; rawEvents?: boolean; developerInstructions?: string }): Promise<Session> {
   const install = findCodex();
   const tc = discoverToolchain();
   const relay = ensureRelayDirs(relayPaths(o.paths.supportDir));
@@ -70,7 +72,7 @@ export async function startSession(o: { paths: AppPaths; root?: string | null; j
     const launch = o.jail ?? (o.root ? await buildReadonlyLaunch({ root: o.root, toolchain: tc }) : null);
     const grant = launch ? acceptor.grant(launch) : null;
     const ts: any = await a.rpc.request("thread/start", {
-      cwd: o.paths.emptyCwd, sandbox: "read-only", approvalPolicy: "untrusted", developerInstructions: DEVELOPER_INSTRUCTIONS, ephemeral: true,
+      cwd: o.paths.emptyCwd, sandbox: "read-only", approvalPolicy: "untrusted", developerInstructions: o.developerInstructions ?? DEVELOPER_INSTRUCTIONS, ephemeral: true,
       config: grant ? relayOverride(relay.binary, grant.token, o.paths.emptyCwd) : inertOverride(),
       ...(o.rawEvents ? { experimentalRawEvents: true } : {}),
     });
