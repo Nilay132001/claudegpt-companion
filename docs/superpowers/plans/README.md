@@ -12,7 +12,7 @@ Spec: `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` (v3.5). 
 | M4b | [Redactor, store, privacy, context, daemon API, bundle skeleton](2026-11-04-m4b-context-daemon.md) | implemented (Tasks 1–9) |
 | M5 | [SwiftUI app + speech → first usable release](2026-11-05-m5-swiftui-app.md) | implemented; owner checklist pending |
 | M6 | [Jira, read-only (companion-jira proxy, owner ruling B)](2026-11-05-m6-jira.md) | implemented (Tasks 1–10); self-check measured with real Codex; owner checklist pending ([m6-checklist](../../manual/m6-checklist.md)) |
-| M7 | Packaging | written after M6 |
+| M7 | [Packaging: bundled Node, relay source, signing, DMG, install guide](2026-11-05-m7-packaging.md) | written, self-reviewed; in progress |
 
 Why not all at once: M1 decides facts that later code depends on — one app-server or a pool, the exact
 flag keys, the Seatbelt profile, how Claude's CLI session id changes. Writing M2–M4 code before those are
