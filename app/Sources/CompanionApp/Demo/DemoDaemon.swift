@@ -240,8 +240,8 @@ enum DemoFlags {
         ]
         return HistoryList(chats: chats, currentThreads: ["s1": "th1"], enabled: true)
     }
-    func historyTurns(sessionId: String) async throws -> HistoryTurns {
-        HistoryTurns(threadId: "th1", turns: storedTurns.filter { $0.sessionId == sessionId })
+    func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns {
+        HistoryTurns(threadId: "th1", turns: Array(storedTurns.filter { $0.sessionId == sessionId }.suffix(limit ?? 200)))
     }
     func historyTurns(threadId: String) async throws -> HistoryTurns {
         if threadId == "th1" { return HistoryTurns(threadId: "th1", turns: storedTurns) }
@@ -295,14 +295,59 @@ enum DemoFlags {
         NSColor.clear.setFill()
         CGRect(origin: .zero, size: union.size).fill()
         for w in windows {
-            guard let v = w.contentView?.superview ?? w.contentView else { continue }
             let origin = CGPoint(x: w.frame.minX - union.minX, y: w.frame.minY - union.minY)
+            if isPopover(w) {
+                drawPopover(w, at: origin)
+                continue
+            }
+            guard let v = w.contentView?.superview ?? w.contentView else { continue }
             guard let wr = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { continue }
             v.cacheDisplay(in: v.bounds, to: wr)
             wr.draw(in: CGRect(origin: origin, size: w.frame.size), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)
         }
         NSGraphicsContext.restoreGraphicsState()
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
+
+    private static func isPopover(_ w: NSWindow) -> Bool {
+        NSStringFromClass(type(of: w)).contains("Popover")
+    }
+
+    /// The popover's frame is Liquid Glass, rendered out of process: cacheDisplay captures it as black corners and
+    /// a rainbow rim. Draw a material stand-in card (like `panelGlass` does in demo shots), then only the
+    /// SwiftUI content on top of it.
+    private static func drawPopover(_ w: NSWindow, at origin: CGPoint) {
+        guard let root = w.contentView, let content = hostingView(in: root) ?? Optional(root) else { return }
+        let inWindow = content.convert(content.bounds, to: nil)
+        let card = CGRect(x: origin.x + inWindow.minX, y: origin.y + inWindow.minY, width: inWindow.width, height: inWindow.height)
+        let shape = NSBezierPath(roundedRect: card, xRadius: 18, yRadius: 18)
+        w.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.18)
+            shadow.shadowBlurRadius = 14
+            shadow.shadowOffset = NSSize(width: 0, height: -3)
+            shadow.set()
+            NSColor.windowBackgroundColor.setFill()
+            shape.fill()
+            NSGraphicsContext.restoreGraphicsState()
+            NSColor.separatorColor.setStroke()
+            shape.lineWidth = 0.5
+            shape.stroke()
+        }
+        guard let wr = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
+        content.cacheDisplay(in: content.bounds, to: wr)
+        NSGraphicsContext.saveGraphicsState()
+        shape.addClip()
+        wr.draw(in: card, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// The SwiftUI view the popover shows (the first hosting view under the popover's frame).
+    private static func hostingView(in v: NSView) -> NSView? {
+        if NSStringFromClass(type(of: v)).contains("HostingView") { return v }
+        for sub in v.subviews { if let h = hostingView(in: sub) { return h } }
+        return nil
     }
 }
 #endif
