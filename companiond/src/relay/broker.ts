@@ -11,8 +11,11 @@ export type BrokerEvent =
 
 /** A one-time token for one thread's binding. arm() starts the short TTL; revoke() ends it, live or not. */
 export interface RelayGrant { readonly id: string; readonly token: string; arm(ttlMs?: number): void; revoke(): void }
+/** M6: a grant may bring its own validator (its tool allowlist) and a secret that the acceptor writes to the granted
+ * server's fd 3 at spawn (never argv or env). companiond keeps no copy once the grant is gone. */
+export interface GrantOptions { validator?: LaunchSpec; secret?: string }
 export interface RelayBroker {
-  grant(launch: LaunchSpec): RelayGrant;
+  grant(launch: LaunchSpec, o?: GrantOptions): RelayGrant;
   on(l: (e: BrokerEvent) => void): () => void;
   /** false after a replaced socket or a listener error: nothing may be bound until restart() succeeds. */
   healthy(): boolean;

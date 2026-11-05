@@ -1,10 +1,20 @@
 // SYNTHETIC FIXTURE — stands in for the jail in relay unit tests: MCP over stdio, five read-only tool names,
 // reads no files. FAKE_JAIL_MODE: "" normal | "server-request" (sends a request after initialize)
-// | "bad-id" (answers tools/list with an id nobody asked for) | "slow" (tools/call waits 2 s).
+// | "bad-id" (answers tools/list with an id nobody asked for) | "slow" (tools/call waits 2 s)
+// | "echo-fd3" (reads fd 3 to EOF at start; tools/call answers with what it read) | "tools-jira" (the three Jira tool names).
+import fs from "node:fs";
 import { LineBuffer } from "../../src/lineBuffer.ts";
 
 const mode = process.env.FAKE_JAIL_MODE ?? "";
-const TOOLS = ["list_dir", "read_file", "search", "git_status", "git_diff"];
+const TOOLS = mode === "tools-jira" ? ["jira_get_issue", "jira_search", "jira_get_comments"] : ["list_dir", "read_file", "search", "git_status", "git_diff"];
+let fd3 = "";
+if (mode === "echo-fd3") {
+  try {
+    fd3 = fs.readFileSync(3, "utf8");
+  } catch {
+    fd3 = "";
+  }
+}
 const lb = new LineBuffer();
 const send = (o: unknown) => process.stdout.write(`${JSON.stringify(o)}\n`);
 
@@ -18,7 +28,7 @@ process.stdin.on("data", (c: Buffer) => {
     } else if (m.method === "tools/list") {
       send({ jsonrpc: "2.0", id: mode === "bad-id" ? 999 : m.id, result: { tools: TOOLS.map((name) => ({ name, inputSchema: { type: "object" } })) } });
     } else if (m.method === "tools/call") {
-      const reply = () => send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `SYNTHETIC FIXTURE called ${m.params?.name}` }], isError: false } });
+      const reply = () => send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: mode === "echo-fd3" ? `SYNTHETIC FIXTURE fd3=${fd3.trim()}` : `SYNTHETIC FIXTURE called ${m.params?.name}` }], isError: false } });
       if (mode === "slow") setTimeout(reply, 2000);
       else reply();
     } else {

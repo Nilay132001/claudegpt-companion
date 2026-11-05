@@ -8,8 +8,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import type { Writable } from "node:stream";
 import type { LaunchSpec } from "../launch/seatbelt.ts";
-import { DEFAULT_TOKEN_TTL_MS, GRANT_MAX_AGE_MS, type BindingEnd, type BrokerEvent, type RelayBroker, type RelayGrant } from "./broker.ts";
+import { DEFAULT_TOKEN_TTL_MS, GRANT_MAX_AGE_MS, type BindingEnd, type BrokerEvent, type GrantOptions, type RelayBroker, type RelayGrant } from "./broker.ts";
 import { helloLine, newNonce, newToken, proof, PROOF_BYTES } from "./handshake.ts";
 import { EXIT } from "./mcpFilter.ts";
 import { checkPrivateDir, RelaySetupError } from "./relayPaths.ts";
@@ -26,7 +27,7 @@ export interface AcceptorOptions {
   inodeCheckMs?: number;
 }
 
-interface Grant { id: string; token: string; launch: LaunchSpec; expires: number }
+interface Grant { id: string; token: string; launch: LaunchSpec; validator: LaunchSpec | null; secret: string | null; expires: number }
 interface Binding { jail: ChildProcess; validator: ChildProcess; revoked: boolean }
 
 const END_BY_EXIT: ReadonlyMap<number, BindingEnd> = new Map([
@@ -148,8 +149,8 @@ export class RelayAcceptor implements RelayBroker {
     this.#ino = null;
   }
 
-  grant(launch: LaunchSpec): RelayGrant {
-    const g: Grant = { id: `g${++this.#seq}`, token: newToken(), launch, expires: Date.now() + (this.#o.maxAgeMs ?? GRANT_MAX_AGE_MS) };
+  grant(launch: LaunchSpec, o: GrantOptions = {}): RelayGrant {
+    const g: Grant = { id: `g${++this.#seq}`, token: newToken(), launch, validator: o.validator ?? null, secret: o.secret ?? null, expires: Date.now() + (this.#o.maxAgeMs ?? GRANT_MAX_AGE_MS) };
     this.#grants.set(g.id, g);
     return {
       id: g.id,
@@ -265,14 +266,23 @@ export class RelayAcceptor implements RelayBroker {
       this.#emit({ type: "closed", grantId: g.id, end: "error" });
     };
     // spawn() can throw (a bad argument, no fds left): that must end this one binding, not the acceptor.
+    // The secret leaves the grant before the spawn: companiond holds it no longer than this call needs.
+    const secret = g.secret;
+    g.secret = null;
     let jail: ChildProcess;
     try {
-      jail = spawn(l.command, l.args, { env: l.env, cwd: l.cwd, stdio: ["pipe", "pipe", "ignore"] });
+      jail = spawn(l.command, l.args, { env: l.env, cwd: l.cwd, stdio: secret === null ? ["pipe", "pipe", "ignore"] : ["pipe", "pipe", "ignore", "pipe"] });
     } catch {
       return fail();
     }
     if (!jail.stdin || !jail.stdout) return fail(jail);
-    const v = this.#o.validator;
+    if (secret !== null) {
+      const fd3 = jail.stdio[3] as Writable | null;
+      if (!fd3) return fail(jail);
+      fd3.on("error", () => {}); // a server that exits early must not crash companiond
+      fd3.end(secret);
+    }
+    const v = g.validator ?? this.#o.validator;
     let validator: ChildProcess;
     try {
       validator = spawn(v.command, v.args, { env: v.env, cwd: v.cwd, stdio: ["ignore", "ignore", "ignore", s, jail.stdin, jail.stdout] });

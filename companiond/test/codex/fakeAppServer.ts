@@ -7,7 +7,7 @@ import type { CodexLaunch } from "../../src/codex/codexSeatbelt.ts";
 import { BASE_MCP_COMMAND, CATALOG_FILE, CODE_MODE_OFF_FEATURES, EXCLUDED_TOOL_NAMESPACES, OFF_FEATURES } from "../../src/codex/config.ts";
 import type { SpawnedServer, SpawnFn } from "../../src/codex/spawn.ts";
 import type { LaunchSpec } from "../../src/launch/seatbelt.ts";
-import type { BrokerEvent, RelayBroker, RelayGrant } from "../../src/relay/broker.ts";
+import type { BrokerEvent, GrantOptions, RelayBroker, RelayGrant } from "../../src/relay/broker.ts";
 import { newToken } from "../../src/relay/handshake.ts";
 
 export type Handler = (params: any, fake: FakeAppServer) => unknown;
@@ -148,7 +148,7 @@ export function fakeSpawn(handlers: () => Record<string, Handler> = goodHandlers
   };
 }
 
-export interface FakeGrant { id: string; token: string; launch: LaunchSpec; ttl: number | null; revoked: boolean }
+export interface FakeGrant { id: string; token: string; launch: LaunchSpec; validator: LaunchSpec | null; secret: string | null; ttl: number | null; revoked: boolean }
 
 /** Records grants; tests emit broker events by hand. Like the real acceptor, more than `maxLive` live grants is a
  * refused connection, and an unhealthy broker must be restarted. */
@@ -171,8 +171,8 @@ export class FakeBroker implements RelayBroker {
   live(): number {
     return this.grants.filter((g) => !g.revoked).length;
   }
-  grant(launch: LaunchSpec): RelayGrant {
-    const g: FakeGrant = { id: `g${this.grants.length + 1}`, token: newToken(), launch, ttl: null, revoked: false };
+  grant(launch: LaunchSpec, o: GrantOptions = {}): RelayGrant {
+    const g: FakeGrant = { id: `g${this.grants.length + 1}`, token: newToken(), launch, validator: o.validator ?? null, secret: o.secret ?? null, ttl: null, revoked: false };
     this.grants.push(g);
     if (this.live() > this.maxLive) this.emit({ type: "refused", reason: "too many connections" });
     return {
