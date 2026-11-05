@@ -46,11 +46,15 @@ test("listening: socket 0600 in a 0700 folder; a stale socket is replaced; anyth
   // A crashed companiond leaves its socket file behind: a child binds it and is SIGKILLed before any cleanup.
   const stale = ensureRelayDirs(relayPaths(tempDir("cgc-acc-")));
   spawnSync(process.execPath, ["-e", `require("node:net").createServer().listen(${JSON.stringify(stale.socket)}, () => process.kill(process.pid, "SIGKILL"))`]);
-  const staleIno = fs.lstatSync(stale.socket).ino;
+  // Replaced = the stale file refused connections before, and a live 0600 socket accepts them after. (Not an inode
+  // comparison: Linux reuses the freed inode number at once, measured in CI.)
+  assert.equal(fs.lstatSync(stale.socket).isSocket(), true);
+  const before = await new Promise<string>((r) => net.connect(stale.socket).once("connect", () => r("connected")).on("error", (e: NodeJS.ErrnoException) => r(e.code ?? "error")));
+  assert.equal(before, "ECONNREFUSED", "the leftover socket is stale");
   const a2 = new RelayAcceptor({ socketPath: stale.socket, validator: validator() });
   await a2.start();
   started.push(a2);
-  assert.notEqual(fs.lstatSync(stale.socket).ino, staleIno, "the stale socket was replaced");
+  assert.equal(fs.lstatSync(stale.socket).mode & 0o777, 0o600, "the stale socket was replaced by ours");
   const hello = await new Promise<string>((r) => net.connect(stale.socket).once("data", (d) => r(d.toString("latin1"))).on("error", () => r("")));
   assert.match(hello, /^CGC1 [0-9a-f]{64}\n$/);
   // A LIVE socket at the path (another companiond, another itest run) is refused, never unlinked (M-9).

@@ -68,14 +68,26 @@ test("under the profile Node runs; network, exec, outside reads and writes fail 
 
 test("under the profile, execve (replacing the validator's own image) fails with EPERM (review 3)", { skip }, () => {
   const tc = discoverToolchain();
+  // If execve succeeds, the new image prints RAN. A failed execve throws on Node 26 (caught: JSON) but aborts the
+  // process on Node 24, printing "process.execve failed with error code <errno>" (measured on the macOS 26 CI runner).
   const probe = `
     let out;
-    try { process.execve("/bin/sh", ["sh", "-c", "true"], {}); out = "ran"; } catch (x) { out = x.code ?? String(x); }
+    try { process.execve("/bin/sh", ["sh", "-c", "echo CGC_EXECVE_RAN"], {}); out = "ran"; } catch (x) { out = x.code ?? String(x); }
     process.stdout.write(JSON.stringify({ execve: out }));
   `;
-  const r = spawnSync(SANDBOX_EXEC, ["-p", buildValidatorProfile(tc), tc.nodePath, "-e", probe], {
+  const run = (args: string[]) => spawnSync(args[0]!, args.slice(1), {
     env: { PATH: "/usr/bin:/bin", OPENSSL_CONF: "/dev/null" }, cwd: "/", encoding: "utf8", timeout: 30_000,
   });
-  assert.equal(r.status, 0, `Node must start; stderr: ${r.stderr}`);
-  assert.match((JSON.parse(r.stdout) as { execve: string }).execve, DENIED);
+  // Positive control, no profile: the probe really replaces Node, so a refusal below is the profile's doing.
+  const control = run([tc.nodePath, "-e", probe]);
+  assert.match(control.stdout, /CGC_EXECVE_RAN/, `control: execve must run without the profile; stderr: ${control.stderr}`);
+  const r = run([SANDBOX_EXEC, "-p", buildValidatorProfile(tc), tc.nodePath, "-e", probe]);
+  assert.doesNotMatch(r.stdout, /CGC_EXECVE_RAN/, "execve ran under the profile");
+  const aborted = /process\.execve failed with error code (EPERM|EACCES)\b/.exec(r.stderr);
+  if (aborted) {
+    assert.notEqual(r.status, 0, "an aborted execve must not exit 0");
+  } else {
+    assert.equal(r.status, 0, `Node must start; stderr: ${r.stderr}`);
+    assert.match((JSON.parse(r.stdout) as { execve: string }).execve, DENIED);
+  }
 });
