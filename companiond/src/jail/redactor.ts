@@ -17,13 +17,27 @@ const WHOLE_MARK = /^\[REDACTED:[a-z-]+\]$/;
 /** `after` is the character right after the match ("" at the end of the input). */
 interface Rule { kind: string; re: RegExp; replace?: (match: string, groups: Array<string | undefined>, after: string) => string }
 
-const KEY_WORD = /password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth/i;
+/**
+ * Key words match whole key segments, not substrings: the key is split on `_ - .` and camelCase
+ * boundaries, so `author`, `tokenizer`, `maxTokens` and `oauth_callback` are not secret keys. A segment
+ * may carry a glued prefix (`dbpassword`, `accesstoken`) but nothing after the word.
+ */
+const KEY_SEGMENTS =
+  /(?:^|_)(?:[a-z0-9]{0,32}(?:passwords?|passwd|secrets?|token)|pwd|api_?key|access_?key|private_?key|auth|authorization|authkey)(?:_|$)/;
+function isSecretKey(key: string): boolean {
+  const norm = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[.-]/g, "_");
+  return KEY_SEGMENTS.test(norm);
+}
 /** An identifier or member path with no digit (`string`, `process.env.API_KEY`): code, not a literal. */
 const CODE_REF = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
 
 function maskValue(m: string, g: Array<string | undefined>, after: string): string {
   const [key = "", quote = "", sep = "", dq, sq, bare] = g;
-  if (!KEY_WORD.test(key)) return m;
+  if (!isSecretKey(key)) return m;
   if (dq !== undefined || sq !== undefined) {
     const v = dq ?? sq ?? "";
     const q = dq !== undefined ? '"' : "'";
@@ -36,11 +50,30 @@ function maskValue(m: string, g: Array<string | undefined>, after: string): stri
   if (isMarked(v) || after === "(" || (CODE_REF.test(v) && v.includes(".") && !/[0-9]/.test(v))) return m;
   const config = sep === "=" || /^[A-Z][A-Z0-9_]*$/.test(key);
   if (!config && CODE_REF.test(v) && !/[0-9]/.test(v)) return m;
+  // A pure number outside config (`maxTokens: 4096`, `tokenCount = 1234`) is a count, not a secret.
+  if (!config && /^[0-9]+$/.test(v)) return m;
   return `${key}${quote}${sep}${mark("value")}`;
+}
+
+/**
+ * A PEM body line: 40+ chars with upper, lower and a digit and high entropy, or a shorter final line that
+ * ends in `=` padding. Paths and identifiers fail the class or the entropy test.
+ */
+function maskPemLine(m: string, g: Array<string | undefined>): string {
+  const [num = "", indent = "", body = ""] = g;
+  if (!/[A-Z]/.test(body) || !/[a-z]/.test(body) || !/[0-9]/.test(body)) return m;
+  const padded = body.endsWith("=");
+  if (body.length < 40 && !padded) return m;
+  if (entropy(body) < (body.length < 40 ? 3.5 : 4.5)) return m;
+  return `${num}${indent}${mark("private-key")}`;
 }
 
 const RULES: Rule[] = [
   { kind: "private-key", re: /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)/g },
+  // The jail pages files before it redacts, so a range can start inside a key with no header. A whole
+  // line that is only base64 and looks random is a key body line; the jail's `N\t` prefix is kept.
+  { kind: "private-key", re: /^(\d{1,9}\t)?([ \t]{0,64})([A-Za-z0-9+/]{16,76}={0,2})[ \t]{0,64}(?=\r?$)/gm, replace: maskPemLine },
+  { kind: "private-key", re: /-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----/g },
   { kind: "jwt", re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
   { kind: "aws-key-id", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/g },
   { kind: "github-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})/g },
@@ -62,7 +95,17 @@ const RULES: Rule[] = [
     },
   },
   { kind: "bearer", re: /\b(Bearer[ \t]+)[A-Za-z0-9._~+/=-]{16,}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("bearer")}`) },
-  { kind: "basic-auth", re: /\b(Basic[ \t]+)[A-Za-z0-9+/]{16,}={0,2}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("basic-auth")}`) },
+  {
+    // Only after an Authorization key, or when the payload has a base64 sign (digit, +, /, =), so prose
+    // such as "basic internationalization" is left alone.
+    kind: "basic-auth",
+    re: /(\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\b(Basic[ \t]+)([A-Za-z0-9+/]{16,}={0,2})/gi,
+    replace: (m, g) => {
+      const [ctx, basic = "", payload = ""] = g;
+      if (isMarked(m) || (ctx === undefined && !/[0-9+/=]/.test(payload))) return m;
+      return `${ctx ?? ""}${basic}${mark("basic-auth")}`;
+    },
+  },
   {
     // KEY=value, key: value, "key": "value". Only literals: a quoted string, or an unquoted value that is
     // not code (no call, no member access; a bare identifier such as a type name counts as code unless

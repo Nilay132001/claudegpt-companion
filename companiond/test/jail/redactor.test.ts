@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { redact, redactText, REDACTION_NOTICE } from "../../src/jail/redactor.ts";
+import { pemBody } from "../helpers/fixtures.ts";
 
 const j = (...p: string[]) => p.join("");
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -93,6 +94,71 @@ test("adversarial input stays linear (256 KB in well under a second)", () => {
     redact(s);
     const ms = performance.now() - t0;
     assert.ok(ms < 500, `${s.slice(0, 4)}…: ${Math.round(ms)} ms`);
+  }
+});
+
+test("a PEM body with no header (a page that starts mid-key) is masked line by line", () => {
+  const body = pemBody(25, 100);
+  const page = [...body, j("-----END ", "RSA PRIVATE KEY-----"), "next: value-ok"].map((l, i) => `${40 + i}\t${l}`).join("\n");
+  const out = redactText(page).split("\n");
+  for (let i = 0; i < body.length; i++) assert.equal(out[i], `${40 + i}\t[REDACTED:private-key]`, `line ${40 + i}`);
+  assert.equal(out[body.length], `${40 + body.length}\t[REDACTED:private-key]`, "lone END line");
+  assert.equal(out.at(-1), `${41 + body.length}\tnext: value-ok`);
+  assert.doesNotMatch(out.join("\n"), /[A-Za-z0-9+/]{20,}/);
+  // Indented (YAML block) and unnumbered bodies too, with CRLF line ends.
+  assert.equal(redactText(`key: |\r\n    ${body[0]}\r\n    ${body[1]}\r\n`), "key: |\r\n    [REDACTED:private-key]\r\n    [REDACTED:private-key]\r\n");
+});
+
+test("ordinary lines are not taken for a PEM body", () => {
+  const plain = [
+    "12\tsrc/components/forms/inputs/TextInputField.tsx",
+    "src/v2/Components/Forms/Inputs/TextInputField42",
+    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+    "3f1c2a9b8e7d6c5b4a3928170615f4e3d2c1b0a93f1c2a9b8e7d6c5b4a392817",
+    "export const value = 1;",
+    "13\t",
+    "aaaaaaaaaaaaaaaaaaaa==",
+  ];
+  for (const s of plain) assert.equal(redactText(s), s, s);
+});
+
+test("secret key words match whole key segments, and counts are not secrets", () => {
+  const plain = [
+    '"author": "Synthetic Person, synthetic fixture"',
+    "tokenizer: cl100k_base_synthetic",
+    "maxTokens: 4096",
+    "const tokenCount = 1234;",
+    "https://example.com/cb?oauth_callback=https%3A%2F%2Fexample.com%2Fdone",
+  ];
+  for (const s of plain) assert.equal(redactText(s), s, s);
+  // Whole segments, glued prefixes and camelCase still count.
+  assert.equal(redactText(j("accessToken: ", "abc123-synthetic")), "accessToken: [REDACTED:value]");
+  assert.equal(redactText(j("dbpass", "word=", "abc123")), "dbpassword=[REDACTED:value]");
+  assert.equal(redactText(j("AUTH_", "TOKEN=", "12345678")), "AUTH_TOKEN=[REDACTED:value]");
+});
+
+test("the word basic in prose is not basic auth", () => {
+  const s = "This adds basic internationalization support and basic accessibilityfeatures.";
+  assert.equal(redactText(s), s);
+  // A base64 sign in the payload, or an Authorization key, still masks.
+  assert.equal(redactText(j("curl -H 'X: Basic ", "c3ludGhldGljOnN5bnRo", "'")), "curl -H 'X: Basic [REDACTED:basic-auth]'");
+  assert.equal(redactText(j("Authorization: Basic ", "syntheticlettersonly")), "Authorization: Basic [REDACTED:basic-auth]");
+});
+
+test("the PEM-body and basic-auth rules stay linear on 256 KB", () => {
+  const inputs = [
+    `${"A1b2".repeat(19)}\n`.repeat(3449),
+    "1\t".repeat(131072),
+    " ".repeat(262144),
+    "Basic ".repeat(43690),
+    "authorization: ".repeat(17476),
+    `${"a".repeat(80)}\n`.repeat(3236),
+  ];
+  for (const s of inputs) {
+    const t0 = performance.now();
+    redact(s);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 500, `${JSON.stringify(s.slice(0, 8))}…: ${Math.round(ms)} ms`);
   }
 });
 
