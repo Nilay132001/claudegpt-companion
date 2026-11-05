@@ -12,9 +12,15 @@ profile="${COMPANION_NOTARY_PROFILE:-}"
 dmg="${1:-}"
 [ -n "$dmg" ] || { echo "usage: scripts/notarize.sh <dmg>"; exit 2; }
 [ -f "$dmg" ] || { echo "notarize: no such DMG: $dmg"; exit 2; }
+[ "$(uname -m)" = arm64 ] || { echo "notarize: Apple silicon only"; exit 1; }
 app="app/build/ClaudeGPT Companion.app"
+[ -d "$app" ] || { echo "notarize: build the app first (scripts/build-app.sh) with COMPANION_SIGN_IDENTITY"; exit 2; }
 info="$(codesign -d --verbose=2 "$app" 2>&1)"
 grep -q "^Authority=Developer ID Application: " <<<"$info" || { echo "notarize: the built app is not Developer ID signed; rebuild with COMPANION_SIGN_IDENTITY"; exit 2; }
+dmg_info=""
+if codesign --verify "$dmg" 2>/dev/null; then dmg_info="$(codesign -d --verbose=2 "$dmg" 2>&1)"; fi
+grep -q "^Authority=Developer ID Application: " <<<"$dmg_info" || { echo "notarize: the DMG is not Developer ID signed; run scripts/package-app.sh with COMPANION_SIGN_IDENTITY"; exit 2; }
+# The DMG carries the ticket. The app inside it is not stapled; Gatekeeper checks it online on first launch.
 xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait
 xcrun stapler staple "$dmg"
 xcrun stapler staple "$app"

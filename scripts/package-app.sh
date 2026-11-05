@@ -3,6 +3,7 @@
 # COMPANION_APP overrides the app path (tests). Notarization: scripts/notarize.sh (owner only).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+[ "$(uname -m)" = arm64 ] || { echo "package-app: Apple silicon only"; exit 1; }
 identity="${COMPANION_SIGN_IDENTITY:--}"
 app="${COMPANION_APP:-app/build/ClaudeGPT Companion.app}"
 [ -d "$app" ] || { echo "package-app: build the app first (scripts/build-app.sh)"; exit 1; }

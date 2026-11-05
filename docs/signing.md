@@ -11,7 +11,7 @@ it.
 | Part | Signed with | Notes |
 |------|-------------|-------|
 | The app | `COMPANION_SIGN_IDENTITY` (default `-`, ad-hoc), hardened runtime | One entitlement: `com.apple.security.device.audio-input` (dictation). |
-| The bundled Node.js 24.22.2 | The same identity, hardened runtime | Only two entitlements: `allow-jit` and `allow-unsigned-executable-memory`. The official build also has `get-task-allow`, `disable-library-validation`, `allow-dyld-environment-variables` and `disable-executable-page-protection`. We drop them, so the bundled Node cannot load unsigned libraries, be attached to, or be steered by environment variables. |
+| The bundled Node.js 24.22.2 | The same identity, hardened runtime | Only two entitlements: `allow-jit` and `allow-unsigned-executable-memory`. The official build also has `get-task-allow`, `disable-library-validation`, `allow-dyld-environment-variables` and `disable-executable-page-protection`. We drop them, so the bundled Node cannot load unsigned libraries, or be attached to. Dropping `allow-dyld-environment-variables` blocks `DYLD_*` injection. Other variables (for example `NODE_OPTIONS`) never reach companiond, because the app starts it with a minimal environment. |
 | Codex 0.166.0 binaries | OpenAI's Developer ID signature | Never changed. The build checks every Mach-O file in the vendor folder for that signature and the hardened runtime, and fails if one is missing. |
 | The relay | Not shipped. Built per user at each daemon start | Compiled by `clang` into the user's App Support folder, ad-hoc signed by the linker. The bundle carries only its source. |
 | The DMG | A real identity only | Signed when `COMPANION_SIGN_IDENTITY` is a real identity. An ad-hoc build leaves it unsigned. |
@@ -68,7 +68,7 @@ These steps need your own Apple Developer account. They are not run by any agent
    COMPANION_SIGN_IDENTITY="Developer ID Application: <you>" bash scripts/package-app.sh
    ```
 
-6. Notarize and staple the DMG (and the app):
+6. Notarize and staple the DMG (and the build copy of the app):
 
    ```bash
    COMPANION_SIGN_IDENTITY="Developer ID Application: <you>" \
@@ -78,7 +78,9 @@ These steps need your own Apple Developer account. They are not run by any agent
 
    `scripts/notarize.sh` refuses an ad-hoc build. It reads no credential itself: `notarytool` takes them from your
    keychain profile.
-7. Expect `spctl` to say `accepted` and `source=Notarized Developer ID`, for the DMG and for the app.
+7. Expect `spctl` to say `accepted` and `source=Notarized Developer ID`, for the DMG and for the build copy of the app.
+   The DMG carries the ticket. The app inside the DMG (the one that gets installed) has no stapled ticket, so
+   Gatekeeper checks it online on first launch: be online for the first launch.
 
 If notarization fails, fetch the log with the submission id that `notarytool` printed:
 

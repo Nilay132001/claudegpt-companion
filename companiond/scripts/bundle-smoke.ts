@@ -1,7 +1,9 @@
 // Bundle smoke (M7, ruling R7): runs the BUILT app's own Node and companiond, signed out, with a throw-away HOME, and
 // requires the Codex host to reach "ready" — so the pre-start self-check passed from inside the bundle (pinned version,
 // config, layers, code mode, tool surface, Codex under its Seatbelt profile, the relay built from the bundled source).
-// Never touches the owner's App Support, Codex home, Keychain items or Claude data; never signs in; sends nothing.
+// Never touches the owner's App Support, Codex home or Claude data; never signs in; sends nothing. Codex's keyring
+// lookup for the throw-away CODEX_HOME finds nothing (signed_out proves it); the smoke never reads or writes the
+// owner's sign-in item.
 // Status lines only: no paths, no stacks, no detail text beyond the host's own fixed messages. Every failure is one
 // `bundle-smoke: FAIL <short reason>` line and exit 1; the throw-away HOME is always removed.
 // Usage: node companiond/scripts/bundle-smoke.ts "<path to ClaudeGPT Companion.app>"

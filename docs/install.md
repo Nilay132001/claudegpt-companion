@@ -100,7 +100,9 @@ and for Keychain access, because the signature changed. A stable signing identit
 1. Quit the app.
 2. Delete `/Applications/ClaudeGPT Companion.app`.
 
-Optional clean-up of what it left behind:
+Optional clean-up of what it left behind.
+
+Deleting the App Support folder also deletes the companion's ChatGPT sign-in state and its local database. This cannot be undone.
 
 ```bash
 rm -r ~/Library/Application\ Support/ClaudeGPTCompanion
@@ -109,8 +111,6 @@ tccutil reset Microphone local.claudegptcompanion.app
 tccutil reset SpeechRecognition local.claudegptcompanion.app
 tccutil reset Accessibility local.claudegptcompanion.app
 ```
-
-Deleting the App Support folder also deletes the companion's ChatGPT sign-in state and its local database. This cannot be undone.
 
 Then delete the Keychain items in Keychain Access: the ChatGPT sign-in item that Codex made, and `ClaudeGPT Companion
 Jira`. Nothing of Claude Desktop or Claude Code was ever changed, so there is nothing to undo there.

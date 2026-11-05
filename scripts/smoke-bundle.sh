@@ -4,6 +4,7 @@
 # bundled Node, whose prefix the profiles name. Needs companiond's dev dependencies (npm ci in companiond).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+[ "$(uname -m)" = arm64 ] || { echo "smoke-bundle: Apple silicon only"; exit 1; }
 app="${1:-app/build/ClaudeGPT Companion.app}"
 case "$app" in /*) ;; *) app="$PWD/$app" ;; esac
 [ -x "$app/Contents/Resources/node/bin/node" ] || { echo "smoke-bundle: no bundled Node; run scripts/build-app.sh"; exit 1; }

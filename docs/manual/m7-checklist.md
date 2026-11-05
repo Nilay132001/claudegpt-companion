@@ -18,7 +18,7 @@ Write repository paths as `<repo>`.
 | 10 | Dictate once. The microphone prompt names ClaudeGPT Companion (it may appear again after an ad-hoc rebuild) | Owner | Result: |
 | 11 | Only if Jira was set up in M6: it is still configured. One Keychain prompt after the rebuild is expected | Owner | Result: |
 | 12 | Optional: the uninstall steps in `docs/install.md` work | Owner | Result: |
-| 13 | Optional, Developer ID: follow `docs/signing.md`. `spctl` accepts the app and the DMG as Notarized Developer ID | Owner | Result: |
+| 13 | Optional, Developer ID: follow `docs/signing.md`. `spctl` accepts the DMG and the build copy of the app as Notarized Developer ID. The installed app has no stapled ticket, so be online for its first launch | Owner | Result: |
 
 Every row needs the owner at the Mac. What an agent can check without a person is in `scripts/smoke-bundle.sh`
 (signed-out run of the bundle's own Node and companiond, Codex host ready, Seatbelt suites under the bundled Node)

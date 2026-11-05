@@ -20,6 +20,7 @@ sha="$(pin NODE_SHA256_DARWIN_ARM64)"
 name="node-v$version-darwin-arm64"
 if [ -n "$tarball_override" ]; then
   tarball="$tarball_override"; cached=0
+  [ -f "$tarball" ] || { echo "fetch-node: no such tarball: COMPANION_NODE_TARBALL"; exit 1; }
 else
   tarball="app/build/cache/$name.tar.gz"; cached=1
   if [ ! -f "$tarball" ]; then

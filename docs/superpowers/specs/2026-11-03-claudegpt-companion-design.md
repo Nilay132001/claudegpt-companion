@@ -746,7 +746,7 @@ app's environment never reach it. The daemon's stderr is discarded; the app logs
 - Mic access needs a bundled, signed `.app` with usage strings — built in M4, not at packaging time (F12).
   *M4b:* M4's bundle is ad-hoc signed by default. macOS ties microphone permission to the signature, so
   each ad-hoc rebuild may ask again; a stable identity (`COMPANION_SIGN_IDENTITY`) avoids it. Developer ID
-  and notarization were left to M7 (done in M7: owner steps, see the *M7* note below and `docs/signing.md`).
+  and notarization were left to M7 (documented in M7 as owner steps, see the *M7* note below and `docs/signing.md`).
   *M5:* the bundle contains `companiond` (Resources) and runs it with the user's Node 24 or newer (§2);
   bundling Node was M7 (done in M7: Node is bundled, §2).
   *M7:* Developer ID and notarization are owner steps with `COMPANION_SIGN_IDENTITY` and
