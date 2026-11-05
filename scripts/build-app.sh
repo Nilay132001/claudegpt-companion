@@ -27,6 +27,25 @@ cp "$bin_dir/CompanionApp" "$out/Contents/MacOS/CompanionApp"
 cp app/bundle/Info.plist "$out/Contents/Info.plist"
 plutil -lint "$out/Contents/Info.plist"
 
+# App icon: the committed .icns always (CFBundleIconFile). Where actool can compile the Icon Composer document
+# (Xcode 26 or later), also the Liquid Glass icon in Assets.car (CFBundleIconName), which macOS 26 prefers.
+# actool needs an absolute path to the .icon document (a relative one is resolved against the document twice).
+cp app/bundle/icon/AppIcon.icns "$out/Contents/Resources/AppIcon.icns"
+if xcrun --find actool >/dev/null 2>&1; then
+  icon_work="$(mktemp -d)"
+  if xcrun actool --compile "$icon_work" --platform macosx --minimum-deployment-target 26.0 --app-icon AppIcon \
+      --output-partial-info-plist "$icon_work/partial.plist" "$PWD/app/bundle/icon/AppIcon.icon" >/dev/null 2>&1 \
+    && [ -f "$icon_work/Assets.car" ]; then
+    cp "$icon_work/Assets.car" "$out/Contents/Resources/Assets.car"
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$out/Contents/Info.plist"
+  else
+    echo "build-app: actool could not compile AppIcon.icon; using AppIcon.icns only"
+  fi
+  rm -rf "$icon_work"
+else
+  echo "build-app: no actool; using AppIcon.icns only"
+fi
+
 # companiond: sources, the relay source (built at every daemon start, spec §7.1.9) and production dependencies.
 res="$out/Contents/Resources/companiond"
 mkdir -p "$res"
@@ -46,7 +65,8 @@ codesign --force --options runtime "${ts[@]}" \
 # ---- Verification ----
 codesign --verify --deep --strict --verbose=2 "$out"
 for f in src/lineBuffer.ts src/daemon/main.ts src/version.ts relay/relay.c package.json; do test -f "$res/$f"; done
-for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription CFBundleIdentifier LSMinimumSystemVersion; do
+test -s "$out/Contents/Resources/AppIcon.icns" || { echo "build-app: no AppIcon.icns"; exit 1; }
+for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription CFBundleIdentifier LSMinimumSystemVersion CFBundleIconFile; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$out/Contents/Info.plist" >/dev/null
 done
 
