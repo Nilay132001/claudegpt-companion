@@ -49,7 +49,7 @@ Task 10 writes these into the spec so the owner sees them in the PR. Items 1–7
 8. **§7.1.1 code mode (owner ruling 2026-11-04, "Enable code mode").** Measured: in 0.166.0 a ChatGPT-login model reaches MCP tools only through code mode, and no released or alpha Codex from 0.160 to 0.168-alpha.2 offers direct MCP tools. So `features.code_mode_host = true` and the profile allows exec of `codex-code-mode-host`. The surface is then closed down to `functions.exec`, `functions.wait` and, inside exec, the five `mcp__companion_readonly__*` tools: `features.goals = false`; `[features.code_mode] excluded_tool_namespaces = ["clock", "functions"]`; `[tools] experimental_request_user_input = { enabled = false }`; `model_catalog_json` pointing at a catalog **generated at every start** from the pinned binary's own `codex debug models`, keeping only `tool_mode = "code_mode_only"` models, with `multi_agent_version` and `apply_patch_tool_type` cleared (the only measured way to remove `collaboration.*`). `direct_only_tool_namespaces` is never set (it widens the surface). `sleep_tool` stays off. Because the catalog is load-bearing it is verified, not trusted: before the first app-server starts, companiond runs `codex debug prompt-input` offline, per catalog model, under the offline Codex profile in a scratch CODEX_HOME, and fails closed unless the **offline** surface is exactly that allowlist (plus a parser canary that must see nested tools when `functions` is not excluded). The offline check cannot see account- or server-gated tools (the goal tools appear only live); Task 8 measures whether the same check under the production profile with the real CODEX_HOME sees them, and if so it also runs live at every start (`LIVE_SURFACE_CHECK`); otherwise live-only tools are a recorded residual risk (item 11). `config/read` must show `code_mode_host: true`, `goals: false`, the two excluded namespaces, no direct-only namespaces and the generated catalog path. `request_user_input` is not visible in `config/read`; only the surface check covers it.
 9. **§2 topology (owner ruling (b), review I1).** One app-server per approved root (cap 3, idle LRU close) plus a base process for sign-in and threads with no root. A thread moves between processes only after `thread/unsubscribe` in the old one. `companion-readonly` is no longer Codex's child: Codex execs the relay; companiond launches the jail (`buildReadonlyLaunch`, unchanged) per binding, outside Codex's sandbox. The diagram and §3 `CodexHost` row change accordingly.
 10. **§7.1.9 rewritten: measured rules and trust boundaries.** The Codex profile: `(deny default)`, `system.sb`; exec of the Codex binary, `codex-code-mode-host` and the relay only; `file-read*` of the vendor folder, `CODEX_HOME`, the empty folder, the system read paths, the relay binary and `~/Library/Keychains/login.keychain-db`; `file-read-metadata` literals on the ancestors of `CODEX_HOME`, the vendor folder and App Support, and on `~/Library/Keychains`; `file-write*` on `CODEX_HOME` and `/dev/null`, then `(deny file-write*)` on `CODEX_HOME/config.toml` and the generated catalog; `network-outbound` to `tcp *:443`, then a deny of `tcp localhost:*` (measured while planning: 127.0.0.1, ::1, 0.0.0.0 and the Mac's own address on 443 are all EPERM, with a live listener on `0.0.0.0:443`), plus the unix sockets `/private/var/run/mDNSResponder` and the relay socket; no `network-bind`/`network-inbound`; `sysctl-read`; a fixed mach-lookup list. Hard links to the protected files are denied (measured EPERM), and companiond also checks before every spawn and thread that both files have one link and the bytes it wrote. `config/read` may show only the user layer at `CODEX_HOME/config.toml` and the system layer at `/etc/codex/config.toml`. **Sign-in (ruling I-9)** runs in a separate short-lived Codex process under the sign-in profile = the production profile plus `(allow network-bind (local tcp "localhost:1455"))` and `(allow network-inbound (local tcp "localhost:1455"))` (measured: the production profile refuses the callback server; with these two rules sign-in starts and every other port stays closed). The offline profile has no network, keychain file or keychain/trust mach services. Boundaries, outermost first: (a) the Seatbelt literal — Codex can reach exactly one socket (measured: path tricks and symlinks fail); (b) the acceptor in companiond — mutual HMAC-SHA256 over a fresh nonce, the raw token never on the wire, one-time tokens that expire seconds after `thread/start` and are revoked at thread end, a socket dev/ino check, 0700/0600 folders; it parses no JSON; (c) the validator — its own profile (no network, no exec beyond Node, no writes), every line parsed and re-serialised, method and tool allowlists, outstanding-id tracking, in-flight cap 16, backpressure, idle timeout; (d) the jail — M2 profile and tool layer, unchanged. The relay itself is a convenience, not a boundary. Any refused connection, replaced socket or validator violation stops everything with "Security check failed".
-11. **§7.1.9 residual risks (recorded, not fixed).** (i) **KERN_PROCARGS2:** any same-uid process, and code inside Codex's profile — including another root's app-server — can read another process's initial environment; `unsetenv` does not clear it and Seatbelt cannot block it (measured with `sysctl-read` and `process-info*` denied). A relay token can be read before use. One process per root does not prevent that; what limits it is single use, the short window between exec and connect, the TTL, and detection (the real relay is then refused, which stops everything). The same gap means §7.1.9 does **not** stop Codex reading other processes' env (API keys in terminals, IDEs). (ii) TCP 443 to **any non-local** host: SBPL cannot name hosts (local addresses on 443 are denied, measured). (iii) Codex can read the login keychain file (Keychain item ACLs still apply). (iv) `CODEX_HOME` stays writable to Codex apart from the two denied files; other files Codex might read from it are covered only by the config-layer check (an unexpected layer fails) and not by any write deny. (v) `codex-code-mode-host` shares Codex's profile; a V8 escape gets Codex's rights. (vi) Exec cells are invisible to the guard; safety rests on the cell being a bare isolate (measured, and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does produce an item. (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files in App Support (out of scope: same uid). The handshake is not bound to the channel: a same-uid process that swaps the socket and restores it between two dev/ino checks (each accept, before each hand-off, every 2 s) is not detected. (viii) The catalog can drift from server-side model metadata; it is regenerated and checked at every start. Live-only (account- or server-gated) tools are covered only if Task 8 measured `LIVE_SURFACE_CHECK` true. (ix) The sign-in process can bind port 1455 on any local address, not only 127.0.0.1 (SBPL's `localhost:1455` also matches 0.0.0.0; no narrower form held), for the few minutes sign-in runs. (x) Not measured: Codex's unified logging and `RUST_LOG` output for relay tokens (I4 scanned files only); the thread model is re-checked only when a turn reports one. Plus whatever Task 10 measures for tokens on disk (I4).
+11. **§7.1.9 residual risks (recorded, not fixed).** (i) **KERN_PROCARGS2:** any same-uid process, and code inside Codex's profile — including another root's app-server — can read another process's initial environment; `unsetenv` does not clear it and Seatbelt cannot block it (measured with `sysctl-read` and `process-info*` denied). A relay token can be read before use. One process per root does not prevent that; what limits it is single use, the short window between exec and connect, the TTL, and detection (the real relay is then refused, which stops everything). The same gap means §7.1.9 does **not** stop Codex reading other processes' env (API keys in terminals, IDEs). (ii) TCP 443 to **any non-local** host: SBPL cannot name hosts (local addresses on 443 are denied, measured). (iii) Codex can read the login keychain file (Keychain item ACLs still apply). (iv) `CODEX_HOME` stays writable to Codex apart from the two denied files; other files Codex might read from it are covered only by the config-layer check (an unexpected layer fails; run when each process starts and again before every `thread/start`/`thread/resume`) and not by any write deny. (v) `codex-code-mode-host` shares Codex's profile; a V8 escape gets Codex's rights. (vi) Exec cells are invisible to the guard; safety rests on the cell being a bare isolate (measured, and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does produce an item. (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files in App Support (out of scope: same uid). The handshake is not bound to the channel: a same-uid process that swaps the socket and restores it between two dev/ino checks (each accept, before each hand-off, every 2 s) is not detected. (viii) The catalog can drift from server-side model metadata; it is regenerated and checked at every start. Live-only (account- or server-gated) tools are covered only if Task 8 measured `LIVE_SURFACE_CHECK` true. (ix) The sign-in process can bind port 1455 on any local address, not only 127.0.0.1 (SBPL's `localhost:1455` also matches 0.0.0.0; no narrower form held), for the few minutes sign-in runs. (x) Not measured: Codex's unified logging and `RUST_LOG` output for relay tokens (I4 scanned files only); the thread model is re-checked only when a turn reports one. Plus whatever Task 10 measures for tokens on disk (I4).
 12. **Exec-cell gate (orchestrator ruling 2026-11-04).** Because the code-mode host inherits Codex's profile and the guard cannot see cells, a real cell under the production profile and config must show no network (non-OpenAI host on 443, loopback, DNS), no reads beyond its runtime (`login.keychain-db`, other keychain entries, `CODEX_HOME` and `$HOME` canaries), no write/exec/spawn, and no direct access to the relay socket. Measured in Task 8 and again in Task 10; chat stays off until it passes.
 13. **§7.2 and §16:** the jail's launch moves from Codex to companiond (per binding, same profile); §16's "Can `codex app-server` run under Seatbelt?" and "functions.exec … stay listed" rows are replaced by the measured answers above and item 11.
 
@@ -2226,7 +2226,7 @@ Ruling C1, option (a): companiond only accepts and verifies the handshake — fi
 **Interfaces:**
 - Consumes: Task 6 (`relayPaths`, `ensureRelayDirs`, `checkPrivateDir`, `RelaySetupError`, `buildRelay`, `handshake.ts`); M2 `LaunchSpec`, `SANDBOX_EXEC`, `sbString`, `assertReadablePrefix`, `buildReadonlyLaunch`, `discoverToolchain`, `Toolchain`, `TOOL_NAMES`; `LineBuffer`.
 - Produces:
-  - `broker.ts`: `type BindingEnd = "normal" | "idle" | "violation" | "limit" | "jail" | "revoked" | "error"`; `type BrokerEvent = {type:"refused";reason} | {type:"socketReplaced"} | {type:"bound";grantId} | {type:"closed";grantId;end}`; `interface RelayGrant { id; token; arm(ttlMs?); revoke() }`; `interface RelayBroker { grant(launch: LaunchSpec): RelayGrant; on(l): () => void }`; `DEFAULT_TOKEN_TTL_MS = 10_000`, `GRANT_MAX_AGE_MS = 120_000`
+  - `broker.ts`: `type BindingEnd = "normal" | "idle" | "violation" | "limit" | "jail" | "revoked" | "error" | "dropped"`; `type BrokerEvent = {type:"refused";reason} | {type:"socketReplaced"} | {type:"bound";grantId} | {type:"closed";grantId;end}`; `interface RelayGrant { id; token; arm(ttlMs?); revoke() }`; `interface RelayBroker { grant(launch: LaunchSpec): RelayGrant; on(l): () => void }`; `DEFAULT_TOKEN_TTL_MS = 10_000`, `GRANT_MAX_AGE_MS = 120_000`
   - `mcpFilter.ts`: `McpFilter` (`fromClient(line)`, `fromServer(line)`, `inFlight`), `Verdict`, `isValidId`, `sendLine(dst, line, src)`, `EXIT`, `MAX_LINE_BYTES`, `MAX_IN_FLIGHT = 16`, `MAX_ID_BYTES = 256`, `IDLE_MS`
   - `validatorProfile.ts`: `buildValidatorProfile(tc)`, `buildValidatorLaunch(tc, tools): LaunchSpec`
   - `acceptor.ts`: `class RelayAcceptor implements RelayBroker { constructor(o: AcceptorOptions); start(); stop(); grant(); on(); counts }`, `AcceptorOptions { socketPath; validator: LaunchSpec; handshakeMs?; maxPending?; maxBound?; maxAgeMs?; inodeCheckMs? }`
@@ -2847,7 +2847,8 @@ Expected: FAIL — `Cannot find module '../../src/relay/mcpFilter.ts'`.
 // The contract between CodexHost and the relay acceptor (spec §7.1.9). Types and limits only.
 import type { LaunchSpec } from "../launch/seatbelt.ts";
 
-export type BindingEnd = "normal" | "idle" | "violation" | "limit" | "jail" | "revoked" | "error";
+/** "dropped": the relay went away while companiond wrote its proof — nothing was bound, so it is rebound (re-review N-5). */
+export type BindingEnd = "normal" | "idle" | "violation" | "limit" | "jail" | "revoked" | "error" | "dropped";
 export type BrokerEvent =
   | { type: "refused"; reason: string } // a connection failed the handshake: CodexHost stops everything
   | { type: "socketReplaced" } // the socket file is not ours any more: CodexHost stops everything
@@ -3355,7 +3356,7 @@ export class RelayAcceptor implements RelayBroker {
         // in companiond's buffer. The real relay sends nothing before OK: anything here is a violation (M-8).
         if (err || s.readableLength > 0 || !this.#inodeOk()) {
           s.destroy();
-          this.#emit({ type: "closed", grantId: g.id, end: err ? "error" : "violation" });
+          this.#emit({ type: "closed", grantId: g.id, end: err ? "dropped" : "violation" });
           return;
         }
         this.#bind(s, g);
@@ -5029,12 +5030,17 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
   const tcp = net.createServer((c) => { hits++; c.destroy(); });
   await new Promise<void>((r) => tcp.listen(0, "127.0.0.1", r));
   // A service on all interfaces at 443 (Docker, dev proxies: review I5 / plan review I-7). macOS lets a user bind 443.
-  const any443 = net.createServer((c) => { hits++; c.destroy(); });
+  // Reachable from the LAN while the test runs, so only connections from this Mac's own addresses count (re-review N-6).
+  const ownIp = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address ?? null;
+  const localPeers = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", ...(ownIp ? [ownIp, `::ffff:${ownIp}`] : [])]);
+  const any443 = net.createServer((c) => {
+    if (localPeers.has(c.remoteAddress ?? "")) hits++;
+    c.destroy();
+  });
   const listening443 = await new Promise<boolean>((r) => {
     any443.once("error", () => r(false));
     any443.listen(443, "0.0.0.0", () => r(true));
   });
-  const ownIp = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address ?? null;
   const config = "# SYNTHETIC FIXTURE config\n";
   writeCodexConfig(paths.codexHome, config);
   writeCodexHomeFile(paths.codexHome, CATALOG_FILE, "{}");
@@ -5212,7 +5218,7 @@ On a STOP in Step 6 or 7: commit the code and the findings with the measured fai
 
 ### Task 9: `CodexHost` — one app-server per root, the relay binding, token TTL, fail-stop (spec §2, §3, §7.1; ruling I1)
 
-Ruling I1: one app-server per approved root (cap 3, idle LRU close) plus a base process for threads with no root. This does not stop one process reading another relay's env (KERN_PROCARGS2 is readable for any same-uid process, measured); what limits a stolen token is single use, the short window between exec and connect, the TTL, and detection — the real relay is then refused, which stops everything (plan review I-8). Each `thread/start` / `thread/resume` gets a fresh one-time grant, armed right after the response and revoked at thread end (`closeThread`, a move, eviction, a failure). Bindings are made one at a time and kept below the acceptor's cap, so normal load never looks like a squatter (I-3). A refused connection, a replaced socket, or a validator end of `violation`, `limit` or `error` (a crash counts as `violation`, I-2) stops everything with "Security check failed", and the stop is sticky: `start()` refuses until `clearSecurityStop()` (I-1). A binding that simply ended (`normal`, `idle`, `jail`) is rebound before the thread's next turn, at most 3 times in 10 minutes. Sign-in runs in its own short-lived Codex process under the sign-in profile (ruling I-9).
+Ruling I1: one app-server per approved root (cap 3, idle LRU close) plus a base process for threads with no root. This does not stop one process reading another relay's env (KERN_PROCARGS2 is readable for any same-uid process, measured); what limits a stolen token is single use, the short window between exec and connect, the TTL, and detection — the real relay is then refused, which stops everything (plan review I-8). Each `thread/start` / `thread/resume` gets a fresh one-time grant, armed right after the response and revoked at thread end (`closeThread`, a move, eviction, a failure). Bindings are made one at a time and kept below the acceptor's cap, so normal load never looks like a squatter (I-3). A refused connection, a replaced socket, or a validator end of `violation`, `limit` or `error` (a crash counts as `violation`, I-2) stops everything with "Security check failed", and that stop is sticky: `start()` refuses until `clearSecurityStop()` (I-1); so is a turn on an unchecked model. Other failed checks (self-check, thread check, protected files, config layers) fail the host too, but are not latched: a retry re-runs every check (re-review N-3). `error` is also what a validator that could not be spawned produces; it stays a latched stop and needs the owner, a rare case now that bindings are serialized (N-5). A relay that vanished while companiond was writing its proof ends as `dropped` and is rebound like `normal`, `idle` and `jail` — before the thread's next turn, at most 3 times in 10 minutes. Capacity limits ("Too many … busy") are `HostBusyError`: the call is rejected and the host stays ready (N-1). Sign-in runs in its own short-lived Codex process under the sign-in profile (ruling I-9); after it succeeds every running process is replaced so none keeps a signed-out state (N-2).
 
 **Files:**
 - Create: `companiond/src/codex/codexHost.ts`, `companiond/src/codex/companionCodex.ts`, `companiond/test/codex/fakeAppServer.ts`
@@ -5239,6 +5245,7 @@ export type HostEvent =
 export class SecurityCheckError extends Error { readonly detail: string }
 export class HostNotReadyError extends Error {}
 export class TurnBusyError extends Error {}
+export class HostBusyError extends Error {}  // capacity: retry later; never a security stop
 export interface CodexHostOptions {
   paths: AppPaths; codexVersion: string; pinnedVersion: string;
   makeLaunch: () => CodexLaunch;              // one launch shape for every process (per-root binding is per thread)
@@ -5482,7 +5489,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { appPaths, ensureAppDirs, type AppPaths } from "../../src/app/appPaths.ts";
 import { snapshotProtectedFiles, type PreparedCodeMode } from "../../src/codex/codeMode.ts";
-import { CodexHost, SecurityCheckError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
+import { CodexHost, HostBusyError, SecurityCheckError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
 import { CATALOG_FILE, writeCodexHomeFile } from "../../src/codex/config.ts";
 import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../../src/launch/seatbelt.ts";
@@ -5655,7 +5662,7 @@ test("a validator violation stops everything; a binding that ended is rebound be
   broker.emit({ type: "closed", grantId: broker.grants[0]?.id ?? "", end: "jail" });
   assert.equal(h.state().state, "ready");
   await h.startTurn(t, "again");
-  assert.deepEqual(srv(f, 1).methods().slice(-4), ["thread/unsubscribe", "thread/resume", "mcpServerStatus/list", "turn/start"]);
+  assert.deepEqual(srv(f, 1).methods().slice(-5), ["thread/unsubscribe", "config/read", "thread/resume", "mcpServerStatus/list", "turn/start"]);
   assert.equal(broker.grants.length, 2);
   assert.equal(srv(f, 1).last("thread/resume").config[`${SRV}.env`].CGC_RELAY_TOKEN, broker.grants[1]?.token);
 });
@@ -5773,6 +5780,62 @@ test("validator ends: error stops everything; jail ends rebind at most 3 times i
   }
   broker.emit({ type: "closed", grantId: broker.grants.at(-1)?.id ?? "", end: "jail" });
   assert.match(detail(h.state()), /Security check failed/);
+
+  // A relay that vanished mid-handshake ("dropped", N-5) is rebound, not a stop.
+  const d = host();
+  await d.h.start();
+  const td = await d.h.openThread(null, bind("/r1"));
+  d.broker.emit({ type: "closed", grantId: d.broker.grants[0]?.id ?? "", end: "dropped" });
+  assert.equal(d.h.state().state, "ready");
+  await d.h.openThread(td, bind("/r1"));
+  assert.equal(d.broker.grants.length, 2);
+});
+
+test("capacity limits reject the call with HostBusyError and keep the host ready (N-1)", async () => {
+  const { h } = host({ maxProcesses: 1 });
+  await h.start();
+  const t = await h.openThread(null, bind("/r1"));
+  await h.startTurn(t, "busy"); // the only root process now has a running turn
+  await assert.rejects(h.openThread(null, bind("/r2")), HostBusyError);
+  assert.equal(h.state().state, "ready");
+  const b = host({ maxBindings: 1 });
+  await b.h.start();
+  const tb = await b.h.openThread(null, bind("/r1"));
+  await b.h.startTurn(tb, "busy");
+  await assert.rejects(b.h.openThread(null, bind("/r1")), HostBusyError);
+  assert.equal(b.h.state().state, "ready");
+});
+
+test("a config layer that appears after the process started fails the next thread (N-4)", async () => {
+  let calls = 0;
+  const { h, paths } = host({
+    handlers: withHandler("config/read", (p, fake) => {
+      const r = goodHandlers()["config/read"]?.(p, fake) as any;
+      if (++calls > 1) r.layers.push({ name: { type: "user", file: path.join(paths.codexHome, "extra.toml"), profile: null }, version: "1", config: {}, disabledReason: null });
+      return r;
+    }),
+  });
+  assert.equal((await h.start()).state, "ready");
+  await assert.rejects(h.openThread(null, null), /unexpected user config layer/);
+  assert.match(detail(h.state()), /Security check failed/);
+});
+
+test("a successful sign-in replaces every running process before the auth event (N-2)", async () => {
+  const { h, f, events, broker } = host();
+  await h.start();
+  const t = await h.openThread(null, bind("/r1"));
+  await h.login();
+  const login = f.servers.find((s) => s.launch.args[1] === LOGIN_PROFILE) as FakeAppServer;
+  const before = f.servers.filter((s) => s !== login);
+  login.notify("account/login/completed", { loginId: "l1", success: true, error: null });
+  for (let i = 0; i < 50 && !events.some((e) => e.type === "auth"); i++) await tick();
+  assert.ok(before.every((s) => s.killed), "base and root processes were replaced");
+  assert.equal(broker.grants[0]?.revoked, true);
+  const fresh = f.servers.at(-1) as FakeAppServer;
+  assert.ok(!before.includes(fresh) && fresh !== login && fresh.methods().includes("config/read"), "a new, self-checked base process");
+  assert.ok(events.some((e) => e.type === "auth"));
+  assert.equal(h.state().state, "ready");
+  await assert.rejects(h.startTurn(t, "x"), /not open/);
 });
 
 test("17 bound threads in a row never trip the acceptor's cap: the oldest idle binding is closed first (I-3)", async () => {
@@ -5843,7 +5906,9 @@ Expected: FAIL — `Cannot find module '../../src/codex/codexHost.ts'`.
 // detection: the real relay is then refused, which stops everything (plan review I-8). Runs the self-check, binds
 // each thread to its root through the relay with a fresh one-time token, answers server requests per type and guards
 // every turn. A refused relay connection, a replaced socket, a validator violation/limit/error, or any failed or
-// failing check stops everything with "Security check failed", and the stop is latched (plan review I-1).
+// failing check stops everything with "Security check failed". Broker security events and an unchecked model are
+// latched (start() refuses until clearSecurityStop(); plan review I-1); other failed checks fail the host, and a
+// retry re-runs every check (prepare() rewrites the protected files). Capacity limits are HostBusyError, never a stop.
 import path from "node:path";
 import type { AppPaths } from "../app/appPaths.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../launch/seatbelt.ts";
@@ -5895,6 +5960,13 @@ export class TurnBusyError extends Error {
   constructor() {
     super("A reply is still running for this session.");
     this.name = "TurnBusyError";
+  }
+}
+/** Capacity, not security: the caller retries later; the host stays ready (plan re-review N-1). */
+export class HostBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HostBusyError";
   }
 }
 
@@ -6075,10 +6147,10 @@ export class CodexHost {
     this.#login = handle;
     timer = setTimeout(handle.end, this.#o.loginTimeoutMs ?? 10 * 60_000);
     timer.unref();
-    rpc.onNotification((m) => {
+    rpc.onNotification((m, p) => {
       if (m !== "account/login/completed") return;
       handle.end();
-      void this.auth().then((auth) => this.#emit({ type: "auth", auth }), () => undefined);
+      void this.#afterSignIn(obj(p)?.success === true);
     });
     try {
       const init = await rpc.request("initialize", { clientInfo: CLIENT_INFO, capabilities: null });
@@ -6099,6 +6171,26 @@ export class CodexHost {
       handle.end();
       throw e;
     }
+  }
+
+  /** Plan re-review N-2: sign-in completed in ANOTHER process. Whether a running app-server picks up credentials it
+   * did not write is unmeasured (measuring it needs a real sign-in), so every running process is replaced: open
+   * conversations are closed (tokens revoked; M4b reopens them), the base process is re-spawned and re-checked, and
+   * only then is the new auth state emitted. */
+  async #afterSignIn(success: boolean): Promise<void> {
+    if (success && this.#state.state === "ready") {
+      for (const t of [...this.#threads.values()]) await this.#unload(t).catch(() => undefined);
+      for (const p of [...this.#procs.values()]) this.#close(p);
+      this.#procs.clear();
+      try {
+        await this.#proc(BASE);
+      } catch (e) {
+        this.#fail(e);
+        return;
+      }
+    }
+    const auth = await this.auth().catch(() => null);
+    if (auth) this.#emit({ type: "auth", auth });
   }
 
   async openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
@@ -6134,6 +6226,14 @@ export class CodexHost {
       if (binding) await this.#makeRoomForBinding();
       const proc = await this.#proc(rootKey);
       this.#requireProtected();
+      // Codex re-reads config per thread: a layer file added since the process started must fail here (N-4).
+      const cfg = await proc.rpc.request("config/read", { includeLayers: true, cwd: this.#o.paths.emptyCwd });
+      const cfgCheck = mergeChecks(
+        checkConfigRead(cfg, [...this.#off, ...CODE_MODE_OFF_FEATURES]),
+        checkConfigLayers(cfg, this.#o.paths.codexHome),
+        checkCodeModeConfig(cfg, [], path.join(this.#o.paths.codexHome, CATALOG_FILE)),
+      );
+      if (cfgCheck.failures.length > 0) throw new SecurityCheckError(cfgCheck.failures.join("; "));
       grant = binding ? this.#o.broker.grant(binding.launch) : null;
       const cwd = this.#o.paths.emptyCwd;
       const params: Record<string, unknown> = {
@@ -6173,7 +6273,7 @@ export class CodexHost {
         t.proc.threads.delete(t.threadId);
         if (grant) this.#byGrant.delete(grant.id);
       }
-      const plainRefusal = asking && !requested && e instanceof RpcError;
+      const plainRefusal = (asking && !requested && e instanceof RpcError) || e instanceof HostBusyError || e instanceof TurnBusyError;
       if (!plainRefusal && this.#state.state === "ready") {
         this.#fail(e instanceof SecurityCheckError ? e : new SecurityCheckError(`a conversation could not be checked (${e instanceof Error ? e.name : "error"})`));
       }
@@ -6253,8 +6353,12 @@ export class CodexHost {
     const bound = [...this.#threads.values()].filter((t) => t.grant !== null);
     if (bound.length < max) return;
     const idle = bound.filter((t) => !t.activeTurn).sort((a, b) => a.lastUsed - b.lastUsed)[0];
-    if (!idle) throw new Error("Too many conversations are busy. Wait for a reply to finish.");
-    await this.#unload(idle);
+    if (!idle) throw new HostBusyError("Too many conversations are busy. Wait for a reply to finish.");
+    try {
+      await this.#unload(idle); // its token is revoked before the unsubscribe is sent
+    } catch {
+      throw new HostBusyError("An older conversation could not be closed. Try again.");
+    }
   }
 
   async #proc(key: string): Promise<Proc> {
@@ -6332,10 +6436,11 @@ export class CodexHost {
     const idle = roots
       .filter((p) => [...p.threads].every((t) => !this.#threads.get(t)?.activeTurn))
       .sort((a, b) => a.lastUsed - b.lastUsed)[0];
-    if (!idle) throw new Error("Too many repositories are busy. Wait for a reply to finish.");
+    if (!idle) throw new HostBusyError("Too many repositories are busy. Wait for a reply to finish.");
     for (const id of [...idle.threads]) {
       const st = this.#threads.get(id);
-      if (st) await this.#unload(st);
+      // Tokens are revoked before each unsubscribe; a failed unsubscribe is capacity trouble, not a security event.
+      if (st) await this.#unload(st).catch(() => undefined);
     }
     this.#close(idle);
     this.#procs.delete(idle.key);
@@ -6382,6 +6487,7 @@ export class CodexHost {
     this.#byGrant.delete(e.grantId);
     if (e.end === "revoked") return;
     // A crash of the validator arrives as "violation" (I-2); "error" (a spawn or socket failure) also stops.
+    // "dropped" (the relay vanished mid-handshake, nothing bound) is rebound like normal/idle/jail (N-5).
     if (e.end === "violation" || e.end === "limit" || e.end === "error") {
       return this.#securityStop("the repository tools stopped in a way that is not allowed");
     }
@@ -6994,6 +7100,11 @@ test("sign-in through CodexHost's sign-in process (owner only)", { skip: skip ||
     const auth = events.find((e) => e.type === "auth");
     console.log(JSON.stringify({ auth: auth?.type === "auth" ? auth.auth.state : "no auth event" }));
     assert.equal(auth?.type === "auth" && auth.auth.state, "signed_in");
+    // N-2: a turn right after sign-in, with no manual restart, must work in the (replaced) processes.
+    const root = makeRepo({ "pelican-ledger.txt": "ledger\n" });
+    const id = await c.host.openThread(null, { root, launch: await buildReadonlyLaunch({ root }) });
+    const r = await ask(c.host, events, id, LIST);
+    assert.ok(r.toolCalls.includes("list_dir:completed"));
   } finally {
     await c.close();
   }
@@ -7135,7 +7246,9 @@ interface CompanionCodex { host: CodexHost; acceptor: RelayAcceptor; close(): Pr
 // CodexHostOptions, class CodexHost { on, state, start, clearSecurityStop, stop, auth, login, openThread, closeThread,
 //   startTurn, interrupt, activeTurn }
 // M4b must: call closeThread at thread end; show "Security check failed" and call clearSecurityStop only after the owner
-// acknowledges it; never call mcpServerStatus/list for a thread without serverName (it spends the relay token).
+// acknowledges it; never call mcpServerStatus/list for a thread without serverName (it spends the relay token);
+// treat HostBusyError as "try again later"; reopen conversations after an auth event that follows a sign-in (every
+// process is replaced then, so open threads are closed).
 // Changed from the first M4a plan: makeLaunch takes no arguments; makeLoginLaunch, prepare, broker and relayBinary are required;
 // BindingMode / BINDING_MODE / threadConfigOverride / processConfigArgs no longer exist (one process per root, the
 // binding is the per-thread relay override). M4b passes RootBinding { root, launch: buildReadonlyLaunch(...) } as before.
