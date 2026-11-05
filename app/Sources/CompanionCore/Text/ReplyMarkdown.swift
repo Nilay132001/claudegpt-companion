@@ -82,4 +82,18 @@ public enum ReplyMarkdown {
         }
         return out
     }
+
+    /// The reply as plain text: headings, bullets and quotes flattened, inline marks removed, code verbatim.
+    public static func plainText(_ markdown: String) -> String {
+        func flat(_ s: String) -> String { String(inline(s, root: nil).characters) }
+        return blocks(markdown).map { block -> String in
+            switch block {
+            case .paragraph(let t), .quote(let t): flat(t)
+            case .heading(_, let t): flat(t)
+            case .bullet(let t): "• " + flat(t)
+            case .numbered(let marker, let t): marker + " " + flat(t)
+            case .code(_, let t): t
+            }
+        }.joined(separator: "\n\n")
+    }
 }
