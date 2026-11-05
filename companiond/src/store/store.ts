@@ -21,14 +21,14 @@ export interface TurnRow {
 }
 export interface ChatSummary { sessionId: string; threadId: string; sessionTitle: string | null; firstQuestion: string; turns: number; startedAt: number; lastAt: number }
 
-const MAX_ANSWER = 64 * 1024;
-const MAX_CONTEXT_BLOCK = 16 * 1024;
+export const MAX_ANSWER = 64 * 1024;
+export const MAX_CONTEXT_BLOCK = 16 * 1024;
 const MAX_ITEMS_JSON = 32 * 1024;
 const PER_THREAD_KEEP = 200;
 const OVERALL_KEEP = 2000;
 
 /** Cut at a character (code point) boundary; mark the cut with an ellipsis. */
-function capText(s: string, max: number): string {
+export function capText(s: string, max: number): string {
   if (s.length <= max) return s;
   let end = max;
   const c = s.charCodeAt(end - 1);

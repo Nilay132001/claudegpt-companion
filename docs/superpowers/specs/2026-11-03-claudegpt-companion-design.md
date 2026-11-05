@@ -25,7 +25,8 @@ Status: **v3.7 — M8: UI redesign, kept history, context ranking** · Date: 202
     Output keeps transcript order.
   - History redaction: question and answer go through `redact()` before storage. The context block is stored
     as sent (already redacted). Limits: 200 turns per chat, 2,000 overall, 64 KB per answer.
-  - Settings › Privacy: "Keep chat history" (default on) and "Clear history…".
+  - Settings › Privacy: "Keep chat history" (default on) and "Clear history…". With history off, "View
+    what was sent" still works for this run from memory (§7.5).
   - Original app icon (no OpenAI or Anthropic marks).
   - Read Aloud picks the best installed voice (Premium, then Enhanced, then default; no novelty or Personal
     Voice), with a voice picker, Preview and sentence pacing.
@@ -682,9 +683,17 @@ output before it reaches Codex.
   items the user removed: removed transcript items are not offered again (the user saw and declined them).
   Exception: subagent progress the user removed from the preview is offered again next time; only what was
   sent is marked sent. The cursor moves only when the turn completes and never moves backwards (§4).
-- Every sent message has "View what was sent" showing the exact context block. *M4b:* the daemon keeps the
-  exact context block of each sent turn in memory for the run (`chat.sent`); after a restart the same text
-  is in the Codex thread history. It is not written to `companion.db`.
+- Every sent message has "View what was sent" showing the exact context block. *M8 (v3.7):* with history on,
+  each sent turn (question, context block, sent items, answer) is stored redacted in `companion.db` and
+  `history.turns` reads it from there. With history off, nothing about the turn is written to
+  `companion.db`: the daemon keeps this run's turns in memory only (newest 50 per session) and
+  `history.turns {sessionId}` and `chat.sent` answer from that; after a restart they are gone (the same text
+  is still in the Codex thread history). A turn whose store write failed is shown from memory the same way.
+  `history.turns` takes an optional `limit` (1–200) and answers at most 4 MB of JSON, leaving out the oldest
+  turns first. Context ranking (v3.7) may leave newer tool and subagent items out of a turn's context under the cap;
+  those items are not resent with later turns.
+- "Clear history" removes the companion's saved history (and this run's in-memory turns). Codex keeps its
+  own thread records.
 - Raw full transcripts are never sent; the delta is capped (default 12 KB).
 
 ### 7.6 Prompt injection

@@ -41,6 +41,25 @@ const DEFAULT_REVOKE_DEADLINE_MS = 30_000;
 export const ABANDONED_STATUS = "abandoned";
 const ABANDONED_TEXT = "Codex restarted before this reply finished. Ask again.";
 
+/** history.turns answers at most this much JSON; the oldest turns are left out until it fits. */
+export const MAX_HISTORY_TURNS_BYTES = 4 * 1024 * 1024;
+const MAX_HISTORY_LIMIT = 200;
+
+/** Drops the oldest turns until the serialized response fits; one turn always fits under the store's field caps. */
+export function capTurnsResponse<T extends { turns: unknown[] }>(r: T, maxBytes = MAX_HISTORY_TURNS_BYTES): T {
+  let turns = r.turns;
+  const size = (t: unknown[]) => Buffer.byteLength(JSON.stringify({ ...r, turns: t }), "utf8");
+  if (size(turns) <= maxBytes) return r;
+  // Per-turn sizes, then drop from the oldest end: one pass, no repeated serialization of the whole list.
+  const base = size([]);
+  const each = turns.map((t) => Buffer.byteLength(JSON.stringify(t), "utf8") + 1);
+  let total = base + each.reduce((a, b) => a + b, 0);
+  let start = 0;
+  while (start < turns.length - 1 && total > maxBytes) total -= each[start++]!;
+  turns = turns.slice(start);
+  return { ...r, turns };
+}
+
 const invalid = (message: string) => new DaemonError(ErrorCodes.invalidParams, message);
 function str(p: Record<string, unknown>, k: string, max = 4096): string {
   const v = p[k];
@@ -217,11 +236,20 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       const hasThread = p.threadId !== undefined;
       const hasSession = p.sessionId !== undefined;
       if (hasThread === hasSession) throw invalid("give exactly one of threadId or sessionId");
-      const threadId = hasThread ? str(p, "threadId") : d.store.getThread(str(p, "sessionId"));
-      return { threadId, turns: threadId ? d.store.turnsForThread(threadId) : [] };
+      const limit = p.limit === undefined ? MAX_HISTORY_LIMIT : p.limit;
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_HISTORY_LIMIT) {
+        throw invalid(`limit must be a whole number from 1 to ${MAX_HISTORY_LIMIT}`);
+      }
+      if (hasThread) {
+        const threadId = str(p, "threadId");
+        return capTurnsResponse({ threadId, turns: d.store.turnsForThread(threadId, limit) });
+      }
+      // The session's current chat: from memory when history is off, so "View what was sent" still works.
+      return capTurnsResponse(d.chat.turns(str(p, "sessionId"), limit));
     },
     "history.clear": async (p) => {
       const threadId = strOrNull(p, "threadId");
+      d.chat.forgetTurns(threadId);
       return { deleted: threadId === null ? d.store.deleteAllHistory() : d.store.deleteChat(threadId) };
     },
     "history.setEnabled": async (p) => {

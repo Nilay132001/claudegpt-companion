@@ -71,3 +71,30 @@ test("when everything fits nothing is reordered or dropped", () => {
   assert.deepEqual(p.items.map((i) => i.kind), ["user", "subagent", "assistant"]);
   assert.equal(p.omitted, 0);
 });
+
+test("R5 tiers: failures rank with replies (tier 2), folder changes with commands (tier 3)", async () => {
+  const { TIER } = await import("../../src/context/contextBuilder.ts");
+  assert.deepEqual(TIER, { user: 1, assistant: 2, failure: 2, command: 3, file_edit: 3, folder: 3, subagent: 4 });
+});
+
+test("a recent failure is kept ahead of newer commands when bytes are tight", () => {
+  const base = { isSidechain: false, timestamp: null } as const;
+  const events: TranscriptEvent[] = [
+    { ...base, kind: "user_text", uuid: "u0", text: "Synthetic question: why does the build fail?" },
+    {
+      ...base, kind: "tool_result", uuid: "f0", toolUseId: "tf", toolName: "Bash", command: "npm run build", isError: true, stdout: "",
+      stderr: "error TS2322 ".repeat(100), exitCode: 2, interrupted: false, text: "", failure: { kind: "build_failure", summary: "TS2322 in src/a.ts:3" },
+    },
+  ];
+  for (let k = 0; k < 20; k++) {
+    events.push({
+      ...base, kind: "tool_result", uuid: `c${k}`, toolUseId: `tc${k}`, toolName: "Bash", command: `npm test -- widget${k}`,
+      isError: false, stdout: "ok ".repeat(500), stderr: "", exitCode: 0, interrupted: false, text: "", failure: null,
+    });
+  }
+  const p = buildPreview({ events, hadCursor: false, cursorFound: false, subagents: [] });
+  assert.ok(p.omitted > 0, "bytes are tight: some commands are left out");
+  assert.ok(p.items.some((i) => i.kind === "failure"), "the failure is kept");
+  assert.ok(p.items.some((i) => i.kind === "command"));
+  assert.ok(p.bytes <= DEFAULT_CAPS.totalBytes);
+});

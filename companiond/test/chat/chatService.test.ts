@@ -457,7 +457,76 @@ test("history: Off stores the repository-only block and no title; disabled histo
   const s = await x.chat.send((await x.chat.prepare("s1", "q")).prepareId, []);
   x.h.complete(s.threadId, s.turnId);
   assert.equal(x.store.listChats().length, 0);
-  assert.deepEqual(x.chat.sent("s1"), []);
+  // Nothing written, but this run's turn is still there to view (from memory).
+  assert.deepEqual(x.chat.sent("s1").map((r) => r.turnId), [s.turnId]);
+});
+
+test("history off: this run's turns are kept in memory, answers accumulate, nothing reaches companion.db", async () => {
+  const { chat, store, h } = setup();
+  store.setHistoryEnabled(false);
+  let writes = 0;
+  const insert = store.insertTurn.bind(store);
+  store.insertTurn = (t) => { writes++; insert(t); };
+  const a = await chat.send((await chat.prepare("s1", "first question")).prepareId, []);
+  assert.equal(chat.turns("s1").turns[0]?.status, "running");
+  h.emit(delta(a.threadId, a.turnId, "x", "Hello "));
+  h.emit(delta(a.threadId, a.turnId, "y", "second"));
+  h.emit(delta(a.threadId, a.turnId, "x", "world"));
+  h.complete(a.threadId, a.turnId);
+  const fakeKey = ["sk", "ant", "api03", "A".repeat(40)].join("-"); // built at runtime: no key-shaped literal in the repo
+  const b = await chat.send((await chat.prepare("s1", `token ${fakeKey}`)).prepareId, []);
+  h.dropAll();
+  chat.reconcile();
+  const r = chat.turns("s1");
+  assert.equal(r.threadId, a.threadId);
+  assert.deepEqual(r.turns.map((t) => [t.turnId, t.status]), [[a.turnId, "completed"], [b.turnId, "abandoned"]]);
+  assert.equal(r.turns[0]?.answer, "Hello world\n\nsecond");
+  assert.equal(r.turns[0]?.sessionTitle, "Login bug");
+  assert.match(r.turns[0]?.contextBlock ?? "", /<untrusted_data/);
+  assert.doesNotMatch(r.turns[1]?.question ?? "", /sk-ant-api03/); // redacted like a stored row
+  assert.equal(chat.turns("s1", 1).turns.length, 1);
+  assert.equal(chat.turns("s1", 1).turns[0]?.turnId, b.turnId);
+  assert.equal(writes, 0);
+  assert.equal(store.turnsForThread(a.threadId).length, 0);
+  assert.deepEqual(chat.turns("s2"), { threadId: null, turns: [] });
+  // A new chat shows only its own turns; forgetTurns (history.clear) drops the memory.
+  await chat.newChat("s1");
+  const c = await chat.send((await chat.prepare("s1", "new chat")).prepareId, []);
+  assert.deepEqual(chat.turns("s1").turns.map((t) => t.turnId), [c.turnId]);
+  chat.forgetTurns(null);
+  assert.deepEqual(chat.turns("s1").turns, []);
+});
+
+test("history off: memory keeps the newest 50 turns per session", async () => {
+  const { chat, store, h } = setup();
+  store.setHistoryEnabled(false);
+  let last = "";
+  for (let i = 0; i < 55; i++) {
+    const s = await chat.send((await chat.prepare("s1", `q${i}`)).prepareId, []);
+    h.complete(s.threadId, s.turnId);
+    last = s.turnId;
+  }
+  const t = chat.turns("s1").turns;
+  assert.equal(t.length, 50);
+  assert.equal(t[0]?.question, "q5");
+  assert.equal(t.at(-1)?.turnId, last);
+});
+
+test("history on but the store write failed: the turn is shown from memory next to stored ones", async () => {
+  const { chat, store, h } = setup();
+  const a = await chat.send((await chat.prepare("s1", "stored")).prepareId, []);
+  h.complete(a.threadId, a.turnId);
+  const insert = store.insertTurn.bind(store);
+  store.insertTurn = () => { throw new Error("disk"); };
+  const b = await chat.send((await chat.prepare("s1", "not stored")).prepareId, []);
+  h.emit(delta(b.threadId, b.turnId, "x", "answer"));
+  h.complete(b.threadId, b.turnId);
+  store.insertTurn = insert;
+  assert.deepEqual(store.turnsForThread(a.threadId).map((t) => t.turnId), [a.turnId]);
+  const r = chat.turns("s1").turns;
+  assert.deepEqual(r.map((t) => t.turnId), [a.turnId, b.turnId]);
+  assert.equal(r[1]?.answer, "answer");
+  assert.deepEqual(chat.sent("s1").map((x) => x.question), ["stored", "not stored"]);
 });
 
 test("history: reconcile marks the running turn abandoned; a new service abandons leftovers", async () => {

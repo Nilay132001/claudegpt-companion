@@ -40,9 +40,9 @@ type Cut = "head" | "tail";
 interface Part { s: string; max: number; cut: Cut }
 interface Draft { kind: PreviewItemKind; label: Part; text: Part[]; redacted: number }
 
-/** Keep priority under the byte cap: 1 is kept first. Items are still emitted in transcript order. */
+/** Keep priority under the byte cap (plan R5): 1 is kept first. Items are still emitted in transcript order. */
 export const TIER: Record<PreviewItemKind, 1 | 2 | 3 | 4> = {
-  user: 1, assistant: 2, failure: 3, file_edit: 3, command: 3, folder: 4, subagent: 4,
+  user: 1, assistant: 2, failure: 2, command: 3, file_edit: 3, folder: 3, subagent: 4,
 };
 
 const part = (s: string, max = Number.POSITIVE_INFINITY, cut: Cut = "head"): Part => ({ s, max, cut });
@@ -180,9 +180,9 @@ export function buildPreview(input: {
   if (input.hadCursor && !input.cursorFound) notes.push(CURSOR_RESET_NOTE);
   // The cap covers the whole block as sent (after escaping), so the header's share is reserved first.
   const budget = caps.totalBytes - RESERVED_BYTES - notes.reduce((n, s) => n + noteBytes(s), 0);
-  // Rank by kind, not recency alone: the user's messages and Claude's replies come first (pass A, up to
-  // 75% of the budget bytes and of the item slots), then failures/edits/commands, then subagent/folder items, then any remaining
-  // user/reply items. Within a tier the newest item wins. A miss skips that item rather than stopping.
+  // Rank by kind, not recency alone: the user's messages, Claude's replies and failures come first (pass A, up
+  // to 75% of the budget bytes and of the item slots), then commands/edits/folder changes, then subagent items, then
+  // any remaining tier 1-2 items. Within a tier the newest item wins. A miss skips that item rather than stopping.
   const sized = drafts.map((d, index) => ({ d, index, size: itemBytes(d.label, d.text) }));
   const fits = sized.filter((x) => x.size <= budget); // too big on its own: never picked, cannot hide the rest
   const chosen = new Set<number>();
