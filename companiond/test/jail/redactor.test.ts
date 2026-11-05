@@ -49,6 +49,12 @@ test("key = value pairs, JSON fields, bearer/basic auth and URL credentials", ()
   assert.equal(redactText(j("https://", "sk", "-proj-", random(30, 13), ":", "pw-synthetic", "@host/x")), "https://[REDACTED:credentials]@host/x");
 });
 
+test("an empty value does not take the next line's key as its value", () => {
+  assert.equal(redactText(j("database:\n  pass", "word: ", "s3cr3t-synthetic")), "database:\n  password: [REDACTED:value]");
+  assert.equal(redactText(j("EMPTY=\nDB_PASS", "WORD=", "s3cr3t-synthetic")), "EMPTY=\nDB_PASSWORD=[REDACTED:value]");
+  assert.equal(redactText("TOKEN=\nNEXT_VAR=foo"), "TOKEN=\nNEXT_VAR=foo");
+});
+
 test("code that names a secret is not a secret", () => {
   const code = [
     "password: string;",

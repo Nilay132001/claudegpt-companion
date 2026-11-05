@@ -61,15 +61,15 @@ const RULES: Rule[] = [
       return `${scheme}${mark("credentials")}@`;
     },
   },
-  { kind: "bearer", re: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("bearer")}`) },
-  { kind: "basic-auth", re: /\b(Basic\s+)[A-Za-z0-9+/]{16,}={0,2}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("basic-auth")}`) },
+  { kind: "bearer", re: /\b(Bearer[ \t]+)[A-Za-z0-9._~+/=-]{16,}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("bearer")}`) },
+  { kind: "basic-auth", re: /\b(Basic[ \t]+)[A-Za-z0-9+/]{16,}={0,2}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("basic-auth")}`) },
   {
     // KEY=value, key: value, "key": "value". Only literals: a quoted string, or an unquoted value that is
     // not code (no call, no member access; a bare identifier such as a type name counts as code unless
     // the pair is a tight KEY=value or has an UPPER_SNAKE key).
     // The key starts only where a key-character run starts, so a long run is scanned once.
     kind: "value",
-    re: /(?<![\w.$-])([A-Za-z_][\w.-]{0,63})(["']?)(\s*(?::|=(?![=>]))\s*)(?:"([^"\\\n]{4,1024})"|'([^'\\\n]{4,1024})'|([^\s"'`,;(){}[\]<>]{4,}))/g,
+    re: /(?<![\w.$-])([A-Za-z_][\w.-]{0,63})(["']?)([ \t]*(?::|=(?![=>]))[ \t]*)(?:"([^"\\\n]{4,1024})"|'([^'\\\n]{4,1024})'|([^\s"'`,;(){}[\]<>]{4,}))/g,
     replace: maskValue,
   },
 ];
