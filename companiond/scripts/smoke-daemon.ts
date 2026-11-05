@@ -184,12 +184,33 @@ async function run(): Promise<number> {
     return 1;
   }
   saved = saveRows(sessionId);
-  const wt = await rpc("sessions.worktree", { sessionId });
-  const root: string | null = wt?.kind === "resolved" ? wt.root : null;
-  const before = root ? gitState(root) : null;
+  // Nothing about a session outside an approved repo is sent: an "unavailable" repo line can name a folder. The
+  // resolution must be "resolved" (the resolver already refuses unapproved roots) and match an approval the way
+  // Privacy.isApproved does (exact root, or the same git common dir when worktrees are included). A fresh approval
+  // re-resolves sessions in the background, so wait briefly for it. Neither the root nor the title is printed.
+  const approvals = (await rpc("privacy.get")).approvals as Array<{ root: string; commonDir: string; includeWorktrees: boolean }>;
+  const inApproved = (w: any) =>
+    w?.kind === "resolved" && approvals.some((a) => a.root === w.root || (a.includeWorktrees && a.commonDir === w.gitCommonDir));
+  let wt = await rpc("sessions.worktree", { sessionId });
+  for (let i = 0; i < 20 && !inApproved(wt) && !stopping; i++) {
+    await sleep(500);
+    wt = await rpc("sessions.worktree", { sessionId });
+  }
+  if (stopping) throw new SmokeError("stopped");
+  if (!inApproved(wt)) {
+    say("session: not in approved repo");
+    return 1;
+  }
+  const root: string = wt.root;
+  const before = gitState(root);
 
   const p = await rpc("chat.prepare", { sessionId, question: QUESTION });
   say(`repo: ${p.repo.state} | mode: ${p.mode} | items: ${p.preview?.items.length ?? 0} | bytes: ${p.preview?.bytes ?? 0} | notes: ${p.preview?.notes.length ?? 0}`);
+  // The prepare resolves the repo again: send only if it is still bound to the same approved root.
+  if (p.repo.state !== "bound" || p.repo.root !== root) {
+    say("session: not in approved repo");
+    return 1;
+  }
   // Ask mode (only with --include-context) needs confirmed: true; the flag is the owner's confirmation for this run.
   const { turnId } = await rpc("chat.send", { prepareId: p.prepareId, removeItemIds: [], confirmed: p.needsConfirm === true });
   let done: any = null;
@@ -202,7 +223,7 @@ async function run(): Promise<number> {
   const tools = events.filter((e) => e.method === "chat.item" && e.params.turnId === turnId && e.params.phase === "completed" && e.params.item.type === "mcpToolCall").length;
   const alerts = events.filter((e) => e.method === "security.alert").map((e) => e.params.kind);
   const replaced = events.some((e) => e.method === "chat.threadReplaced");
-  const unchanged = before === null || root === null || gitState(root) === before;
+  const unchanged = gitState(root) === before;
   say(`turn: ${done?.params.status ?? "timeout"} | reply chars: ${reply.length} | cites path:line: ${/[\w./-]+\.\w+:\d+/.test(reply)} | tool calls: ${tools} | alerts: ${JSON.stringify(alerts)} | thread replaced: ${replaced} | repo unchanged: ${unchanged}`);
   return done?.params.status === "completed" && alerts.length === 0 && unchanged ? 0 : 1;
 }
@@ -229,7 +250,20 @@ try {
   await call("daemon.shutdown").catch(() => undefined);
   await Promise.race([exited, sleep(10_000)]);
   if (!dead) child.kill();
-  await exited;
+  await Promise.race([exited, sleep(10_000)]);
+  if (!dead && child.pid !== undefined) {
+    // A hung shutdown: SIGKILL the daemon's whole process group (it is detached, so the group is its own).
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+    await Promise.race([exited, sleep(5_000)]);
+  }
+  if (!dead) {
+    say("daemon: did not exit");
+    code = 1;
+  }
   if (saved) {
     try {
       restoreRows(saved);
