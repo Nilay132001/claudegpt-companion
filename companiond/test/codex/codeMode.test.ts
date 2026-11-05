@@ -5,7 +5,7 @@ import path from "node:path";
 import { appPaths, ensureAppDirs } from "../../src/app/appPaths.ts";
 import { ALLOWED_NESTED, checkProtectedFiles, checkToolSurface, CodeModeError, parseToolSurface, prepareCodeMode, trimCatalog, type CodexDebugRunner } from "../../src/codex/codeMode.ts";
 import type { CodexInstall } from "../../src/codex/codexInstall.ts";
-import { CATALOG_FILE } from "../../src/codex/config.ts";
+import { CATALOG_FILE, codexStageDir } from "../../src/codex/config.ts";
 import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
@@ -105,6 +105,32 @@ test("prepareCodeMode fails closed: a widened surface, a blind parser, a runner 
   assert.deepEqual(broken, { result: { failures: ["codex debug models failed under its offline profile"], warnings: [] }, models: [], protectedFiles: {} });
   const liveWide = prepareCodeMode({ install, paths, run: fakeRunner(() => GOOD).run, live: () => promptInput({ functions: ["exec", "wait"] }, ["create_goal"]) });
   assert.match(liveWide.result.failures.join(), /m-code, live.*create_goal/);
+});
+
+test("prepareCodeMode fails closed on a planted link: CODEX_HOME/tmp or a staging name; the targets are untouched (final review I-1)", () => {
+  const notReached: CodexDebugRunner = () => { throw new Error("SYNTHETIC: never reached"); };
+  const victimDir = tempDir();
+  fs.chmodSync(victimDir, 0o755);
+  const victim = path.join(victimDir, "victim.txt");
+  fs.writeFileSync(victim, "SYNTHETIC FIXTURE victim\n", { mode: 0o644 });
+
+  const a = ensureAppDirs(appPaths(tempDir()));
+  fs.rmdirSync(path.join(a.codexHome, "tmp"));
+  fs.symlinkSync(victimDir, path.join(a.codexHome, "tmp"));
+  const ra = prepareCodeMode({ install, paths: a, run: notReached });
+  assert.match(ra.result.failures.join(), /not a real folder/);
+  assert.deepEqual(ra.protectedFiles, {});
+  assert.equal(fs.statSync(victimDir).mode & 0o777, 0o755);
+
+  const b = ensureAppDirs(appPaths(tempDir()));
+  fs.mkdirSync(codexStageDir(b.codexHome), { mode: 0o700 });
+  fs.symlinkSync(victim, path.join(codexStageDir(b.codexHome), `${CATALOG_FILE}.tmp-${process.pid}`));
+  const rb = prepareCodeMode({ install, paths: b, run: fakeRunner(() => GOOD).run });
+  assert.match(rb.result.failures.join(), /staging folder/);
+  assert.deepEqual(rb.protectedFiles, {});
+  assert.equal(fs.readFileSync(victim, "utf8"), "SYNTHETIC FIXTURE victim\n");
+  assert.equal(fs.statSync(victim).mode & 0o777, 0o644);
+  assert.equal(fs.existsSync(path.join(b.codexHome, CATALOG_FILE)), false);
 });
 
 test("protected files: a changed byte, a hard link or a missing file fails the check (I-5)", () => {

@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { appPaths, ensureAppDirs, type AppPaths } from "../../src/app/appPaths.ts";
-import { snapshotProtectedFiles, type PreparedCodeMode } from "../../src/codex/codeMode.ts";
+import { prepareCodeMode, snapshotProtectedFiles, type PreparedCodeMode } from "../../src/codex/codeMode.ts";
 import { CodexHost, HostBusyError, HostNotReadyError, SecurityCheckError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
-import { CATALOG_FILE, writeCodexHomeFile } from "../../src/codex/config.ts";
+import type { CodexInstall } from "../../src/codex/codexInstall.ts";
+import { CATALOG_FILE, codexStageDir, writeCodexHomeFile } from "../../src/codex/config.ts";
 import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../../src/launch/seatbelt.ts";
 import { DEFAULT_TOKEN_TTL_MS } from "../../src/relay/broker.ts";
@@ -23,6 +24,7 @@ const okPrepare = (paths: AppPaths) => (): PreparedCodeMode => {
   writeCodexHomeFile(paths.codexHome, CATALOG_FILE, "{}");
   return { result: { failures: [], warnings: [] }, models: [FAKE_MODEL], protectedFiles: snapshotProtectedFiles(paths.codexHome) };
 };
+const FAKE_INSTALL: CodexInstall = { version: "0.166.0", vendorDir: "/v", binary: "/v/bin/codex", codeModeHost: "/v/bin/codex-code-mode-host", pathDir: null, resourcesDir: null };
 const detail = (s: HostState) => (s.state === "failed" ? s.detail : "");
 const LOGIN_PROFILE = "(version 1) ; sign-in";
 
@@ -71,6 +73,30 @@ test("a failing code-mode preparation stops the start before any spawn", async (
   const { h, f } = host({ prepare: () => () => ({ result: { failures: ["tool surface (m): collaboration.spawn_agent is exposed"], warnings: [] }, models: [], protectedFiles: {} }) });
   assert.match(detail(await h.start()), /Security check failed: .*collaboration\.spawn_agent/);
   assert.equal(f.servers.length, 0);
+});
+
+test("a planted link fails the start closed before any spawn; the link target is untouched (final review I-1)", async () => {
+  const victimDir = tempDir();
+  fs.chmodSync(victimDir, 0o755);
+  const victim = path.join(victimDir, "victim.txt");
+  fs.writeFileSync(victim, "SYNTHETIC FIXTURE victim\n", { mode: 0o644 });
+  // A symlink at the staging name of config.toml.
+  const a = host();
+  fs.mkdirSync(codexStageDir(a.paths.codexHome), { mode: 0o700 });
+  fs.symlinkSync(victim, path.join(codexStageDir(a.paths.codexHome), `config.toml.tmp-${process.pid}`));
+  assert.equal((await a.h.start()).state, "failed");
+  assert.equal(a.f.servers.length, 0);
+  assert.equal(fs.readFileSync(victim, "utf8"), "SYNTHETIC FIXTURE victim\n");
+  assert.equal(fs.statSync(victim).mode & 0o777, 0o644);
+  // CODEX_HOME/tmp replaced by a symlink: the real preparation refuses it before writing or running anything.
+  const notReached = () => { throw new Error("SYNTHETIC: never reached"); };
+  const b = host({ prepare: (p) => () => prepareCodeMode({ install: FAKE_INSTALL, paths: p, run: notReached }) });
+  fs.rmdirSync(path.join(b.paths.codexHome, "tmp"));
+  fs.symlinkSync(victimDir, path.join(b.paths.codexHome, "tmp"));
+  assert.match(detail(await b.h.start()), /Security check failed: .*not a real folder/);
+  assert.equal(b.f.servers.length, 0);
+  assert.equal(fs.statSync(victimDir).mode & 0o777, 0o755);
+  assert.deepEqual(fs.readdirSync(victimDir), ["victim.txt"]);
 });
 
 test("a config/read without the code-mode settings fails the self-check and stops the process", async () => {
@@ -467,6 +493,55 @@ test("an unbound open racing a bound open of the same id never orphans the live 
   await h.closeThread("ext-1");
   assert.equal(broker.live(), 0);
   assert.equal(h.state().state, "ready");
+});
+
+test("a close during an in-flight bound open of the same id leaves no live grant or binding (final review I-2)", async () => {
+  const hold: { h?: CodexHost; c?: Promise<void> } = {};
+  const { h, f, broker } = host({
+    handlers: withHandler("thread/resume", (p, fake) => {
+      // Arrives while the bound open of ext-1 waits for its thread/resume reply.
+      if (p.threadId === "ext-1" && !hold.c) hold.c = hold.h?.closeThread("ext-1");
+      return goodHandlers()["thread/resume"]?.(p, fake);
+    }),
+  });
+  hold.h = h;
+  await h.start();
+  assert.equal(await h.openThread("ext-1", bind("/r2")), "ext-1");
+  await hold.c;
+  assert.equal(broker.grants.length, 1);
+  assert.equal(broker.live(), 0, "the grant of the open is revoked by the close that waited for it");
+  assert.equal(srv(f, 1).last("thread/unsubscribe")?.threadId, "ext-1");
+  await assert.rejects(h.startTurn("ext-1", "hi"), /not open/);
+  assert.equal(h.state().state, "ready");
+});
+
+test("a thread/resume that answers for another thread id fails the host and revokes the grant (final review m5)", async () => {
+  const { h, broker } = host({
+    handlers: withHandler("thread/resume", (p, fake) => goodHandlers()["thread/resume"]?.({ ...p, threadId: "ext-other" }, fake)),
+  });
+  await h.start();
+  await assert.rejects(h.openThread("ext-1", bind("/r1")), SecurityCheckError);
+  assert.equal(broker.live(), 0);
+  assert.match(detail(h.state()), /Security check failed: app-server resumed a different thread/);
+  await assert.rejects(h.startTurn("ext-other", "hi"), HostNotReadyError);
+});
+
+test("stop() during a held initialize: the process is closed and never used (final review m7)", async () => {
+  const hold: { h?: CodexHost } = {};
+  const { h, f } = host({
+    handlers: withHandler("initialize", (p, fake) => {
+      fake.exitOnKill = false; // a process slow to die: only the host's own checks keep it unused
+      void hold.h?.stop();
+      return goodHandlers().initialize?.(p, fake);
+    }),
+  });
+  hold.h = h;
+  const s = await h.start();
+  assert.notEqual(s.state, "ready");
+  assert.equal(srv(f, 0).killed, true);
+  assert.deepEqual(srv(f, 0).methods(), ["initialize"], "no initialized, no config/read: never used after the stop");
+  await assert.rejects(h.openThread(null, null), HostNotReadyError);
+  assert.equal(f.servers.length, 1, "nothing spawned after the stop");
 });
 
 test("two turns after a binding ended: one rebinds and starts, the other is busy (review fix 4)", async () => {

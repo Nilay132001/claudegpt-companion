@@ -7,7 +7,7 @@ export type ServerReply = { result: unknown } | { error: RpcErrorBody };
 export type ServerRequestHandler = (method: string, params: unknown) => Promise<ServerReply>;
 export type NotificationListener = (method: string, params: unknown) => void;
 export interface RpcTransport { input: Readable; output: Writable; stderr?: Readable | null }
-export interface RpcStats { malformedLines: number; unknownResponseIds: number; serverRequests: number; stderrBytes: number }
+export interface RpcStats { malformedLines: number; unknownResponseIds: number; serverRequests: number; stderrBytes: number; stderrErrors: number }
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const HANDLER_FAILED: RpcErrorBody = { code: -32603, message: "companion: request handler failed" };
@@ -45,7 +45,7 @@ interface Pending { resolve: (v: unknown) => void; reject: (e: Error) => void; t
 const isId = (v: unknown): v is Id => typeof v === "number" || typeof v === "string";
 
 export class RpcClient {
-  readonly stats: RpcStats = { malformedLines: 0, unknownResponseIds: 0, serverRequests: 0, stderrBytes: 0 };
+  readonly stats: RpcStats = { malformedLines: 0, unknownResponseIds: 0, serverRequests: 0, stderrBytes: 0, stderrErrors: 0 };
   #out: Writable;
   #next = 1;
   #pending = new Map<Id, Pending>();
@@ -72,6 +72,11 @@ export class RpcClient {
     // M1 carry-over: Codex stderr can contain local paths. Count it; never keep or log it.
     t.stderr?.on("data", (chunk: Buffer) => {
       this.stats.stderrBytes += chunk.length;
+    });
+    // Final review m1: an error on the stderr pipe must not become an unhandled stream error (a companiond crash).
+    // Counted only; stdout and stdin errors already close the connection.
+    t.stderr?.on("error", () => {
+      this.stats.stderrErrors++;
     });
   }
 

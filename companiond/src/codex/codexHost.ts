@@ -149,7 +149,7 @@ export class CodexHost {
   #protected: Readonly<Record<string, string>> = {};
   #rebinds = new Map<string, number[]>();
   #bindQueue: Promise<unknown> = Promise.resolve();
-  /** Opens of the same thread id, bound or not, run one at a time (review fix 1). */
+  /** Opens and closes of the same thread id, bound or not, run one at a time (review fix 1, final review I-2). */
   #idQueues = new Map<string, Promise<unknown>>();
   #login: { end: () => void } | null = null;
   #securityStopped: string | null = null;
@@ -320,21 +320,30 @@ export class CodexHost {
     if (threadId === null) return open();
     // Review fix 1: an unbound open racing a bound one for the same id must not replace its state (and orphan its
     // live grant), so every open of one id waits for the previous one.
-    const run = (this.#idQueues.get(threadId) ?? Promise.resolve()).then(open);
+    return this.#onIdQueue(threadId, open);
+  }
+
+  /** Thread end (ruling I1): unsubscribe and revoke its token. On the same per-id queue as openThread (final review
+   * I-2): a close that arrives while an open of the same id is in flight waits for it and unloads what it produced,
+   * so no grant or binding outlives a closed conversation. */
+  async closeThread(threadId: string): Promise<void> {
+    return this.#onIdQueue(threadId, async () => {
+      const t = this.#threads.get(threadId);
+      if (!t) return;
+      if (t.activeTurn) throw new TurnBusyError();
+      await this.#unload(t);
+    });
+  }
+
+  /** Runs fn after every earlier open or close of this id has settled. */
+  #onIdQueue<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.#idQueues.get(threadId) ?? Promise.resolve()).then(fn);
     const tail = run.then(() => undefined, () => undefined);
     this.#idQueues.set(threadId, tail);
     void tail.then(() => {
       if (this.#idQueues.get(threadId) === tail) this.#idQueues.delete(threadId);
     });
     return run;
-  }
-
-  /** Thread end (ruling I1): unsubscribe and revoke its token. */
-  async closeThread(threadId: string): Promise<void> {
-    const t = this.#threads.get(threadId);
-    if (!t) return;
-    if (t.activeTurn) throw new TurnBusyError();
-    await this.#unload(t);
   }
 
   async #openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
@@ -381,6 +390,8 @@ export class CodexHost {
       this.#requireReady(); // a #fail may have run while we waited
       const id = str(obj(obj(resp)?.thread)?.id);
       if (!id) throw new SecurityCheckError("app-server returned no thread id");
+      // Final review m5: a resume must answer for the thread it was asked for, never store state under another id.
+      if (threadId && id !== threadId) throw new SecurityCheckError("app-server resumed a different thread");
       t = { threadId: id, proc, rootKey, binding, grant, activeTurn: null, finished: new Set(), needsRebind: false, lastUsed: ++this.#clock };
       // Defensive (review fix 1): state already held for this id is ended, never silently replaced, so its grant
       // can never outlive it.

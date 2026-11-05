@@ -113,6 +113,14 @@ test("stderr is counted and never kept", async () => {
   assert.doesNotMatch(JSON.stringify(client.stats), /SYNTHETIC-path/);
 });
 
+test("an error on the stderr pipe is counted, not thrown (final review m1)", async () => {
+  const { client, stderr } = pair();
+  stderr.destroy(new Error("SYNTHETIC stderr failure"));
+  await tick();
+  assert.equal(client.stats.stderrErrors, 1);
+  assert.equal(client.isClosed, false);
+});
+
 test("a real child that exits rejects pending requests", async () => {
   const child = spawn(process.execPath, ["-e", "process.stdin.resume(); setTimeout(() => process.exit(3), 50)"], { stdio: ["pipe", "pipe", "pipe"] });
   const client = new RpcClient(

@@ -21,12 +21,38 @@ export function appPaths(home: string): AppPaths {
   };
 }
 
+/** Makes d a real 0700 directory owned by this user, never following a link (final review I-1: Codex can write
+ * inside CODEX_HOME, so CODEX_HOME/tmp may have been replaced by a symlink). The folder is opened with O_NOFOLLOW
+ * and checked and chmodded through that descriptor, so a link swapped in after a check is never followed either.
+ * Anything that is not a real directory of ours is refused; nothing is changed through it. */
+export function ensurePrivateDir(d: string): void {
+  try {
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+  } catch (e) {
+    // mkdir on an existing name (a link, a file) fails or is a no-op; the checks below decide.
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  }
+  const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW } = fs.constants;
+  let fd: number;
+  try {
+    fd = fs.openSync(d, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  } catch {
+    throw new AppDirError("Security check failed: a companion folder is not a real folder.");
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isDirectory() || (typeof process.getuid === "function" && st.uid !== process.getuid())) {
+      throw new AppDirError("Security check failed: a companion folder is not a real folder of this user.");
+    }
+    fs.fchmodSync(fd, 0o700);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** Creates the folders with mode 0700 and returns realpath'd paths. The thread cwd must stay empty (spec §7.1.2). */
 export function ensureAppDirs(p: AppPaths): AppPaths {
-  for (const d of [p.supportDir, p.codexHome, p.emptyCwd, path.join(p.codexHome, "tmp")]) {
-    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
-    fs.chmodSync(d, 0o700);
-  }
+  for (const d of [p.supportDir, p.codexHome, p.emptyCwd, path.join(p.codexHome, "tmp")]) ensurePrivateDir(d);
   const real = (q: string) => fs.realpathSync.native(q);
   const supportDir = real(p.supportDir);
   const out: AppPaths = {

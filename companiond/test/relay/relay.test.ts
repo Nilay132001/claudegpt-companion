@@ -80,7 +80,8 @@ async function fakeAcceptor(token: string, o: { hello?: (nonce: Buffer) => strin
 function runRelay(env: Record<string, string>, stdin: "pipe" | "ignore" = "pipe") {
   const p: ChildProcess = spawn(bin, [], { env, stdio: [stdin, "pipe", "ignore"] });
   cleanups.push(() => {
-    if (p.exitCode === null && p.signalCode === null) p.kill("SIGKILL");
+    // Final review m3: no pid means the spawn failed; kill() must never run then.
+    if (p.pid !== undefined && p.exitCode === null && p.signalCode === null) p.kill("SIGKILL");
   });
   const out: Buffer[] = [];
   p.stdout?.on("data", (c: Buffer) => out.push(c));

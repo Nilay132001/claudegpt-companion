@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AppPaths } from "../app/appPaths.ts";
+import { AppDirError, ensurePrivateDir, type AppPaths } from "../app/appPaths.ts";
 import { SERVER_NAME, TOOL_NAMES } from "../jail/mcpServer.ts";
 import type { CodexInstall } from "./codexInstall.ts";
 import { buildCodexLaunch, buildOfflineCodexLaunch, type CodexLaunch, type RelayEndpoint } from "./codexSeatbelt.ts";
@@ -160,9 +160,14 @@ export const promptInputArgs = (model: string, extra: readonly string[] = []): s
 export function prepareCodeMode(o: { install: CodexInstall; paths: AppPaths; off?: readonly string[]; run?: CodexDebugRunner; live?: CodexDebugRunner }): PreparedCodeMode {
   const run = o.run ?? offlineRunner(o.install);
   const off = o.off ?? OFF_FEATURES;
-  const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cgc-codemode-")));
+  // The scratch home sits in its own private root, so its staging folder (a sibling, see codexStageDir) is ours too.
+  const scratchRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cgc-codemode-")));
+  const scratch = path.join(scratchRoot, "home");
   try {
+    fs.mkdirSync(scratch, { mode: 0o700 });
     fs.mkdirSync(path.join(scratch, "tmp"), { mode: 0o700 });
+    // Codex's TMPDIR. Codex can replace it with a link: checked (and chmodded) without following one (final review I-1).
+    ensurePrivateDir(path.join(o.paths.codexHome, "tmp"));
     const catalog = trimCatalog(run(["debug", "models"], scratch));
     writeCodexHomeFile(o.paths.codexHome, CATALOG_FILE, catalog.json);
     writeCodexConfig(o.paths.codexHome, buildCodexConfigToml(off, { catalogPath: path.join(o.paths.codexHome, CATALOG_FILE) }));
@@ -184,8 +189,11 @@ export function prepareCodeMode(o: { install: CodexInstall; paths: AppPaths; off
     }
     return { result, models: catalog.models, protectedFiles: snapshotProtectedFiles(o.paths.codexHome) };
   } catch (e) {
-    return { result: { failures: [e instanceof CodeModeError ? e.message : "the code-mode self-check could not run"], warnings: [] }, models: [], protectedFiles: {} };
+    const detail = e instanceof CodeModeError ? e.message
+      : e instanceof AppDirError ? e.message.replace(/^Security check failed: /, "")
+      : "the code-mode self-check could not run";
+    return { result: { failures: [detail], warnings: [] }, models: [], protectedFiles: {} };
   } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    fs.rmSync(scratchRoot, { recursive: true, force: true });
   }
 }

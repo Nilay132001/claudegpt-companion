@@ -1,6 +1,7 @@
 // The companion's Codex config.toml (spec §7.1.1). Rewritten at every start.
 import fs from "node:fs";
 import path from "node:path";
+import { AppDirError, ensurePrivateDir } from "../app/appPaths.ts";
 import { SERVER_NAME, TOOL_NAMES } from "../jail/mcpServer.ts";
 
 export const REQUIRED_OFF_FEATURES: readonly string[] = [
@@ -82,13 +83,48 @@ export function buildCodexConfigToml(off: readonly string[] = OFF_FEATURES, code
   ].join("\n");
 }
 
-/** Atomic, 0600: a temp file in the same folder, then rename. */
+/** companiond's staging folder for the files it writes into a Codex home: a sibling of that home, which Codex cannot
+ * write (its profile allows writes inside CODEX_HOME only), so it is on the same volume and the rename is atomic. */
+export const CODEX_STAGE_DIR = "codex-stage";
+export const codexStageDir = (codexHome: string): string => path.join(path.dirname(codexHome), CODEX_STAGE_DIR);
+
+/** Atomic, 0600 (final review I-1). Codex may write anything inside CODEX_HOME, so nothing is staged there: a temp
+ * name inside it could be a symlink Codex planted, and companiond would write through it. The file is created in
+ * companiond's own 0700 staging folder with O_CREAT|O_EXCL|O_NOFOLLOW (flag "wx", never following a link), then
+ * renamed into CODEX_HOME; rename replaces a link at the destination, it never follows one. A name already taken in
+ * the staging folder by anything but a plain file (a leftover of a crash) fails the write, so the start fails closed. */
 export function writeCodexHomeFile(codexHome: string, name: string, body: string): void {
-  const file = path.join(codexHome, name);
-  const tmpFile = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmpFile, body, { mode: 0o600 });
-  fs.chmodSync(tmpFile, 0o600);
-  fs.renameSync(tmpFile, file);
+  if (name !== path.basename(name) || name.startsWith(".")) throw new Error("not a plain file name");
+  const stage = codexStageDir(codexHome);
+  ensurePrivateDir(stage);
+  const tmpFile = path.join(stage, `${name}.tmp-${process.pid}`);
+  const st = lstatOrNull(tmpFile);
+  if (st && !st.isFile()) throw new AppDirError("Security check failed: the companion's staging folder holds an unexpected entry.");
+  if (st) fs.unlinkSync(tmpFile); // unlink never follows a link
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+  const fd = fs.openSync(tmpFile, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+  try {
+    fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, body);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.renameSync(tmpFile, path.join(codexHome, name));
+  } catch (e) {
+    fs.rmSync(tmpFile, { force: true });
+    throw e;
+  }
+}
+
+function lstatOrNull(p: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(p);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
 }
 
 export function writeCodexConfig(codexHome: string, toml: string): void {
