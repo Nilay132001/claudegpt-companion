@@ -31,7 +31,8 @@ test("tools/list is exactly the three read tools, all read-only, none write-shap
 
 test("write-shaped names are recognised, including Atlassian's own write tools", () => {
   for (const n of ["createJiraIssue", "editJiraIssue", "transitionJiraIssue", "addCommentToJiraIssue", "addWorklogToJiraIssue", "createIssueLink",
-    "updateConfluencePage", "jira_delete_issue", "assign_issue", "write_file", "jira_add_comment", "comment", "postComment", "jira_set_status"]) {
+    "updateConfluencePage", "jira_delete_issue", "assign_issue", "write_file", "jira_add_comment", "comment", "postComment", "jira_set_status",
+    "jira_get_issue_and_delete", "read_then_write_file", "search_and_transition", "JIRADeleteIssue"]) {
     assert.equal(isWriteShapedTool(n), true, n);
   }
   for (const n of ["jira_get_issue", "jira_search", "jira_get_comments", "getJiraIssue", "searchJiraIssuesUsingJql", "list_dir", "read_file", "search", "git_status", "git_diff", "listComments"]) {

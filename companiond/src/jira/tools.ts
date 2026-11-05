@@ -42,13 +42,20 @@ const WRITE_TOKENS = new Set(["create", "edit", "update", "transition", "add", "
   "write", "set", "move", "link", "upload", "archive", "comment", "send", "submit", "merge", "close", "resolve"]);
 const READ_TOKENS = new Set(["get", "list", "read", "search", "fetch", "lookup", "status", "diff"]);
 
-/** True for a name that looks like it changes something. A read verb (get/list/read/search…) followed by a noun is
- * not write-shaped, so jira_get_comments passes and addCommentToJiraIssue does not (spec §11, M6). */
+/** True for a name that looks like it changes something: any token is a write verb. The one exception is
+ * comment/comments, a noun as much as a verb: it counts only when no read verb (get/list/read/search…) comes before
+ * it, so jira_get_comments and listComments pass while addCommentToJiraIssue and postComment do not (spec §11, M6).
+ * Tokens are whole words, split on separators, camelCase and acronym runs (JIRADeleteIssue → jira, delete, issue). */
 export function isWriteShapedTool(name: string): boolean {
-  const tokens = name.split(/[_\-.\s]+|(?<=[a-z0-9])(?=[A-Z])/).map((t) => t.toLowerCase()).filter((t) => t.length > 0);
-  const firstRead = tokens.findIndex((t) => READ_TOKENS.has(t));
-  const verbs = firstRead === -1 ? tokens : tokens.slice(0, firstRead);
-  return verbs.some((t) => WRITE_TOKENS.has(t));
+  const tokens = name.split(/[_\-.\s]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).map((t) => t.toLowerCase()).filter((t) => t.length > 0);
+  let sawRead = false;
+  for (const t of tokens) {
+    if (t === "comment" || t === "comments") {
+      if (!sawRead) return true;
+    } else if (WRITE_TOKENS.has(t)) return true;
+    if (READ_TOKENS.has(t)) sawRead = true;
+  }
+  return false;
 }
 
 const fail = (text: string) => ({ text, isError: true });
