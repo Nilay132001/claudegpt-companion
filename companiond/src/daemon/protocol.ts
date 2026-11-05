@@ -17,6 +17,7 @@ export const ErrorCodes = {
   emptyQuestion: 1008,
   hostBusy: 1009,
   prepareStale: 1010,
+  confirmRequired: 1011,
 } as const;
 
 /** HostState.failed.detail starts with this when the app must show "Security check failed" and wait for the

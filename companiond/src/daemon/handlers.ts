@@ -26,7 +26,15 @@ export interface DaemonHost extends ChatHost {
   auth(): Promise<AuthState>;
   login(): Promise<{ authUrl: string }>;
 }
-export interface DaemonDeps { host: DaemonHost; bridge: DaemonBridge; chat: ChatService; privacy: Privacy; store: Store; version: string; shutdown(): void }
+export interface DaemonDeps {
+  host: DaemonHost; bridge: DaemonBridge; chat: ChatService; privacy: Privacy; store: Store; version: string; shutdown(): void;
+  /** How long a thread bound to a revoked root may stay open before the host is restarted (default 30 s). */
+  revokeDeadlineMs?: number;
+  /** Short codes only (no messages, no paths); defaults to stderr. */
+  log?: (code: string) => void;
+}
+const DEFAULT_REVOKE_DEADLINE_MS = 30_000;
+const MAX_TRACKED_PREPARES = 500;
 
 export const ABANDONED_STATUS = "abandoned";
 const ABANDONED_TEXT = "Codex restarted before this reply finished. Ask again.";
@@ -87,6 +95,9 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
   const reresolveAll = () => {
     for (const s of d.bridge.snapshot().sessions) void d.bridge.resolveNow(s.sessionId).catch(() => undefined);
   };
+  const log = d.log ?? ((code: string) => { process.stderr.write(`companiond: ${code}\n`); });
+  // Ask mode: a prepare that needs the owner's confirmation is sent only with `confirmed: true`.
+  const needsConfirm = new Map<string, boolean>();
   return {
     "daemon.hello": async (p) => {
       if (p.protocolVersion !== DAEMON_PROTOCOL_VERSION) throw new DaemonError(ErrorCodes.invalidRequest, `companiond speaks protocol ${DAEMON_PROTOCOL_VERSION}`);
@@ -142,11 +153,41 @@ export function buildHandlers(d: DaemonDeps): Record<string, MethodHandler> {
       d.chat.noteRevoke();
       await Promise.all(d.bridge.snapshot().sessions.map((s) => d.bridge.resolveNow(s.sessionId).catch(() => null)));
       // closeBound tries every close and throws an AggregateError if any failed; its messages are not passed on.
-      await d.chat.closeBound().catch(() => undefined);
-      return { revoked };
+      await d.chat.closeBound().catch(() => log("revoke_close_failed"));
+      const pendingClose = d.chat.boundOpenCount();
+      if (pendingClose > 0) {
+        // A running reply keeps its thread (and relay grant) open until it ends. After the deadline the host is
+        // restarted, the only public way to end a root's Codex process (CodexHost has no per-root stop).
+        const timer = setTimeout(() => {
+          if (d.chat.boundOpenCount() === 0) return;
+          log("revoke_forced_restart");
+          void d.host.stop().then(() => d.host.start()).catch(() => log("revoke_restart_failed"));
+        }, d.revokeDeadlineMs ?? DEFAULT_REVOKE_DEADLINE_MS);
+        timer.unref();
+      }
+      return { revoked, pendingClose };
     },
-    "chat.prepare": async (p) => wirePrepared(await d.chat.prepare(str(p, "sessionId"), str(p, "question", 20_000))),
-    "chat.send": async (p) => d.chat.send(str(p, "prepareId", 200), strArray(p, "removeItemIds")),
+    "chat.prepare": async (p) => {
+      const prepared = await d.chat.prepare(str(p, "sessionId"), str(p, "question", 20_000));
+      needsConfirm.set(prepared.prepareId, prepared.needsConfirm);
+      for (const k of needsConfirm.keys()) {
+        if (needsConfirm.size <= MAX_TRACKED_PREPARES) break;
+        needsConfirm.delete(k);
+      }
+      return wirePrepared(prepared);
+    },
+    "chat.send": async (p) => {
+      const prepareId = str(p, "prepareId", 200);
+      const removeItemIds = strArray(p, "removeItemIds");
+      const confirmed = bool(p, "confirmed", false);
+      // Refused before ChatService sees it, so the prepare stays usable for a confirmed send.
+      if (needsConfirm.get(prepareId) === true && !confirmed) {
+        throw new DaemonError(ErrorCodes.confirmRequired, "Confirm what will be shared before sending.");
+      }
+      const r = await d.chat.send(prepareId, removeItemIds);
+      needsConfirm.delete(prepareId);
+      return r;
+    },
     "chat.interrupt": async (p) => {
       await d.chat.interrupt(str(p, "sessionId"));
       return {};

@@ -2,7 +2,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import type { BridgeEvent } from "../../src/bridge/sessionBridge.ts";
 import { ChatService } from "../../src/chat/chatService.ts";
-import { HostBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
+import { HostBusyError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
 import { RpcError } from "../../src/codex/rpc.ts";
 import { DisabledHost } from "../../src/daemon/disabledHost.ts";
 import { ABANDONED_STATUS, buildHandlers, toDaemonError, wireEvents, type DaemonBridge, type DaemonDeps, type DaemonHost } from "../../src/daemon/handlers.ts";
@@ -87,7 +87,7 @@ class FakeHost implements DaemonHost {
   }
 }
 
-function deps(o: { host?: DaemonHost } = {}) {
+function deps(o: { host?: DaemonHost; revokeDeadlineMs?: number; log?: (c: string) => void; mode?: "off" | "ask" | "automatic" } = {}) {
   const store = Store.memory();
   const root = tempDir(); // an approved synthetic root (the bridge resolves the session to it)
   store.putApproval({ root, commonDir: `${root}/.git`, includeWorktrees: false, approvedAt: 1 });
@@ -109,7 +109,8 @@ function deps(o: { host?: DaemonHost } = {}) {
     launchFor: async (r) => ({ command: "/usr/bin/sandbox-exec", args: ["-p", r], env: {}, cwd: r }),
   });
   let shut = 0;
-  const d: DaemonDeps = { host, bridge, chat, privacy, store, version: "0.4.0", shutdown: () => { shut++; } };
+  if (o.mode) privacy.setSharingMode(o.mode);
+  const d: DaemonDeps = { host, bridge, chat, privacy, store, version: "0.4.0", shutdown: () => { shut++; }, revokeDeadlineMs: o.revokeDeadlineMs, log: o.log ?? (() => undefined) };
   return { d, store, pins, root, order, emitBridge: (e: BridgeEvent) => bridgeListeners.forEach((l) => l(e)), shut: () => shut };
 }
 
@@ -147,7 +148,7 @@ test("chat errors map to codes; host not ready is reported", async () => {
   const h = buildHandlers(deps().d);
   await assert.rejects(h["chat.prepare"]!({ sessionId: "zz", question: "q" }), (e: any) => toDaemonError(e).code === ErrorCodes.unknownSession);
   const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
-  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] }), (e: any) => toDaemonError(e).code === ErrorCodes.hostNotReady);
+  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true }), (e: any) => toDaemonError(e).code === ErrorCodes.hostNotReady);
   await assert.rejects(h["chat.send"]!({ prepareId: "x", removeItemIds: [1] }), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
   await assert.rejects(h["auth.status"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.hostNotReady);
   assert.deepEqual(await h["host.status"]!({}), { state: "failed", detail: "off" });
@@ -158,7 +159,7 @@ test("HostBusyError is 'try again later', not a failure", async () => {
   host.busy = true;
   const h = buildHandlers(deps({ host }).d);
   const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
-  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] }), (e: any) => toDaemonError(e).code === ErrorCodes.hostBusy);
+  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true }), (e: any) => toDaemonError(e).code === ErrorCodes.hostBusy);
   assert.equal(host.state().state, "ready");
 });
 
@@ -196,7 +197,7 @@ test("after a sign-in replaced every process, the running turn is reported as ab
   wireEvents(x.d, (m, p) => got.push([m, p]));
   const h = buildHandlers(x.d);
   const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
-  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
   host.signedInAgain();
   assert.deepEqual(got.map(([m]) => m), ["auth.changed", "chat.turnCompleted"]);
   assert.deepEqual({ ...got[1]?.[1], error: null }, { sessionId: "s1", threadId: s.threadId, turnId: s.turnId, status: ABANDONED_STATUS, error: null });
@@ -210,7 +211,7 @@ test("chat.prepare sends the preview without raw subagent updates or the cursor;
   assert.deepEqual(Object.keys(p.preview).sort(), ["bytes", "items", "notes", "omitted"]);
   assert.equal(p.repo.state, "bound");
   await h["privacy.setSharingMode"]!({ mode: "off" });
-  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] }), (e: any) => toDaemonError(e).code === ErrorCodes.prepareStale);
+  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true }), (e: any) => toDaemonError(e).code === ErrorCodes.prepareStale);
 });
 
 test("a refused resume is reported as chat.threadReplaced", async () => {
@@ -225,7 +226,7 @@ test("a refused resume is reported as chat.threadReplaced", async () => {
   };
   const h = buildHandlers(x.d);
   const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
-  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
   assert.deepEqual(got.filter(([m]) => m === "chat.threadReplaced"), [["chat.threadReplaced", { sessionId: "s1", threadId: "thr-new", reason: "resume_refused" }]]);
 });
 
@@ -236,18 +237,86 @@ test("thread end: a session that leaves the list and a revoked approval close th
   wireEvents(x.d, () => undefined);
   const h = buildHandlers(x.d);
   const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
-  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
   host.emit({ type: "turnCompleted", threadId: s.threadId, turnId: s.turnId, status: "completed", error: null });
   await h["privacy.revoke"]!({ root: x.root });
   assert.deepEqual(host.closed, [s.threadId]);
   assert.deepEqual(x.order, ["resolve:s1", `close:${s.threadId}`]); // re-resolved before the close
   assert.equal(((await h["chat.prepare"]!({ sessionId: "s1", question: "q" })) as any).repo.state, "unavailable");
   const p2: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
-  const s2: any = await h["chat.send"]!({ prepareId: p2.prepareId, removeItemIds: [] });
+  const s2: any = await h["chat.send"]!({ prepareId: p2.prepareId, removeItemIds: [], confirmed: true });
   host.emit({ type: "turnCompleted", threadId: s2.threadId, turnId: s2.turnId, status: "completed", error: null });
   x.emitBridge({ type: "sessions", snapshot: { ...x.d.bridge.snapshot(), sessions: [] } });
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(host.closed, [s.threadId, s.threadId]);
+});
+
+test("Ask mode: a send without confirmation is refused and sends nothing; confirmed sends; Automatic needs no flag", async () => {
+  const host = new FakeHost();
+  let turns = 0;
+  const start = host.startTurn.bind(host);
+  host.startTurn = async (t: string) => { turns++; return start(t); };
+  const h = buildHandlers(deps({ host }).d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  assert.equal(p.needsConfirm, true);
+  for (const params of [{ prepareId: p.prepareId, removeItemIds: [] }, { prepareId: p.prepareId, removeItemIds: [], confirmed: false }]) {
+    await assert.rejects(h["chat.send"]!(params), (e: any) => toDaemonError(e).code === ErrorCodes.confirmRequired);
+  }
+  assert.equal(turns, 0);
+  await assert.rejects(h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: "yes" }), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+  assert.ok(await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true })); // the prepare was not used up
+  assert.equal(turns, 1);
+
+  const auto = new FakeHost();
+  const ha = buildHandlers(deps({ host: auto, mode: "automatic" }).d);
+  const pa: any = await ha["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  assert.equal(pa.needsConfirm, false);
+  assert.ok(await ha["chat.send"]!({ prepareId: pa.prepareId, removeItemIds: [] }));
+});
+
+test("revoke: a failing close is reported as pendingClose with a short stderr code", async () => {
+  const host = new FakeHost();
+  const logs: string[] = [];
+  const x = deps({ host, log: (c) => logs.push(c), revokeDeadlineMs: 60_000 });
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
+  host.emit({ type: "turnCompleted", threadId: s.threadId, turnId: s.turnId, status: "completed", error: null });
+  host.closeThread = async () => { throw new Error("/private/secret/path leaked"); };
+  const r: any = await h["privacy.revoke"]!({ root: x.root });
+  assert.equal(r.pendingClose, 1);
+  assert.deepEqual(logs, ["revoke_close_failed"]);
+  assert.equal(host.starts, 0); // the deadline is far away
+});
+
+test("revoke: a thread whose reply is stuck keeps its grant only until the deadline, then the host is restarted", async () => {
+  const host = new FakeHost();
+  const logs: string[] = [];
+  const x = deps({ host, log: (c) => logs.push(c), revokeDeadlineMs: 20 });
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
+  host.closeThread = async () => { throw new TurnBusyError(); }; // a reply is running; the interrupt never ends it
+  const r: any = await h["privacy.revoke"]!({ root: x.root });
+  assert.equal(r.pendingClose, 1);
+  assert.equal(host.starts, 0);
+  await new Promise((res) => setTimeout(res, 80));
+  assert.equal(host.starts, 1);
+  assert.equal(host.state().state, "ready");
+  assert.ok(logs.includes("revoke_forced_restart"));
+});
+
+test("revoke: no restart when the threads closed", async () => {
+  const host = new FakeHost();
+  const x = deps({ host, revokeDeadlineMs: 10 });
+  const h = buildHandlers(x.d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [], confirmed: true });
+  host.emit({ type: "turnCompleted", threadId: s.threadId, turnId: s.turnId, status: "completed", error: null });
+  const r: any = await h["privacy.revoke"]!({ root: x.root });
+  assert.equal(r.pendingClose, 0);
+  await new Promise((res) => setTimeout(res, 40));
+  assert.equal(host.starts, 0);
 });
 
 test("shutdown calls the deps", async () => {

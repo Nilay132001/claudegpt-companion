@@ -248,6 +248,11 @@ export class ChatService {
     if (failed.length > 0) throw new AggregateError(failed.map((r) => r.reason), `${failed.length} of ${bound.length} threads did not close.`);
   }
 
+  /** Root-bound threads still open (a deferred close waits for its turn to end). */
+  boundOpenCount(): number {
+    return [...this.#open.values()].filter((o) => o.root !== null).length;
+  }
+
   /** Sessions this run opened a thread for. */
   openSessions(): string[] {
     return [...this.#open.keys()];
