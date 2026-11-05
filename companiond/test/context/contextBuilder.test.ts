@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildPreview, composeTurnText, CURSOR_RESET_NOTE, DEFAULT_CAPS, eventsSince, formatFailure, SubagentTracker, type RepoLine,
 } from "../../src/context/contextBuilder.ts";
+import type { TranscriptEvent } from "../../src/transcript/parser.ts";
 import { assistantText, bash, fileEdit, readResult, userText } from "../helpers/m4b.ts";
 
 const bound: RepoLine = { state: "bound", root: "/r", branch: "main", detail: null };
@@ -61,6 +62,36 @@ test("the newest items win under the byte cap; the rest are counted", () => {
   const few = buildPreview({ events: ev, hadCursor: false, cursorFound: false, caps: { ...DEFAULT_CAPS, maxItems: 2 } });
   assert.equal(few.items.length, 2);
   assert.match(few.notes.join(), /28 older item\(s\) left out \(2-item limit\)/);
+});
+
+test("long file_edit and cwd_change paths are clipped, keeping the name", () => {
+  const longPath = `/synthetic/${"deep/".repeat(4000)}target.ts`; // ~20 KB
+  const edit = fileEdit(longPath);
+  const cd: TranscriptEvent = { uuid: "cd1", timestamp: null, isSidechain: false, kind: "cwd_change", from: longPath, to: "/synthetic/next" };
+  const p = buildPreview({ events: [userText("small question", "u1"), edit, cd], hadCursor: true, cursorFound: true });
+  assert.deepEqual(p.items.map((i) => i.kind), ["user", "file_edit", "folder"]);
+  const editText = p.items[1]?.text ?? "";
+  assert.ok(editText.length <= DEFAULT_CAPS.textChars, `${editText.length}`);
+  assert.match(editText, /^….*\/target\.ts$/);
+  const cdText = p.items[2]?.text ?? "";
+  assert.ok(cdText.length <= DEFAULT_CAPS.textChars + 3, `${cdText.length}`);
+  assert.match(cdText, /^….*\/target\.ts → \/synthetic\/next$/);
+  assert.deepEqual(p.notes, []);
+  assert.equal(p.omitted, 0);
+  assert.equal(p.cursorAfter, "cd1");
+  assert.ok(p.bytes <= DEFAULT_CAPS.totalBytes);
+});
+
+test("one item too big on its own is skipped and counted; older items still fit", () => {
+  // A text cap above the byte budget lets one 20 KB path through the clip, so the skip path is exercised.
+  const caps = { ...DEFAULT_CAPS, textChars: 50_000 };
+  const edit = fileEdit(`/synthetic/${"deep/".repeat(4000)}target.ts`);
+  const p = buildPreview({ events: [userText("older question", "u1"), assistantText("older reply", "u2"), edit], hadCursor: true, cursorFound: true, caps });
+  assert.deepEqual(p.items.map((i) => [i.kind, i.text]), [["user", "older question"], ["assistant", "older reply"]]);
+  assert.equal(p.omitted, 1);
+  assert.deepEqual(p.notes, ["1 item(s) left out to stay under 12 KB."]);
+  assert.equal(p.cursorAfter, edit.uuid); // the cursor advances to the newest record in the previewed delta
+  assert.ok(p.bytes <= DEFAULT_CAPS.totalBytes);
 });
 
 test("the cap holds for the block as sent, after escaping", () => {

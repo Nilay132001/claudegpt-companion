@@ -69,6 +69,15 @@ test("the file is 0600, persists, and refuses a newer schema", () => {
   assert.throws(() => Store.open(file), StoreError);
 });
 
+test("a corrupt file is a StoreError, not a raw SQLite error, and its handle is closed", () => {
+  const file = path.join(tempDir(), "companion.db");
+  fs.writeFileSync(file, "SYNTHETIC FIXTURE garbage, not a database\n".repeat(200), { mode: 0o600 });
+  const openFds = () => fs.readdirSync("/dev/fd").length;
+  const before = openFds();
+  assert.throws(() => Store.open(file), (e: unknown) => e instanceof StoreError && e.message === "companion.db is unreadable.");
+  assert.equal(openFds(), before);
+});
+
 test("a pre-existing 0644 file is tightened to 0600", () => {
   const file = path.join(tempDir(), "companion.db");
   fs.writeFileSync(file, "", { mode: 0o644 });

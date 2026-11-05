@@ -30,6 +30,15 @@ const SECRET_KEY = /token|secret|password|passwd|api[_-]?key|auth|credential/i;
 const MAX_SETTING = 4096;
 
 type Row = Record<string, unknown>;
+const UNREADABLE = "companion.db is unreadable.";
+
+function closeQuietly(db: DatabaseSync): void {
+  try {
+    db.close();
+  } catch {
+    // already closed or never opened
+  }
+}
 
 /** The folder must be a real directory, 0700 and ours (M4a's ensureAppDirs makes it so; spec §7.8). */
 function checkFolder(dir: string): void {
@@ -52,14 +61,16 @@ export class Store {
   constructor(db: DatabaseSync, now: () => number = Date.now) {
     this.#db = db;
     this.#now = now;
-    const row = db.prepare("PRAGMA user_version").get() as Row | undefined;
-    const v = Number(row?.user_version ?? 0);
-    if (v > SCHEMA_VERSION) {
-      db.close();
-      throw new StoreError("companion.db was written by a newer companiond.");
+    try {
+      const row = db.prepare("PRAGMA user_version").get() as Row | undefined;
+      const v = Number(row?.user_version ?? 0);
+      if (v > SCHEMA_VERSION) throw new StoreError("companion.db was written by a newer companiond.");
+      db.exec(SCHEMA);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } catch (e) {
+      closeQuietly(db);
+      throw e instanceof StoreError ? e : new StoreError(UNREADABLE);
     }
-    db.exec(SCHEMA);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   static open(file: string, now?: () => number): Store {
@@ -77,8 +88,15 @@ export class Store {
     } finally {
       fs.closeSync(fd);
     }
-    const db = new DatabaseSync(file, { enableForeignKeyConstraints: true });
-    db.exec("PRAGMA journal_mode = DELETE");
+    // A corrupt or foreign file raises a raw SQLite error: close the handle and report a StoreError.
+    let db: DatabaseSync | undefined;
+    try {
+      db = new DatabaseSync(file, { enableForeignKeyConstraints: true });
+      db.exec("PRAGMA journal_mode = DELETE");
+    } catch {
+      if (db) closeQuietly(db);
+      throw new StoreError(UNREADABLE);
+    }
     return new Store(db, now);
   }
 

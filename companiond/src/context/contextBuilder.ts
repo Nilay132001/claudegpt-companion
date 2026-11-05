@@ -119,12 +119,21 @@ function draft(e: TranscriptEvent, caps: ContextCaps): Draft | null {
       }
       return null; // non-shell tool output is not sent: GPT reads the repo through the jail
     }
+    // M3 does not cap paths. They are clipped like other text, keeping the tail (the file or folder name).
     case "file_edit":
-      return { kind: "file_edit", label: part("Claude edited a file"), text: [part(e.filePath)], redacted: 0 };
+      return { kind: "file_edit", label: part("Claude edited a file"), text: [part(e.filePath, caps.textChars, "tail")], redacted: 0 };
     case "subagent_summary":
       return { kind: "subagent", label: part("Subagent result"), text: [part(e.text, caps.textChars)], redacted: 0 };
-    case "cwd_change":
-      return { kind: "folder", label: part("Claude changed folder"), text: [part(`${e.from} → ${e.to}`)], redacted: 0 };
+    case "cwd_change": {
+      // Each path is redacted whole, then clipped to half the text cap, so one long path cannot hide the other.
+      const half = Math.max(1, Math.floor(caps.textChars / 2));
+      const from = redact(e.from);
+      const to = redact(e.to);
+      return {
+        kind: "folder", label: part("Claude changed folder"), redacted: from.count + to.count,
+        text: [part(`${tail(from.text, half)} → ${tail(to.text, half)}`)],
+      };
+    }
     default:
       return null; // tool_call: its result carries the command
   }
@@ -167,26 +176,39 @@ export function buildPreview(input: {
   const budget = caps.totalBytes - RESERVED_BYTES - notes.reduce((n, s) => n + noteBytes(s), 0);
   const picked: typeof drafts = [];
   let bytes = 0;
-  let omitted = 0;
+  let older = 0;
+  let tooBig = 0;
   let stoppedBy: "items" | "bytes" | null = null;
   for (let i = drafts.length - 1; i >= 0; i--) {
     const d = drafts[i];
     if (!d) continue;
     const size = itemBytes(d.label, d.text);
-    if (picked.length >= caps.maxItems || bytes + size > budget) {
-      stoppedBy = picked.length >= caps.maxItems ? "items" : "bytes";
-      omitted = i + 1;
+    if (picked.length >= caps.maxItems) {
+      stoppedBy = "items";
+      older = i + 1;
+      break;
+    }
+    // An item too big for the whole budget on its own is skipped, so it cannot hide everything older.
+    if (size > budget) {
+      tooBig++;
+      continue;
+    }
+    if (bytes + size > budget) {
+      stoppedBy = "bytes";
+      older = i + 1;
       break;
     }
     picked.push(d);
     bytes += size;
   }
   picked.reverse();
+  const omitted = older + tooBig;
 
   if (omitted > 0) {
+    const kb = Math.round(caps.totalBytes / 1024);
     notes.push(stoppedBy === "items"
-      ? `${omitted} older item(s) left out (${caps.maxItems}-item limit).`
-      : `${omitted} older item(s) left out to stay under ${Math.round(caps.totalBytes / 1024)} KB.`);
+      ? `${omitted} ${tooBig > 0 ? "" : "older "}item(s) left out (${caps.maxItems}-item limit${tooBig > 0 ? `, ${kb} KB cap` : ""}).`
+      : `${omitted} ${tooBig > 0 ? "" : "older "}item(s) left out to stay under ${kb} KB.`);
   }
   bytes += notes.reduce((n, s) => n + noteBytes(s), 0);
   let cursorAfter: string | null = null;
