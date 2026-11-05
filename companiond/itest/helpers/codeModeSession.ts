@@ -64,7 +64,7 @@ export async function startSession(o: { paths: AppPaths; root?: string | null; j
       const d = decideServerRequest(method, params, COMPANION_ALLOWLIST, guard.lookup);
       decisions.push(`${method}:${d.outcome}`);
       return d.reply;
-    });
+    }, { experimentalApi: o.rawEvents === true });
     app = a;
     a.rpc.onNotification((m, p) => guard.onNotification(m, p));
     const launch = o.jail ?? (o.root ? await buildReadonlyLaunch({ root: o.root, toolchain: tc }) : null);

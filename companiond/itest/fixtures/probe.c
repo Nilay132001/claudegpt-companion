@@ -2,7 +2,7 @@
 // copy of the production profile, it tries each action given as an argument and prints one JSON line per action
 // with the errno it got. It reads and sends no data: a connect that succeeds is closed at once, an open for reading
 // is closed without a read. Point it only at decoys and synthetic files the caller made.
-//   unix:<path>  connect      tcp:<port>  127.0.0.1      tcp6:<port>  ::1      host:<name>:<port>  DNS + connect
+//   unix:<path>  connect      tcp:<port>  127.0.0.1      tcp6:<port>  ::1      host:<name|[v6]>:<port>  connect (DNS if not numeric)
 //   bind:<path>  bind a unix socket      bindtcp:<ipv4>:<port>  bind + listen a TCP socket, closed at once
 //   exec:<path>  fork + execve, no arguments, empty env
 //   read:<path>  open O_RDONLY, no read  write:<path> open O_WRONLY, no data   unlink:<path>
@@ -75,12 +75,40 @@ static int do_tcp(const char *port, int v6) {
   return e;
 }
 
+static int connect_to(const struct sockaddr *sa, socklen_t len, int family) {
+  int s = socket(family, SOCK_STREAM, 0);
+  int e = s < 0 ? errno : (connect(s, sa, len) == 0 ? 0 : errno);
+  if (s >= 0) close(s);
+  return e;
+}
+
 static int do_host(const char *arg) {
   char host[256];
   const char *colon = strrchr(arg, ':');
   if (colon == NULL || (size_t)(colon - arg) >= sizeof host) return EINVAL;
   memcpy(host, arg, (size_t)(colon - arg));
   host[colon - arg] = 0;
+  /* "[v6]" brackets: an IPv6 host such as "::" cannot be written without them. */
+  size_t hl = strlen(host);
+  if (hl >= 2 && host[0] == '[' && host[hl - 1] == ']') {
+    memmove(host, host + 1, hl - 2);
+    host[hl - 2] = 0;
+  }
+  /* Numeric addresses skip the resolver: under the profile getaddrinfo("::") fails (measured: EAI in both the
+     production and the no-deny control), which would hide what connect() does. */
+  struct sockaddr_in6 a6;
+  struct sockaddr_in a4;
+  memset(&a6, 0, sizeof a6);
+  memset(&a4, 0, sizeof a4);
+  int port = atoi(colon + 1);
+  if (inet_pton(AF_INET6, host, &a6.sin6_addr) == 1) {
+    a6.sin6_len = sizeof a6; a6.sin6_family = AF_INET6; a6.sin6_port = htons((uint16_t)port);
+    return connect_to((struct sockaddr *)&a6, sizeof a6, AF_INET6);
+  }
+  if (inet_pton(AF_INET, host, &a4.sin_addr) == 1) {
+    a4.sin_len = sizeof a4; a4.sin_family = AF_INET; a4.sin_port = htons((uint16_t)port);
+    return connect_to((struct sockaddr *)&a4, sizeof a4, AF_INET);
+  }
   struct addrinfo hints, *res = NULL;
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_UNSPEC;

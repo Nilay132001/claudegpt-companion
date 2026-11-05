@@ -120,9 +120,9 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
   // A routable own IPv6 address (link-local ones need a scope id the probe does not take).
   const ownIp6 = ifaces.find((i) => i && i.family === "IPv6" && !i.internal && !i.address.toLowerCase().startsWith("fe80"))?.address ?? null;
   const localRows: Array<[string, string]> = [
-    ["loopback443", "tcp:443"], ["loopback443v6", "tcp6:443"], ["anyAddr443", "host:0.0.0.0:443"], ["anyAddr443v6", "host:::443"],
+    ["loopback443", "tcp:443"], ["loopback443v6", "tcp6:443"], ["anyAddr443", "host:0.0.0.0:443"], ["anyAddr443v6", "host:[::]:443"],
     ...(ownIp ? [["ownIp443", `host:${ownIp}:443`] as [string, string]] : []),
-    ...(ownIp6 ? [["ownIp6_443", `host:${ownIp6}:443`] as [string, string]] : []),
+    ...(ownIp6 ? [["ownIp6_443", `host:[${ownIp6}]:443`] as [string, string]] : []),
   ];
   const config = "# SYNTHETIC FIXTURE config\n";
   writeCodexConfig(paths.codexHome, config);

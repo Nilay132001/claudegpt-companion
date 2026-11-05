@@ -8,7 +8,9 @@ import { nodeSpawn } from "../../src/codex/spawn.ts";
 export interface Seen { method: string; params: any }
 export interface AppServer { rpc: RpcClient; init: any; requests: Seen[]; notifications: Seen[]; pid: number | undefined; kill(): void }
 
-export async function startAppServer(launch: CodexLaunch, onServerRequest?: (m: string, p: any) => Promise<ServerReply>): Promise<AppServer> {
+/** experimentalApi: measurement only (the exec-cell gate needs thread/start.experimentalRawEvents). Production
+ * initializes with capabilities null. */
+export async function startAppServer(launch: CodexLaunch, onServerRequest?: (m: string, p: any) => Promise<ServerReply>, o: { experimentalApi?: boolean } = {}): Promise<AppServer> {
   const s = nodeSpawn(launch);
   const requests: Seen[] = [];
   const notifications: Seen[] = [];
@@ -22,7 +24,7 @@ export async function startAppServer(launch: CodexLaunch, onServerRequest?: (m: 
   });
   rpc.onNotification((method, params) => notifications.push({ method, params }));
   s.onExit((d) => rpc.close(d));
-  const init = await rpc.request("initialize", { clientInfo: CLIENT_INFO, capabilities: null });
+  const init = await rpc.request("initialize", { clientInfo: CLIENT_INFO, capabilities: o.experimentalApi ? { experimentalApi: true } : null });
   rpc.notify("initialized");
   return { rpc, init, requests, notifications, pid: s.pid, kill: () => s.kill() };
 }
