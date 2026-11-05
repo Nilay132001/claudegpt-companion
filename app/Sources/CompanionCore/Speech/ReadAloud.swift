@@ -5,7 +5,8 @@ import Observation
 /// The synthesizer seam (tests use a fake). `token` identifies one utterance; `onEnd` reports it finished or cancelled.
 @MainActor public protocol SpeechSynthesizing: AnyObject {
     var onEnd: ((Int) -> Void)? { get set }
-    func speak(_ text: String, rate: Float, voiceIdentifier: String?, token: Int)
+    /// Speaks the segments in order as one playback; `onEnd(token)` fires once, after the last one or when stopped.
+    func speak(_ segments: [SpeechSegment], rate: Float, voiceIdentifier: String?, token: Int)
     func pause()
     func resume()
     func stop(atWordBoundary: Bool)
@@ -21,24 +22,36 @@ public final class ReadAloudController {
     public var voiceIdentifier: String?
     public var readCode = false
     @ObservationIgnored private let synth: any SpeechSynthesizing
+    @ObservationIgnored private let installedVoices: () -> [VoiceDescriptor]
     @ObservationIgnored private var token = 0
 
-    public init(synth: any SpeechSynthesizing) {
+    public init(synth: any SpeechSynthesizing, voices: @escaping () -> [VoiceDescriptor] = VoiceDescriptor.installed) {
         self.synth = synth
+        self.installedVoices = voices
         synth.onEnd = { [weak self] t in self?.ended(t) }
     }
 
+    /// 1.0× is a natural pace, a little under AVSpeech's brisk default; the multiplier scales from there.
+    public static let naturalRate = AVSpeechUtteranceDefaultSpeechRate * 0.92
+
     public static func avRate(multiplier: Double) -> Float {
         let m = Float(min(max(multiplier, 0.5), 2.0))
-        return min(max(AVSpeechUtteranceDefaultSpeechRate * m, AVSpeechUtteranceMinimumSpeechRate), AVSpeechUtteranceMaximumSpeechRate)
+        return min(max(naturalRate * m, AVSpeechUtteranceMinimumSpeechRate), AVSpeechUtteranceMaximumSpeechRate)
+    }
+
+    /// The chosen voice if it is still installed, else the best installed one (never AVSpeech's compact default).
+    func resolvedVoice() -> String? {
+        let all = installedVoices()
+        if let id = voiceIdentifier, all.contains(where: { $0.identifier == id }) { return id }
+        return VoiceRanking.best(all, for: VoiceRanking.currentLanguageCode)?.identifier
     }
 
     public func play(id: UUID, markdown: String) {
         if playback != .idle { synth.stop(atWordBoundary: false) }
         token += 1
         playback = .playing(id)
-        synth.speak(SpeechText.plainText(fromMarkdown: markdown, readCode: readCode),
-                    rate: Self.avRate(multiplier: rateMultiplier), voiceIdentifier: voiceIdentifier, token: token)
+        synth.speak(SpeechText.segments(fromMarkdown: markdown, readCode: readCode),
+                    rate: Self.avRate(multiplier: rateMultiplier), voiceIdentifier: resolvedVoice(), token: token)
     }
 
     public func toggle(id: UUID, markdown: String) {
@@ -60,6 +73,9 @@ public final class ReadAloudController {
         playback = .idle
     }
 
+    /// Playing (not paused) this message: drives the speaking indicator.
+    public func isSpeaking(_ id: UUID) -> Bool { playback == .playing(id) }
+
     public func isActive(_ id: UUID) -> Bool { playback == .playing(id) || playback == .paused(id) }
 
     public func icon(for id: UUID) -> String {
@@ -80,19 +96,33 @@ public final class ReadAloudController {
 public final class AVSpeechAdapter: NSObject, SpeechSynthesizing, AVSpeechSynthesizerDelegate {
     public var onEnd: ((Int) -> Void)?
     private let synth = AVSpeechSynthesizer()
-    private var tokens: [ObjectIdentifier: Int] = [:]
+    /// Which playback each queued utterance belongs to, and how many of a playback's utterances are still queued.
+    private var owner: [ObjectIdentifier: Int] = [:]
+    private var remaining: [Int: Int] = [:]
 
     public override init() {
         super.init()
         synth.delegate = self
     }
 
-    public func speak(_ text: String, rate: Float, voiceIdentifier: String?, token: Int) {
-        let u = AVSpeechUtterance(string: text)
-        u.rate = rate
-        if let v = voiceIdentifier.flatMap({ AVSpeechSynthesisVoice(identifier: $0) }) { u.voice = v }
-        tokens[ObjectIdentifier(u)] = token
-        synth.speak(u)
+    public func speak(_ segments: [SpeechSegment], rate: Float, voiceIdentifier: String?, token: Int) {
+        let voice = voiceIdentifier.flatMap { AVSpeechSynthesisVoice(identifier: $0) }
+        let items = segments.filter { !$0.text.isEmpty }
+        guard !items.isEmpty else {
+            Task { @MainActor in self.onEnd?(token) }
+            return
+        }
+        remaining[token] = items.count
+        for (i, seg) in items.enumerated() {
+            let u = AVSpeechUtterance(string: seg.text)
+            u.rate = rate
+            u.pitchMultiplier = 1.0
+            u.prefersAssistiveTechnologySettings = false
+            u.postUtteranceDelay = i == items.count - 1 ? 0 : seg.pause.seconds
+            if let voice { u.voice = voice }
+            owner[ObjectIdentifier(u)] = token
+            synth.speak(u)
+        }
     }
 
     public func pause() { synth.pauseSpeaking(at: .word) }
@@ -101,15 +131,27 @@ public final class AVSpeechAdapter: NSObject, SpeechSynthesizing, AVSpeechSynthe
 
     nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
         let id = ObjectIdentifier(u)
-        Task { @MainActor in self.end(id) }
+        Task { @MainActor in self.finished(id) }
     }
 
     nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
         let id = ObjectIdentifier(u)
-        Task { @MainActor in self.end(id) }
+        Task { @MainActor in self.cancelled(id) }
     }
 
-    private func end(_ id: ObjectIdentifier) {
-        if let t = tokens.removeValue(forKey: id) { onEnd?(t) }
+    private func finished(_ id: ObjectIdentifier) {
+        guard let t = owner.removeValue(forKey: id), let n = remaining[t] else { return }
+        if n <= 1 {
+            remaining[t] = nil
+            onEnd?(t)
+        } else {
+            remaining[t] = n - 1
+        }
+    }
+
+    /// A cancel drops the playback's whole queue; report it once.
+    private func cancelled(_ id: ObjectIdentifier) {
+        guard let t = owner.removeValue(forKey: id), remaining.removeValue(forKey: t) != nil else { return }
+        onEnd?(t)
     }
 }

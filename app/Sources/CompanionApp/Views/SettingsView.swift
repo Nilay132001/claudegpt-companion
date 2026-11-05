@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CompanionCore
 import Observation
@@ -122,7 +123,13 @@ struct PrivacySettings: View {
 
 struct SpeechSettings: View {
     @Environment(AppModel.self) private var model
+    @Environment(ReadAloudController.self) private var readAloud
+    @State private var previewID: UUID?
+    private static let sample = "This is how replies will sound. Pick the voice and speed that feel natural to you."
+    private static let spokenContent = URL(string: "x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent")
+
     var body: some View {
+        let voices = VoiceRanking.candidates(VoiceDescriptor.installed(), for: VoiceRanking.currentLanguageCode)
         Form {
             LabeledContent("Speed") {
                 HStack {
@@ -131,19 +138,43 @@ struct SpeechSettings: View {
                     Text(String(format: "%.2f×", model.settings.speechRate)).monospacedDigit().frame(width: 48)
                 }
             }
-            Picker("Voice", selection: Binding(get: { model.settings.voiceIdentifier ?? "" },
-                                               set: { model.setSetting(\.voiceIdentifier, $0.isEmpty ? nil : $0) })) {
-                Text("System default").tag("")
-                ForEach(Self.voices, id: \.identifier) { v in Text(v.name + " (" + v.language + ")").tag(v.identifier) }
+            Picker("Voice", selection: Binding(
+                get: { voices.contains { $0.identifier == model.settings.voiceIdentifier } ? model.settings.voiceIdentifier ?? "" : "" },
+                set: { model.setSetting(\.voiceIdentifier, $0.isEmpty ? nil : $0) })) {
+                Text("Automatic (best installed: \(voices.first?.name ?? "none"))").tag("")
+                ForEach(VoiceQuality.allCases.reversed(), id: \.self) { q in
+                    let group = voices.filter { $0.quality == q }
+                    if !group.isEmpty {
+                        Section(q.title) {
+                            ForEach(group, id: \.identifier) { v in Text(v.name + " (" + v.language + ")").tag(v.identifier) }
+                        }
+                    }
+                }
+            }
+            HStack {
+                Button(previewID.map(readAloud.isActive) ?? false ? "Stop" : "Preview") { preview() }
+                Spacer()
+            }
+            if !voices.contains(where: { $0.quality >= .enhanced }) {
+                HStack {
+                    Text("Download a higher-quality voice for natural speech.").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Open Spoken Content…") { if let u = Self.spokenContent { NSWorkspace.shared.open(u) } }
+                }
             }
             Toggle("Read each reply aloud when it finishes", isOn: Binding(get: { model.settings.autoPlay }, set: { model.setSetting(\.autoPlay, $0) }))
             Toggle("Read code blocks (otherwise it says \"code block omitted\")", isOn: Binding(get: { model.settings.readCode }, set: { model.setSetting(\.readCode, $0) }))
         }
         .formStyle(.grouped)
+        .onDisappear { if let id = previewID, readAloud.isActive(id) { readAloud.stop() } }
     }
-    static var voices: [AVSpeechSynthesisVoice] {
-        let lang = Locale.current.language.languageCode?.identifier ?? "en"
-        return AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix(lang) }.sorted { $0.name < $1.name }
+
+    /// Speaks the fixed sample with the current speed and voice; pressing again stops it.
+    private func preview() {
+        if let id = previewID, readAloud.isActive(id) { readAloud.stop(); return }
+        let id = UUID()
+        previewID = id
+        readAloud.play(id: id, markdown: Self.sample)
     }
 }
 
