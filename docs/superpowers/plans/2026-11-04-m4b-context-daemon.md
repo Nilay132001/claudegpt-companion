@@ -3610,18 +3610,20 @@ const ErrorCodes = {
   securityCheckFailed: 1001, hostNotReady: 1002, repoRefused: 1003, prepareExpired: 1004, turnBusy: 1005,
   approvalRefused: 1006 /* data: { reason: ApprovalRefusal } */, unknownSession: 1007, emptyQuestion: 1008,
   hostBusy: 1009 /* capacity ("Too many … busy"): show the message, let the user try again later; the host stays ready */,
-  prepareStale: 1010 /* the sharing mode or an approval changed since chat.prepare: prepare again (and re-confirm) */,
+  prepareStale: 1010 /* the sharing mode changed since chat.prepare: prepare again (and re-confirm). A revoke is caught at bind time and by the revoke generation during a send */,
+  confirmRequired: 1011 /* Ask mode (or an unknown prepare in Ask): chat.send needs confirmed: true; the prepare stays usable */,
 };
 // chat.send retry rule: a prepareId is used up only when its turn starts. After hostBusy, turnBusy or hostNotReady the
 // same prepareId can be sent again until it expires (10 min); after prepareExpired or prepareStale call chat.prepare.
 // Security stop: HostState { state: "failed", detail } with detail starting "Security check failed" → show it and an
-// Acknowledge button; only that button sends host.acknowledgeSecurityStop. host.restart does not clear it.
+// Acknowledge button; only that button sends host.acknowledgeSecurityStop. host.restart is refused with
+// securityCheckFailed (1001) while the host failed with any security-check failure.
 
 // Methods (params → result)
 "daemon.hello"            { protocolVersion: 1 }                            → { protocolVersion: 1; daemonVersion: string }
 "daemon.shutdown"         {}                                                → {}            (then the process exits 0)
 "host.status"             {}                                                → HostState
-"host.restart"            {}                                                → HostState
+"host.restart"            {}                                                → HostState   (securityCheckFailed 1001 while a security stop is shown)
 "host.acknowledgeSecurityStop" {}                                           → HostState   (clears the latch, then starts; invalidRequest if no security stop)
 "auth.status"             {}                                                → AuthState
 "auth.login"              {}                                                → { authUrl: string }   (https; the app opens it)
@@ -3634,9 +3636,9 @@ const ErrorCodes = {
 "privacy.get"             {}                                                → { sharingMode: SharingMode; approvals: ApprovedRoot[]; redactionNotice: string }
 "privacy.setSharingMode"  { mode: "off" | "ask" | "automatic" }             → { sharingMode: SharingMode }
 "privacy.approve"         { root: string; includeWorktrees: boolean }       → ApprovedRoot
-"privacy.revoke"          { root: string }                                  → { revoked: boolean }   (answers after sessions re-resolved and bound threads closed)
+"privacy.revoke"          { root: string }                                  → { revoked: boolean; pendingClose: number }   (answers after sessions re-resolved and threads on roots no longer approved closed; pendingClose = still closing; after 30 s a ready host is restarted)
 "chat.prepare"            { sessionId: string; question: string }          → Prepared
-"chat.send"               { prepareId: string; removeItemIds: string[] }   → { threadId: string; turnId: string }
+"chat.send"               { prepareId: string; removeItemIds: string[]; confirmed?: boolean } → { threadId: string; turnId: string }   (confirmed: true after the user confirms the preview; required in Ask)
 "chat.interrupt"          { sessionId: string }                             → {}
 "chat.sent"               { sessionId: string }                             → SentRecord[]          ("View what was sent", this run)
 "settings.get"            { key: `ui.${string}` }                           → { value: string | null }
