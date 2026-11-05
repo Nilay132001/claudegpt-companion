@@ -34,6 +34,12 @@ final class SpeechRecorder: NSObject, AVSpeechSynthesizerDelegate, Sendable {
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) { add("finish") }
 }
 
+/// File scope (nonisolated): collects the adapter's onEnd tokens.
+final class EndBox: Sendable {
+    let tokens = Mutex<[Int]>([])
+    func add(_ t: Int) { tokens.withLock { $0.append(t) } }
+}
+
 @MainActor @Suite struct ReadAloudTests {
     @Test func rateMapping() {
         #expect(ReadAloudController.avRate(multiplier: 1) == AVSpeechUtteranceDefaultSpeechRate)
@@ -121,5 +127,28 @@ final class SpeechRecorder: NSObject, AVSpeechSynthesizerDelegate, Sendable {
         s.stopSpeaking(at: .word)
         try await waitFor("cancel", r)
         #expect(r.events.withLock { $0 } == ["start", "pause", "continue", "cancel"])
+    }
+
+    /// Starting a new playback while the synthesizer is paused must actually speak (not queue silently).
+    /// Both stop modes: play() from paused uses immediate; stop() then play() uses word boundary.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["COMPANION_SPEECH_TESTS"] == "1"), .timeLimit(.minutes(1)), arguments: [false, true])
+    nonisolated func newSpeakWhilePausedActuallyStarts(atWordBoundary: Bool) async throws {
+        let box = EndBox()
+        let adapter = await MainActor.run { () -> AVSpeechAdapter in
+            let a = AVSpeechAdapter()
+            a.onEnd = { box.add($0) }
+            a.speak("This sentence is long enough to be paused in the middle of it, on this Mac.", rate: AVSpeechUtteranceDefaultSpeechRate, voiceIdentifier: nil, token: 1)
+            return a
+        }
+        try await Task.sleep(for: .milliseconds(600))
+        await MainActor.run { adapter.pause() }
+        try await Task.sleep(for: .milliseconds(600))
+        await MainActor.run {
+            adapter.stop(atWordBoundary: atWordBoundary)
+            adapter.speak("Okay.", rate: AVSpeechUtteranceDefaultSpeechRate, voiceIdentifier: nil, token: 2)
+        }
+        for _ in 0..<200 where !box.tokens.withLock({ $0.contains(2) }) { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(box.tokens.withLock { $0.contains(2) })
+        withExtendedLifetime(adapter) {}
     }
 }
