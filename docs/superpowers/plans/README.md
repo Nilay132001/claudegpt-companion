@@ -10,7 +10,7 @@ Spec: `docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md` (v3.4). 
 | M3 | [Session bridge, tail, parser, worktree resolver](2026-11-04-m3-session-bridge.md) | written, reviewed twice; implemented, PR open |
 | M4a | [CodexHost, hardened config, replies, guard, Codex under Seatbelt](2026-11-04-m4a-codex-host.md) | implemented (Tasks 1–10); §7.1.9 ok |
 | M4b | [Redactor, store, privacy, context, daemon API, bundle skeleton](2026-11-04-m4b-context-daemon.md) | implemented (Tasks 1–9) |
-| M5 | [SwiftUI app + speech → first usable release](2026-11-05-m5-swiftui-app.md) | written, reviewed; not yet implemented |
+| M5 | [SwiftUI app + speech → first usable release](2026-11-05-m5-swiftui-app.md) | implemented; owner checklist pending |
 | M6 | Jira (Atlassian MCP, read-only) | written after M5 |
 | M7 | Packaging | written after M6 |
 

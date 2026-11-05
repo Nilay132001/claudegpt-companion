@@ -63,6 +63,10 @@ servers, hooks, subagents or SDLC harness.
 They live in TypeScript with `node --test`. Swift does what must be native: windows, Accessibility,
 mic, speech, with XCTest/Swift Testing once full Xcode is installed (D1).
 
+*M5:* the app runs `companiond` from `Contents/Resources/companiond` inside the bundle, with the user's
+Node 24 or newer (found at `COMPANION_NODE`, the Advanced setting, `/opt/homebrew/bin/node` or
+`/usr/local/bin/node`). Bundling Node is M7.
+
 **Root binding (F8) — option B (M4a, owner ruling (b), review I1).** One app-server per approved root
 (cap 3, idle LRU close) plus a base process for sign-in and for threads with no root. A thread moves
 between processes only after it is unsubscribed and the old process has exited (below), so no thread is
@@ -641,11 +645,16 @@ through public APIs. Verified by §12.4.
 Microphone and Speech Recognition on first use; Accessibility only if follow-window is enabled. Global
 hotkey via `RegisterEventHotKey` (no permission needed, F13). App Support dir 0700, DB 0600, logs without
 message bodies or tokens.
+*M5:* the app starts `companiond` with a minimal environment (`PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `HOME`,
+`USER`, `LOGNAME`, `TMPDIR`, and `COMPANIOND_CODEX` only when set), so variables such as API keys in the
+app's environment never reach it. The daemon's stderr is discarded; the app logs fixed short codes only.
 
 ## 8. UI
 
 - Side panel (`NSPanel`) docked left on Claude's screen, resizable 280–640 pt, hide/show hotkey
-  (default ⌥⌘G, configurable).
+  (default ⌥⌘G, configurable). *M5:* the app is a regular app (Dock icon, menu bar); the panel is a titled
+  `NSPanel` at normal window level. First placement is the left edge of the screen that holds Claude's
+  window, full visible height, 360 pt wide by default.
 - **Follow Claude window (D2, opt-in):** finds Claude Desktop by bundle id, reads its focused window
   frame through `AXUIElement`, observes `kAXMovedNotification` / `kAXResizedNotification`, and places the
   panel flush to its left (or at the screen edge if there is no room). Without Accessibility permission
@@ -653,6 +662,9 @@ message bodies or tokens.
 - Header: session title, root + live branch, status dot, sync status, 🔒 Read-only badge, sharing-mode
   chip, picker, refresh.
 - Chat: bubbles, markdown + code, clickable `path:line`, "Explain Claude's last message", stop button.
+  *M5:* links in replies are not clickable and show their URL as `text (url)`; images are never loaded; only
+  `path:line` references inside the bound root open in the editor. The chat shows the turns of the current
+  app run; earlier turns stay in the Codex thread (until a daemon history method exists).
 - Each reply: 🔊 play / pause / resume / stop, speed 0.5×–2×, voice in settings, optional auto-play.
   Speech text strips markdown and says "code block omitted" unless "read code" is chosen.
 - Input: text field, 🎙 mic with red recording indicator and live text, editable before send.
@@ -688,6 +700,8 @@ message bodies or tokens.
   *M4b:* M4's bundle is ad-hoc signed by default. macOS ties microphone permission to the signature, so
   each ad-hoc rebuild may ask again; a stable identity (`COMPANION_SIGN_IDENTITY`) avoids it. Developer ID
   and notarization stay in M7.
+  *M5:* the bundle contains `companiond` (Resources) and runs it with the user's Node 24 or newer (§2);
+  bundling Node is M7.
 
 ## 10. Terminal context
 
@@ -801,7 +815,7 @@ watcher failure.
 | M2 | `SafeGit` + `companion-readonly` jail under Seatbelt + §12.1 unit suite | suite green locally and in CI: a `companiond-macos` job on `macos-26` runs the Seatbelt tests (they skip on Linux); if the runner has no `sandbox-exec`, they are local-only and the README says so |
 | M3 | SessionBridge, tail, parser, WorktreeResolver + terminal/test-failure extraction + §12.2 suite | suite green |
 | M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "ok". M4b (Redactor, Store, privacy, ContextBuilder, chat service, daemon API, bundle skeleton) implemented; live smoke result: findings doc, "M4 live smoke"; M4b bundle ad-hoc signed by default (§9)* |
-| M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release** |
+| M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release**. *M5: implemented; acceptance test: see docs/manual/m5-checklist.md* |
 | M6 | Jira via Atlassian MCP, read-only allowlist enforced by self-check | self-check proves no write tool is visible |
 | M7 | Packaging, install guide, signing notes | clean install on this Mac |
 
