@@ -88,6 +88,30 @@ let synthetic = JiraCredentials(site: "example-synthetic.atlassian.net", email: 
         #expect(m.jiraNote == "Jira refused the token. It needs read:jira-work and read:jira-user.")
     }
 
+    @Test func withoutADaemonEveryActionSaysSo() async {
+        let store = MemoryJiraStore()
+        store.item = synthetic
+        let m = AppModel(connector: { throw DaemonError.stopped }, jiraStore: store)
+        await m.saveJira(site: synthetic.site, email: synthetic.email, token: synthetic.token)
+        #expect(m.jiraNote == "companiond is not running.")
+        m.jiraNote = nil
+        await m.checkJira()
+        #expect(m.jiraNote == "companiond is not running.")
+        m.jiraNote = nil
+        await m.removeJira()
+        #expect(m.jiraNote == "companiond is not running.")
+    }
+
+    @Test func theTokenIsTrimmedBeforeUse() async {
+        let d = FakeDaemon()
+        let store = MemoryJiraStore()
+        let m = AppModel(connector: { d.connection }, jiraStore: store)
+        await m.start()
+        await m.saveJira(site: synthetic.site, email: synthetic.email, token: " \(synthetic.token)\n")
+        #expect(d.jiraConfigured == synthetic)
+        #expect(store.item == synthetic)
+    }
+
     /// Opt-in: COMPANION_KEYCHAIN_TESTS=1 runs a real round trip under a separate test service name.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["COMPANION_KEYCHAIN_TESTS"] == "1"))
     func realKeychainRoundTrip() throws {

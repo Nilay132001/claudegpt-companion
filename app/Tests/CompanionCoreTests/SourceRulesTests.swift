@@ -37,6 +37,11 @@ import Testing
         if let k = files.first {
             #expect(k.text.contains("\"ClaudeGPT Companion Jira\""))
             #expect(!k.text.contains("kSecClassInternetPassword"))
+            #expect(k.text.components(separatedBy: "kSecAttrService").count - 1 == 1)
+            for banned in ["kSecMatchLimitAll", "kSecAttrAccessGroup"] { #expect(!k.text.contains(banned), "contains \(banned)") }
+            let literals = k.text.matches(of: /"ClaudeGPT Companion[^"]*"/).map { String($0.output) }
+            #expect(!literals.isEmpty)
+            for l in literals { #expect(l == "\"ClaudeGPT Companion Jira\"", "unexpected literal \(l)") }
             #expect(!k.text.contains("Codex"))
             #expect(!k.text.contains("Claude Code"))
         }

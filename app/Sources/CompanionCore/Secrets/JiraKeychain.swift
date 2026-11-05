@@ -64,7 +64,7 @@ public struct KeychainJiraStore: JiraSecretStore {
         var add = base
         add[kSecValueData as String] = data
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        add[kSecAttrLabel as String] = "ClaudeGPT Companion — Jira (read-only)"
+        add[kSecAttrLabel as String] = "Jira token for this app (read-only)"
         let s = SecItemAdd(add as CFDictionary, nil)
         guard s == errSecSuccess else { throw KeychainError.status(s) }
     }
