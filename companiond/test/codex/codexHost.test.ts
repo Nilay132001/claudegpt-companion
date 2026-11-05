@@ -9,8 +9,7 @@ import { CATALOG_FILE, writeCodexHomeFile } from "../../src/codex/config.ts";
 import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../../src/launch/seatbelt.ts";
 import { DEFAULT_TOKEN_TTL_MS } from "../../src/relay/broker.ts";
-import { FAKE_MODEL, FakeBroker, fakeSpawn, goodHandlers, type FakeAppServer, type Handler } from "./fakeAppServer.ts";
-import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
+import { FAKE_MODEL, FakeBroker, fakeSpawn, goodHandlers, type FakeAppServer, type Handler } from "./fakeAppServer.ts";import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
 const tick = async (n = 5) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
@@ -289,6 +288,95 @@ test("a security event while start() is waiting is not overwritten by ready (I-1
   assert.match(detail(await h.start()), /Security check failed/);
   assert.equal(f.servers.length, 0, "no process after the stop");
   assert.match(detail(await h.start()), /Security check failed/, "still latched");
+});
+
+test("a security event during the base process's self-check leaves the latched detail (review fix 2)", async () => {
+  const hold: { broker?: FakeBroker } = {};
+  let fired = false;
+  const { h, broker, events } = host({
+    handlers: withHandler("experimentalFeature/list", (p, fake) => {
+      if (!fired) {
+        fired = true;
+        hold.broker?.emit({ type: "refused", reason: "bad proof" });
+      }
+      return goodHandlers()["experimentalFeature/list"]?.(p, fake);
+    }),
+  });
+  hold.broker = broker;
+  assert.match(detail(await h.start()), /^Security check failed: an unknown program/);
+  assert.equal(events.some((e) => e.type === "host" && e.state.state === "ready"), false);
+});
+
+test("a failure that is not a security check shows a fixed text and the error's name, never its message (review fix 5)", async () => {
+  const { h, broker } = host();
+  broker.isHealthy = false;
+  broker.restartFails = true; // its message says SYNTHETIC
+  assert.equal(detail(await h.start()), "Codex stopped (Error)");
+  const x = host();
+  await x.h.start();
+  srv(x.f, 0).exit("exit 1");
+  await tick();
+  assert.equal(detail(x.h.state()), "Codex stopped (Error)");
+});
+
+test("an unbound open racing a bound open of the same id never orphans the live grant (review fix 1)", async () => {
+  const hold: { h?: CodexHost; p?: Promise<string> } = {};
+  const { h, broker } = host({
+    handlers: withHandler("thread/resume", (p, fake) => {
+      // Arrives while the bound open of ext-1 waits for its thread/resume reply.
+      if (p.threadId === "ext-1" && !hold.p && p.config[`${SRV}.env`]?.CGC_RELAY_TOKEN) hold.p = hold.h?.openThread("ext-1", null);
+      return goodHandlers()["thread/resume"]?.(p, fake);
+    }),
+  });
+  hold.h = h;
+  await h.start();
+  assert.equal(await h.openThread("ext-1", bind("/r2")), "ext-1");
+  assert.equal(await hold.p, "ext-1");
+  assert.equal(broker.live(), 0, "the bound state was ended before the unbound one replaced it");
+  await h.closeThread("ext-1");
+  assert.equal(broker.live(), 0);
+  assert.equal(h.state().state, "ready");
+});
+
+test("two turns after a binding ended: one rebinds and starts, the other is busy (review fix 4)", async () => {
+  const { h, f, broker } = host();
+  await h.start();
+  const t = await h.openThread(null, bind("/r1"));
+  broker.emit({ type: "closed", grantId: broker.grants[0]?.id ?? "", end: "jail" });
+  const r = await Promise.allSettled([h.startTurn(t, "a"), h.startTurn(t, "b")]);
+  assert.deepEqual(r.map((x) => x.status).sort(), ["fulfilled", "rejected"]);
+  assert.ok(r.some((x) => x.status === "rejected" && x.reason instanceof TurnBusyError));
+  assert.equal(srv(f, 1).methods().filter((m) => m === "turn/start").length, 1);
+  assert.equal(broker.grants.length, 2, "one rebind");
+});
+
+test("an RPC error reply to thread/resume itself revokes the grant and rethrows; the host stays ready (I-4 partial)", async () => {
+  const { h, broker } = host({ handlers: withHandler("thread/resume", () => { throw { code: -32600, message: "SYNTHETIC no such thread" }; }) });
+  await h.start();
+  await assert.rejects(h.openThread("missing", bind("/r1")), /SYNTHETIC/);
+  assert.equal(h.state().state, "ready");
+  assert.equal(broker.grants[0]?.revoked, true);
+});
+
+test("an open during the sign-in replacement waits for the new base's self-check (review fix 3)", async () => {
+  const hold: { h?: CodexHost; loggedIn: boolean; p?: Promise<unknown> } = { loggedIn: false };
+  const { h, f, events } = host({
+    handlers: withHandler("experimentalFeature/list", (p, fake) => {
+      if (hold.loggedIn && !hold.p) hold.p = hold.h?.openThread(null, null).catch((e: unknown) => e);
+      return goodHandlers()["experimentalFeature/list"]?.(p, fake);
+    }),
+  });
+  hold.h = h;
+  await h.start();
+  await h.login();
+  const login = f.servers.find((s) => s.launch.args[1] === LOGIN_PROFILE) as FakeAppServer;
+  hold.loggedIn = true;
+  login.notify("account/login/completed", { loginId: "l1", success: true, error: null });
+  for (let i = 0; i < 50 && !events.some((e) => e.type === "auth"); i++) await tick();
+  assert.equal(typeof (await hold.p), "string");
+  const m = (f.servers.at(-1) as FakeAppServer).methods().filter((x) => x !== "account/read"); // the auth event's read
+  assert.deepEqual(m.slice(m.indexOf("experimentalFeature/list") + 1), ["mcpServerStatus/list", "config/read", "thread/start", "mcpServerStatus/list"]);
+  assert.equal(h.state().state, "ready");
 });
 
 test("validator ends: error stops everything; jail ends rebind at most 3 times in 10 minutes (I-2)", async () => {

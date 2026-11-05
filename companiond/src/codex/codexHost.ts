@@ -92,12 +92,18 @@ export interface CodexHostOptions {
   measurementOnly?: boolean;
 }
 
-const UNSANDBOXED_WARNING = "measurement only: Codex is running without its Seatbelt profile";
+/** The host detail for every failure that is not a security check: the error's name is added, never its message. */
+export const FAILED = "Codex stopped";
+const UNSANDBOXED_WARNING ="measurement only: Codex is running without its Seatbelt profile";
 const BASE = "";
 const MAX_REBINDS = 3;
 const REBIND_WINDOW_MS = 10 * 60_000;
 
-interface Proc { key: string; rpc: RpcClient; kill: () => void; threads: Set<string>; lastUsed: number; closing: boolean }
+/** checked: settles when the process's self-check has passed (or rejects when it failed). Nothing uses a process
+ * before that, even when it is already in #procs (review fix 3). */
+interface Proc { key: string; rpc: RpcClient; kill: () => void; threads: Set<string>; lastUsed: number; closing: boolean; checked: Promise<void> }
+/** turn ids remembered per thread for a turn/completed that beats the turn/start reply; older ones are dropped. */
+const MAX_FINISHED = 16;
 interface ThreadState {
   threadId: string;
   proc: Proc;
@@ -140,6 +146,8 @@ export class CodexHost {
   #protected: Readonly<Record<string, string>> = {};
   #rebinds = new Map<string, number[]>();
   #bindQueue: Promise<unknown> = Promise.resolve();
+  /** Opens of the same thread id, bound or not, run one at a time (review fix 1). */
+  #idQueues = new Map<string, Promise<unknown>>();
   #login: { end: () => void } | null = null;
   #securityStopped: string | null = null;
   #warnings: string[] = [];
@@ -276,10 +284,14 @@ export class CodexHost {
   /** Plan re-review N-2: sign-in completed in ANOTHER process. Whether a running app-server picks up credentials it
    * did not write is unmeasured (measuring it needs a real sign-in), so every running process is replaced: open
    * conversations are closed (tokens revoked; M4b reopens them), the base process is re-spawned and re-checked, and
-   * only then is the new auth state emitted. */
+   * only then is the new auth state emitted. The old processes are dropped and the new base is registered in one
+   * synchronous step, so no open sees an old process, and an open that arrives during the new base's self-check
+   * waits for it (Proc.checked; review fix 3). No unsubscribe is sent: the processes are killed. */
   async #afterSignIn(success: boolean): Promise<void> {
     if (success && this.#state.state === "ready") {
-      for (const t of [...this.#threads.values()]) await this.#unload(t).catch(() => undefined);
+      for (const t of this.#threads.values()) this.#dropGrant(t);
+      this.#threads.clear();
+      this.#byGrant.clear();
       for (const p of [...this.#procs.values()]) this.#close(p);
       this.#procs.clear();
       try {
@@ -294,10 +306,22 @@ export class CodexHost {
   }
 
   async openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
-    if (!binding) return this.#openThread(threadId, null);
-    // Bindings are made one at a time, so the acceptor never sees more than one handshake from us at once (I-3).
-    const run = this.#bindQueue.then(() => this.#openThread(threadId, binding));
-    this.#bindQueue = run.catch(() => undefined);
+    const open = (): Promise<string> => {
+      if (!binding) return this.#openThread(threadId, null);
+      // Bindings are made one at a time, so the acceptor never sees more than one handshake from us at once (I-3).
+      const run = this.#bindQueue.then(() => this.#openThread(threadId, binding));
+      this.#bindQueue = run.catch(() => undefined);
+      return run;
+    };
+    if (threadId === null) return open();
+    // Review fix 1: an unbound open racing a bound one for the same id must not replace its state (and orphan its
+    // live grant), so every open of one id waits for the previous one.
+    const run = (this.#idQueues.get(threadId) ?? Promise.resolve()).then(open);
+    const tail = run.then(() => undefined, () => undefined);
+    this.#idQueues.set(threadId, tail);
+    void tail.then(() => {
+      if (this.#idQueues.get(threadId) === tail) this.#idQueues.delete(threadId);
+    });
     return run;
   }
 
@@ -351,6 +375,13 @@ export class CodexHost {
       const id = str(obj(obj(resp)?.thread)?.id);
       if (!id) throw new SecurityCheckError("app-server returned no thread id");
       t = { threadId: id, proc, rootKey, binding, grant, activeTurn: null, finished: new Set(), needsRebind: false, lastUsed: ++this.#clock };
+      // Defensive (review fix 1): state already held for this id is ended, never silently replaced, so its grant
+      // can never outlive it.
+      const old = this.#threads.get(id);
+      if (old) {
+        this.#dropGrant(old);
+        old.proc.threads.delete(id);
+      }
       this.#threads.set(id, t);
       proc.threads.add(id);
       if (grant) this.#byGrant.set(grant.id, id);
@@ -369,7 +400,7 @@ export class CodexHost {
       // thread/resume itself (no thread loaded, for example an unknown thread id) is passed to the caller instead.
       grant?.revoke();
       if (t) {
-        this.#threads.delete(t.threadId);
+        if (this.#threads.get(t.threadId) === t) this.#threads.delete(t.threadId);
         t.proc.threads.delete(t.threadId);
         if (grant) this.#byGrant.delete(grant.id);
       }
@@ -390,6 +421,8 @@ export class CodexHost {
       await this.openThread(threadId, t.binding); // a fresh grant; the old binding ended
       t = this.#threads.get(threadId);
       if (!t) throw new Error("That conversation is not open.");
+      // Another startTurn may have rebound and started its turn while this one waited (review fix 4).
+      if (t.activeTurn) throw new TurnBusyError();
     }
     t.lastUsed = ++this.#clock;
     t.activeTurn = "pending";
@@ -470,6 +503,7 @@ export class CodexHost {
     const existing = this.#procs.get(key);
     if (existing && !existing.rpc.isClosed) {
       existing.lastUsed = ++this.#clock;
+      await existing.checked; // a process still in its self-check is not used before it passes (review fix 3)
       return existing;
     }
     if (key !== BASE) await this.#evictIfFull();
@@ -496,7 +530,12 @@ export class CodexHost {
         return d.reply;
       },
     });
-    const proc: Proc = { key, rpc, kill: () => s.kill(), threads: new Set(), lastUsed: ++this.#clock, closing: false };
+    let settle: { ok: () => void; fail: (e: unknown) => void } = { ok: () => undefined, fail: () => undefined };
+    const checked = new Promise<void>((ok, fail) => {
+      settle = { ok, fail };
+    });
+    checked.catch(() => undefined); // the spawning caller gets the error itself; waiters get it through `checked`
+    const proc: Proc = { key, rpc, kill: () => s.kill(), threads: new Set(), lastUsed: ++this.#clock, closing: false, checked };
     rpc.onNotification((m, p) => {
       guard.onNotification(m, p);
       this.#onNotification(m, p);
@@ -512,9 +551,11 @@ export class CodexHost {
       this.#addWarnings(check.warnings);
     } catch (e) {
       this.#close(proc);
-      this.#procs.delete(key);
+      if (this.#procs.get(key) === proc) this.#procs.delete(key);
+      settle.fail(e);
       throw e;
     }
+    settle.ok();
     return proc;
   }
 
@@ -655,6 +696,10 @@ export class CodexHost {
         const t = this.#threads.get(threadId);
         if (t) {
           t.finished.add(turnId);
+          for (const old of t.finished) {
+            if (t.finished.size <= MAX_FINISHED) break;
+            t.finished.delete(old); // insertion order: the oldest first
+          }
           if (t.activeTurn === turnId) t.activeTurn = null;
         }
         this.#emit({ type: "turnCompleted", threadId, turnId, status: str(turn?.status) ?? "unknown", error: str(obj(turn?.error)?.message) });
@@ -676,7 +721,13 @@ export class CodexHost {
     this.#procs.clear();
     this.#threads.clear();
     this.#byGrant.clear();
-    const detail = e instanceof Error ? e.message : "Codex failed to start.";
+    // A latched security stop always wins over a later, plainer failure (review fix 2). Other errors never show
+    // their message: it can hold local paths or Codex output (review fix 5).
+    const detail = this.#securityStopped !== null
+      ? `Security check failed: ${this.#securityStopped}`
+      : e instanceof SecurityCheckError
+        ? e.message
+        : `${FAILED} (${e instanceof Error ? e.name : "error"})`;
     this.#set({ state: "failed", detail });
   }
 
