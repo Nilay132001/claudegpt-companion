@@ -45,6 +45,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: xcodebuild -version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install companiond (daemon integration test, bundle staging)
+        working-directory: companiond
+        run: npm ci
+      - name: Point the daemon integration test at this Node
+        run: echo "COMPANION_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - run: swift test
       - name: Build and verify the signed bundle (ad-hoc)
         working-directory: .
