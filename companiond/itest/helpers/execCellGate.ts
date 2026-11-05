@@ -29,8 +29,10 @@ export interface GateResult {
   open: string[];
   cell: Record<string, string> | null;
   /** harness.attempts: every attempt's evidence, earlier ones included. */
-  harness: Record<string, number | boolean | AttemptEvidence[]>;
+  harness: Record<string, number | boolean | AttemptEvidence[] | AttemptShape[]>;
 }
+/** Measurement aid only: event shapes per attempt, never content. */
+export interface AttemptShape { status: string; reply: string; events: Record<string, number> }
 
 /** Children of any codex-code-mode-host that descends from the app-server process (rootPid): a cell that spawned
  * anything shows up here. Other Codex processes on this Mac are not counted. */
@@ -97,17 +99,33 @@ export async function runExecCellGate(s: Session, o: { codexHome: string; attemp
       maxChildren = Math.max(maxChildren, hostChildren(rootPid));
     }, 200).unref();
     // The retry rule lives in gateEval.runAttempts (unit-tested): retry only when the model ran no exec call.
+    // Shapes only (method, item type/name, keys, thread match), never content: the raw-event shape is unmeasured, and
+    // an attempt that found no exec call must show whether the model skipped the cell or the parser missed it.
+    const shapes: AttemptShape[] = [];
     const { last, attempts } = await runAttempts(o.attempts ?? 2, async () => {
       const n0 = s.a.notifications.length;
       const t = await s.turn(prompt);
       for (const x of t.itemTypes) itemTypes.add(x);
       replyText += t.agentText;
+      const events: Record<string, number> = {};
+      for (const n of s.a.notifications.slice(n0)) {
+        const p = n.params ?? {};
+        const it = p.item ?? {};
+        const k = [
+          n.method, `thread:${p.threadId === s.threadId ? "match" : typeof p.threadId}`, `type:${String(it.type ?? "")}`,
+          `name:${String(it.name ?? "").slice(0, 40)}`, `ns:${String(it.namespace ?? "").slice(0, 40)}`,
+          n.method.startsWith("raw") ? `keys:${Object.keys(p).sort().join(",")}/${Object.keys(it).sort().join(",")}` : "",
+        ].join(" ");
+        events[k] = (events[k] ?? 0) + 1;
+      }
+      shapes.push({ status: t.status, reply: t.agentText.split(secret).join("<SECRET>").slice(0, 300), events });
       return judgeAttempt(s.a.notifications.slice(n0), s.threadId, src);
     });
     clearInterval(sampler);
     const open = last ? [...last.open] : ["no attempt ran (inconclusive, not a pass)"];
     const harness = {
       attempts,
+      shapes,
       loopbackHits,
       decoyHits,
       newRefusedConnections: count("refused") + count("socketReplaced") - before.refused,
