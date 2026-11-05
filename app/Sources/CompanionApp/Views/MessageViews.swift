@@ -43,7 +43,6 @@ struct AnswerView: View {
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
             statusRow
-            if !message.isRunning && !message.text.isEmpty { actions }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -56,6 +55,11 @@ struct AnswerView: View {
         .accessibilityAction(named: readAloud.isActive(message.id) ? "Pause or resume reading" : "Read aloud") {
             readAloud.toggle(id: message.id, markdown: message.text)
         }
+        .accessibilityActions {
+            if message.retry != nil && !readOnly {
+                Button("Send again") { Task { await model.sendAgain(message) } }
+            }
+        }
     }
 
     private var accessibilityText: String {
@@ -64,8 +68,9 @@ struct AnswerView: View {
         return "GPT answered: \(ReplyMarkdown.plainText(message.text))"
     }
 
-    private var speaking: Playback? {
-        readAloud.isActive(message.id) ? readAloud.playback : nil
+    /// Read Aloud state of this answer: nil when it is not being read.
+    private var speaking: Bool? {
+        readAloud.isActive(message.id) ? readAloud.isSpeaking(message.id) : nil
     }
 
     private var labelRow: some View {
@@ -78,9 +83,11 @@ struct AnswerView: View {
                 Text(verbatim: at.shortStamp).font(.caption).foregroundStyle(.tertiary)
             }
             Spacer(minLength: 0)
-            if let p = speaking {
-                SpeakingBadge(paused: p == .paused(message.id))
+            if let on = speaking {
+                SpeakingBadge(paused: !on)
             }
+            // Actions share the label row, so they take no height of their own.
+            if !message.isRunning && !message.text.isEmpty { actions }
         }
     }
 

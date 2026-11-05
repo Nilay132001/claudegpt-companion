@@ -13,7 +13,8 @@ struct ContextSentView: View {
     init(record: TurnRecord) {
         self.record = record
         #if DEBUG
-        _expanded = State(initialValue: DemoFlags.is_("context") && record.turnId == "h1")
+        _expanded = State(initialValue: (DemoFlags.is_("context") || DemoFlags.is_("raw")) && record.turnId == "h1")
+        _showRaw = State(initialValue: DemoFlags.is_("raw") && record.turnId == "h1")
         #else
         _expanded = State(initialValue: false)
         #endif
@@ -55,32 +56,30 @@ struct ContextSentView: View {
         VStack(alignment: .leading, spacing: Design.Space.m) {
             ForEach(record.items) { item in ItemRow(item: item) }
             if record.omitted > 0 {
-                Text(verbatim: "\(record.omitted) older item\(record.omitted == 1 ? " was" : "s were") left out by the 12 KB cap.")
+                Text(verbatim: "\(record.omitted) item\(record.omitted == 1 ? " was" : "s were") left out to stay within the size limits.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if showRaw {
-                ScrollView(.horizontal) {
-                    Text(verbatim: record.contextBlock)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: true, vertical: true)
-                        .padding(Design.Space.s)
-                }
-                .frame(maxHeight: 220)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
-            }
-            HStack(spacing: Design.Space.m) {
+            HStack(spacing: Design.Space.s) {
                 Button {
                     Design.copy(record.contextBlock)
                     copied.flash()
                 } label: {
                     Label(copied.on ? "Copied" : "Copy Context", systemImage: copied.on ? "checkmark" : "doc.on.doc")
                 }
-                Button(showRaw ? "Hide Raw Block" : "Show Raw Block") { showRaw.toggle() }
-                    .help("The exact block GPT received, wrapped as untrusted data")
+                .help("Copy the exact block GPT received")
+                Button {
+                    withAnimation(Design.Motion.standard(reduceMotion: reduceMotion)) { showRaw.toggle() }
+                } label: {
+                    Label(showRaw ? "Hide Raw Block" : "Show Raw Block", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .help("The exact block GPT received, wrapped as untrusted data")
             }
-            .buttonStyle(.borderless)
-            .font(.caption)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            if showRaw {
+                CodeBlockView(language: nil, code: record.contextBlock, title: "Raw block sent to GPT", copyHelp: "Copy raw block")
+                    .transition(.opacity)
+            }
         }
         .padding(Design.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -88,10 +87,17 @@ struct ContextSentView: View {
     }
 }
 
-/// One sent item: label, masked count, selectable mono text (6 lines, then "Show more").
+/// One sent item: label, masked count, selectable text (6 lines, then "Show more"). Mono only for code-like kinds.
 private struct ItemRow: View {
     let item: TurnItem
     @State private var full = false
+
+    /// Commands, failure output, edited-file and folder paths are code-like; messages and subagent text are prose.
+    static func isMono(_ kind: String) -> Bool { ["command", "failure", "file_edit", "folder"].contains(kind) }
+
+    private var long: Bool {
+        item.text.split(separator: "\n", omittingEmptySubsequences: false).count > 6 || item.text.count > 420
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -104,13 +110,20 @@ private struct ItemRow: View {
                 }
             }
             Text(verbatim: item.text)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(Self.isMono(item.kind) ? .system(.callout, design: .monospaced) : .body)
+                .foregroundStyle(Self.isMono(item.kind) ? .secondary : .primary)
                 .lineLimit(full ? nil : 6)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            if !full && item.text.split(separator: "\n", omittingEmptySubsequences: false).count > 6 || (!full && item.text.count > 420) {
-                Button("Show More") { full = true }.buttonStyle(.link).font(.caption)
+            if long {
+                Button {
+                    full.toggle()
+                } label: {
+                    Label(full ? "Show Less" : "Show More", systemImage: full ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tint)
             }
         }
         .accessibilityElement(children: .combine)

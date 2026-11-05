@@ -14,7 +14,8 @@ struct StatusLine: View {
 
     var body: some View {
         let items = model.statusItems
-        Group {
+        // Always present, so the sheet and the change handlers survive the list emptying.
+        VStack(spacing: 0) {
             if !items.isEmpty {
                 let i = min(index, items.count - 1)
                 row(items[i], position: i, count: items.count)

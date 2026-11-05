@@ -38,8 +38,8 @@ struct ReplyView: View {
             switch role {
             case .heading(let level): s.font = level <= 2 ? .title3.weight(.semibold) : .headline
             case .quote: s.foregroundColor = .secondary
-            // A short line between blocks: about half a line of body text.
-            case .gap: s.font = .system(size: 7)
+            // A short line between blocks: a caption2 line, relative to Dynamic Type.
+            case .gap: s.font = .caption2
             case .paragraph, .bullet, .numbered: break
             }
         }

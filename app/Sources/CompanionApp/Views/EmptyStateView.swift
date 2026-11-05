@@ -59,7 +59,7 @@ struct EmptyStateView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
-                        .disabled(!model.canAskSuggestion)
+                        .disabled(s.question == nil ? !model.canExplain : !model.canAskSuggestion)
                     }
                 }
             }

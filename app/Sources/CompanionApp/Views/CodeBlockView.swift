@@ -1,17 +1,21 @@
 import CompanionCore
 import SwiftUI
 
-/// A code card: language + Copy header, highlighted selectable body that scrolls sideways.
+/// A code card: language + Copy header, highlighted selectable body. Long lines soft-wrap so nothing is clipped at
+/// sidebar widths; Copy always copies the original text.
 struct CodeBlockView: View {
     let language: String?
     let code: String
+    /// Header text instead of the language (e.g. the raw context block).
+    var title: String? = nil
+    var copyHelp = "Copy code"
     @State private var copied = CopiedFlag()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Design.Space.s) {
-                Text(verbatim: language?.lowercased() ?? "code")
-                    .font(.caption.monospaced())
+                Text(verbatim: title ?? language?.lowercased() ?? "code")
+                    .font(title == nil ? .caption.monospaced() : .caption.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -24,26 +28,24 @@ struct CodeBlockView: View {
                 .buttonStyle(.borderless)
                 .font(.caption)
                 .foregroundStyle(copied.on ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
-                .help("Copy code")
-                .accessibilityLabel(copied.on ? "Copied" : "Copy code")
+                .help(copyHelp)
+                .accessibilityLabel(copied.on ? "Copied" : copyHelp)
             }
             .padding(.horizontal, Design.Space.m)
             .padding(.vertical, 6)
             Divider().opacity(0.6)
-            ScrollView(.horizontal) {
-                Text(Self.highlighted(code, language: language))
-                    .font(.system(.callout, design: .monospaced))
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: true, vertical: true)
-                    .padding(Design.Space.m)
-            }
-            .scrollIndicators(.never)
+            Text(Self.highlighted(code, language: language))
+                .font(.system(.callout, design: .monospaced))
+                .lineSpacing(2)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(Design.Space.m)
         }
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Code block\(language.map { ", \($0)" } ?? "")")
+        .accessibilityLabel(title ?? "Code block\(language.map { ", \($0)" } ?? "")")
     }
 
     static func color(_ t: CodeToken) -> Color? {

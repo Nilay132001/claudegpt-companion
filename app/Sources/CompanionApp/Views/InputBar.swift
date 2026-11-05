@@ -1,3 +1,4 @@
+import AppKit
 import CompanionCore
 import SwiftUI
 
@@ -23,15 +24,17 @@ struct InputBar: View {
                 .focused($focused)
                 .onSubmit { send() }
                 .onKeyPress(.return, phases: .down) { press in
-                    // ⌥Return inserts a newline natively; ⇧Return does the same here.
+                    // ⌥Return inserts a newline natively; ⇧Return asks the field editor for the same thing, so the
+                    // newline goes in at the cursor.
                     guard press.modifiers.contains(.shift) else { return .ignored }
-                    model.draft += "\n"
+                    NSApp.sendAction(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), to: nil, from: nil)
                     return .handled
                 }
                 .accessibilityLabel("Question for GPT")
             HStack(spacing: Design.Space.s) {
                 contextHint
                 Spacer(minLength: Design.Space.xs)
+                if model.privacy?.sharingMode != .off && !model.currentMessages.isEmpty { explainButton } // ruling 20
                 micButton
                 sendButton
             }
@@ -57,6 +60,20 @@ struct InputBar: View {
         .foregroundStyle(.secondary)
         .help("Context: \(mode.title). \(mode.detail)")
         .accessibilityLabel("Context: \(mode.title). \(mode.detail)")
+    }
+
+    /// Kept reachable after the first turn (the empty state's suggestion is gone by then).
+    private var explainButton: some View {
+        Button { Task { await model.explainLastMessage() } } label: {
+            Image(systemName: "text.bubble")
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .disabled(!model.canExplain)
+        .help("Explain Claude's last message")
+        .accessibilityLabel("Explain Claude's last message")
     }
 
     private var micButton: some View {

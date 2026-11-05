@@ -4,7 +4,7 @@ import CompanionCore
 import Foundation
 
 /// DEBUG-only (ruling R6): COMPANION_DEMO=<scene> runs the real views on synthetic data. Nothing leaves the process.
-/// Scenes: empty, chat, context, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status.
+/// Scenes: empty, chat, context, raw, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status.
 enum DemoFlags {
     static let scene: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO"]
     static func is_(_ s: String) -> Bool { scene == s }
@@ -97,23 +97,28 @@ enum DemoFlags {
     }
     func privacyRevoke(root: String) async throws -> RevokeResult { RevokeResult(revoked: true, pendingClose: 0) }
 
+    /// Real item kinds and labels from companiond/src/context/contextBuilder.ts (user, assistant, command,
+    /// failure, file_edit, subagent, folder).
     static let items: [(String, String, String, Int)] = [
         ("user", "Claude user message", "The widget parser drops the last token when the input ends without a newline. Can you fix it?", 0),
-        ("assistant", "Claude reply", "Found it: `tokenize()` only flushes the buffer on \\n. I moved the flush after the loop so the last token is kept.", 0),
+        ("assistant", "Claude reply", "Found it: `tokenize()` only flushes the buffer on a newline. I'll move the flush after the loop so the last token is kept, then run the parser tests.", 0),
+        ("failure", "Failure", "Tests failed in `npm test -- parser` (exit 1): 1 failing: tokenize keeps the last token\nexpected [ 'a', 'b' ] to deeply equal [ 'a', 'b', '' ]\n  at test/parser.test.ts:31:18", 0),
+        ("file_edit", "Claude edited a file", "/Volumes/Work/acme-widgets/src/parser/tokenize.ts", 0),
         ("command", "$ npm test -- parser", "exit 0\n✓ 42 tests passed (parser)\n✓ 3 snapshots", 0),
-        ("tool", "Read src/parser/tokenize.ts", "export function tokenize(input: string): Token[] {\n  const out: Token[] = [];\n  const buf: string[] = [];\n  for (const ch of input) {\n    if (ch === \"\\n\") { flush(buf, out); continue; }\n    buf.push(ch);\n  }\n  flush(buf, out);\n  return out;\n}", 0),
-        ("assistant", "Claude reply", "I also set NPM_TOKEN=•••••• in the test env so the registry mock works.", 1),
-        ("user", "Claude user message", "Great, also check the CSV path.", 0),
+        ("subagent", "Subagent result", "Checked the CSV exporter: it calls tokenize() on each cell, so the fix also stops it dropping the last cell of a row without a trailing newline. I also saw NPM_TOKEN=•••••• in the test env file.", 1),
+        ("folder", "Claude changed folder", "/Volumes/Work/acme-widgets → /Volumes/Work/acme-widgets/packages/csv", 0),
     ]
 
+    static let omittedNote = "2 item(s) left out to stay under 12 KB (kept your messages and Claude's replies first; left out: 2 tool)."
+
     func chatPrepare(sessionId: String, question: String) async throws -> Prepared {
-        let list = Self.items.prefix(4).enumerated().map { i, it in
+        let list = Self.items.prefix(5).enumerated().map { i, it in
             #"{"id":"item-\#(i + 1)","kind":"\#(it.0)","label":\#(Self.quote(it.1)),"text":\#(Self.quote(it.2)),"redactions":\#(it.3)}"#
         }.joined(separator: ",")
         return Self.j("""
         {"prepareId":"p\(turn)","sessionId":"s1","mode":"\(mode)","needsConfirm":\(mode == "ask"),
         "repo":{"state":"bound","root":"\(Self.root)","branch":"fix/parser"},"sessionTitle":"Refactor widget parser",
-        "preview":{"items":[\(list)],"notes":["2 older messages were left out by the 12 KB cap."],"omitted":2,"bytes":1184}}
+        "preview":{"items":[\(list)],"notes":[\(Self.quote(Self.omittedNote))],"omitted":2,"bytes":1184}}
         """)
     }
 
@@ -191,9 +196,14 @@ enum DemoFlags {
 
     // MARK: History
 
-    static func block(_ items: ArraySlice<(String, String, String, Int)>) -> String {
-        "<untrusted_data source=\"claude-session\" session=\"Refactor widget parser\">\n"
-            + items.map { "[\($0.1)]\n\($0.2)" }.joined(separator: "\n\n") + "\n</untrusted_data>"
+    /// The same shape as companiond's composeTurnText block.
+    static func block(_ items: ArraySlice<(String, String, String, Int)>, omitted: Int = 0) -> String {
+        var lines = [#"<untrusted_data source="claude-session">"#, "Claude session: Refactor widget parser",
+                     "Repository: \(root) (branch fix/parser). Read it with the read-only repository tools."]
+        if omitted > 0 { lines.append("Note: " + omittedNote) }
+        for it in items { lines += ["[\(it.1)]", it.2] }
+        lines.append("</untrusted_data>")
+        return lines.joined(separator: "\n")
     }
 
     static func turnItems(_ items: ArraySlice<(String, String, String, Int)>) -> [TurnItem] {
@@ -201,12 +211,12 @@ enum DemoFlags {
     }
 
     var storedTurns: [TurnRecord] {
-        guard !cleared, ["chat", "context", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
+        guard !cleared, ["chat", "context", "raw", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
         let now = Date().timeIntervalSince1970 * 1000
         let all = Self.items[...]
         let t1 = TurnRecord(turnId: "h1", sessionId: "s1", threadId: "th1", sessionTitle: "Refactor widget parser", mode: .ask,
-                            question: "What is Claude working on right now?", contextBlock: Self.block(all) + Self.padding,
-                            items: Self.turnItems(all), answer: Self.answer1, sentAt: now - 26 * 60_000, completedAt: now - 25 * 60_000)
+                            question: "What is Claude working on right now?", contextBlock: Self.block(all, omitted: 2),
+                            items: Self.turnItems(all), omitted: 2, answer: Self.answer1, sentAt: now - 26 * 60_000, completedAt: now - 25 * 60_000)
         let t2 = TurnRecord(turnId: "h2", sessionId: "s1", threadId: "th1", sessionTitle: "Refactor widget parser", mode: .ask,
                             question: "Why does the widget parser drop the last token, and is Claude's fix right?",
                             contextBlock: Self.block(Self.items.prefix(3)), items: Self.turnItems(Self.items.prefix(3)),
@@ -214,8 +224,6 @@ enum DemoFlags {
         return scene == "streaming" ? [t1] : [t1, t2]
     }
 
-    /// Makes the first block about 3 KB, like a real session excerpt.
-    static let padding = "\n" + String(repeating: "(earlier Claude output, redacted and trimmed) ", count: 50)
 
     func historyList() async throws -> HistoryList {
         let now = Date().timeIntervalSince1970 * 1000
@@ -267,28 +275,8 @@ enum DemoFlags {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
             write(to: URL(fileURLWithPath: path))
-            if let tree = ProcessInfo.processInfo.environment["COMPANION_DEMO_TREE"] {
-                var out = ""
-                func walk(_ v: NSView, _ d: Int) {
-                    out += String(repeating: "  ", count: d) + "\(type(of: v)) \(v.frame) hidden=\(v.isHidden) alpha=\(v.alphaValue)\n"
-                    for c in v.subviews { walk(c, d + 1) }
-                }
-                for w in NSApp.windows where w.isVisible { if let v = w.contentView { walk(v, 0) } }
-                try? out.write(toFile: tree, atomically: true, encoding: .utf8)
-            }
             exit(0) // a demo run has nothing to shut down
-
         }
-    }
-
-    private typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
-
-    static func windowImage(_ w: NSWindow) -> CGImage? {
-        guard let h = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW),
-              let sym = dlsym(h, "CGWindowListCreateImage") else { return nil }
-        let f = unsafeBitCast(sym, to: CreateImage.self)
-        // .optionIncludingWindow = 8, .boundsIgnoreFraming = 1, .bestResolution = 8
-        return f(.null, 8, UInt32(w.windowNumber), 1 | 8)?.takeRetainedValue()
     }
 
     static func write(to url: URL) {
@@ -309,20 +297,6 @@ enum DemoFlags {
         for w in windows {
             guard let v = w.contentView?.superview ?? w.contentView else { continue }
             let origin = CGPoint(x: w.frame.minX - union.minX, y: w.frame.minY - union.minY)
-            // The window server's own image of the window (our own windows need no Screen Recording permission).
-            // CGWindowListCreateImage is unavailable to Swift in the macOS 15+ SDK, so it is looked up at run time.
-            if ProcessInfo.processInfo.environment["COMPANION_DEMO_RENDER"] == "cg", let image = windowImage(w) {
-                NSGraphicsContext.current?.cgContext.draw(image, in: CGRect(origin: origin, size: w.frame.size))
-                continue
-            }
-            if ProcessInfo.processInfo.environment["COMPANION_DEMO_RENDER"] == "layer", let layer = v.layer, let ctx = NSGraphicsContext.current?.cgContext {
-                ctx.saveGState()
-                ctx.translateBy(x: origin.x, y: origin.y + w.frame.height)
-                ctx.scaleBy(x: 1, y: -1)
-                layer.render(in: ctx)
-                ctx.restoreGState()
-                continue
-            }
             guard let wr = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { continue }
             v.cacheDisplay(in: v.bounds, to: wr)
             wr.draw(in: CGRect(origin: origin, size: w.frame.size), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)

@@ -34,7 +34,7 @@ struct ChatView: View {
 
     private static var initialAnchor: UnitPoint {
         #if DEBUG
-        if DemoFlags.is_("context") { return .top }
+        if DemoFlags.is_("context") || DemoFlags.is_("raw") { return .top }
         #endif
         return .bottom
     }
@@ -42,7 +42,7 @@ struct ChatView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: Design.Space.xl + 4) {
+                VStack(alignment: .leading, spacing: Design.Space.l + 4) {
                     ForEach(Turn.pair(messages)) { turn in
                         TurnView(turn: turn, readOnly: readOnly)
                             .id(turn.id)
@@ -78,7 +78,6 @@ struct TurnView: View {
                     ContextSentView(record: record)
                 }
                 AnswerView(message: a, readOnly: readOnly)
-                    .padding(.top, Design.Space.xs)
             }
         }
     }
