@@ -13,13 +13,13 @@
 ## Global Constraints
 
 - Everything in M4a's Global Constraints applies (read-only toward repos and Claude data, no API keys, synthetic fixtures, run-time token strings, no `/Users/<name>/` paths, `@types/node` checks, TS rules, branch/commit/PR rules, editor-only file edits).
-- **Raw full transcripts are never sent.** Off sends no transcript; Ask (default) needs the user to confirm a preview; Automatic sends the capped delta (default 12 KB) without asking (spec §7.5).
+- **Raw full transcripts are never sent.** Off sends nothing from Claude's session (not even its title), only the repository line; Ask (default) needs the user to confirm a preview; Automatic sends the capped delta (default 12 KB) without asking (spec §7.5).
 - **Redaction reduces risk; it does not guarantee every secret is removed.** That sentence (`REDACTION_NOTICE`) is what the UI shows. Redaction runs on transcript context (ContextBuilder) and on tool output inside the jail (spec §7.4).
 - **No secrets in the Store.** It holds session → thread ids, cursors (record uuids), approved roots, the pin, sharing mode and UI settings. Folder 0700, `companion.db` 0600, `umask 077` in the daemon (spec §7.8).
 - **stdout of the daemon carries protocol only.** Logs go to stderr, as short codes, never message bodies, transcript text or tokens. No `console.log` in `src/daemon`, `src/chat`, `src/context`, `src/codex`, `src/privacy`, `src/store`.
 - **Production Codex is always sandboxed** (`sandboxed: true`), and stays off while M4a's `CODEX_SEATBELT_MEASURED` is `"stopped"` (§7.1.9: no weaker fallback).
 - **No notarization or signing secrets in the repo.** The signing identity comes from `COMPANION_SIGN_IDENTITY`; the default is ad-hoc (`-`).
-- Branch `feat/m4b-context-daemon`, cut from `main` after M4a has merged.
+- Branch `feat/m4b-context-daemon`. Tasks 1–4 and 8 may land before M4a. Tasks 5–7 and 9 start after M4a merges, and the branch is rebased onto `main` then.
 
 - Test helpers: M2's `test/helpers/fixtures.ts` (`MARK`, `tempDir`, `removeTempDirs`, `fixtureGit(cwd, args[])`, `makeRepo`, `makeWorktree`, `testGitPath`), with `after(removeTempDirs)` in every test file that makes temp dirs. `test/helpers/m4b.ts` holds only M4b's fakes for M3 types.
 - `node --test` gets file paths or quoted globs, never a directory (Node 26 rejects directory args).
@@ -71,6 +71,8 @@ scripts/build-app.sh
 **Interfaces:**
 - Consumes: M2 `type Redact = (text: string) => string` and `redactToolOutput: Redact` in `src/jail/redact.ts` (identity in M2). `redactor.ts` itself is pure with no imports — it runs inside the jail, and M2's no-writes scan covers `src/jail/` automatically.
 - Produces: `interface RedactResult { text: string; count: number }`, `redact(input: string): RedactResult`, `redactText(input: string): string`, `REDACTION_NOTICE`; and M2's `redactToolOutput` now equals `redactText`.
+- Every pattern is linear-time (the jail feeds it up to 256 KB of untrusted repo text per tool call): a pattern whose run can fail after a long scan starts only where a character run starts (lookbehind), and other quantifiers are bounded or have nothing after them to backtrack into.
+- The `value` rule masks literals only: a quoted string, or an unquoted value that is not code. `password: string`, `const token = getToken()` and `apiKey: process.env.API_KEY` stay as they are, because GPT reads code through the jail.
 
 - [ ] **Step 1: Write the failing test** — `companiond/test/jail/redactor.test.ts`:
 
@@ -79,6 +81,7 @@ scripts/build-app.sh
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { redact, redactText, REDACTION_NOTICE } from "../../src/jail/redactor.ts";
 
@@ -107,12 +110,36 @@ test("common token shapes are masked by kind", () => {
   }
 });
 
-test("key = value pairs, JSON fields, bearer tokens and URL credentials", () => {
+test("key = value pairs, JSON fields, bearer/basic auth and URL credentials", () => {
   assert.equal(redactText(j("DB_PASS", "WORD=", "hunter2-synthetic")), "DB_PASSWORD=[REDACTED:value]");
   assert.equal(redactText(j('{"client_', 'secret": "', "abc123-synthetic", '"}')), '{"client_secret": "[REDACTED:value]"}');
+  assert.equal(redactText(j("pass", 'word: "', "hunter2-synthetic", '"')), 'password: "[REDACTED:value]"');
   assert.equal(redactText(j("api", "_key: ", "abcd-synthetic")), "api_key: [REDACTED:value]");
   assert.equal(redactText(j("Bearer ", random(24, 8))), "Bearer [REDACTED:bearer]");
+  assert.equal(redactText(j("authorization: bearer ", random(24, 12))), "authorization: bearer [REDACTED:bearer]");
+  assert.equal(redactText(j("Authorization: Basic ", "c3ludGhldGljOnN5bnRoZXRpYw==")), "Authorization: Basic [REDACTED:basic-auth]");
+  assert.equal(redactText(j("authorization: basic ", "c3ludGhldGljOnN5bnRoZXRpYw==")), "authorization: basic [REDACTED:basic-auth]");
+  // Letter-only values are still secrets in config: tight KEY=value, and UPPER_SNAKE keys with ":".
+  assert.equal(redactText(j("DB_PASS", "WORD=", "supersecretvalue")), "DB_PASSWORD=[REDACTED:value]");
+  assert.equal(redactText(j("export OPENAI_API", "_KEY=", "abcdefghijklmnop")), "export OPENAI_API_KEY=[REDACTED:value]");
+  assert.equal(redactText(j("POSTGRES_PASS", "WORD: ", "changeme")), "POSTGRES_PASSWORD: [REDACTED:value]");
   assert.equal(redactText(j("postgres://app:", "s3cret-synthetic", "@db.internal:5432/x")), "postgres://[REDACTED:credentials]@db.internal:5432/x");
+  // An earlier rule masking the user part must not leave the password in clear.
+  assert.equal(redactText(j("https://", "sk", "-proj-", random(30, 13), ":", "pw-synthetic", "@host/x")), "https://[REDACTED:credentials]@host/x");
+});
+
+test("code that names a secret is not a secret", () => {
+  const code = [
+    "password: string;",
+    "const token = getToken();",
+    "apiKey: process.env.API_KEY,",
+    "secretName: z.string().min(1),",
+    "if (token === undefined) return;",
+    "const onToken = (token) => token;",
+    "API_KEY: process.env.API_KEY,",
+    "token=getToken();",
+  ];
+  for (const s of code) assert.equal(redactText(s), s, s);
 });
 
 test("long high-entropy strings are masked; ordinary text is not", () => {
@@ -127,23 +154,42 @@ test("long high-entropy strings are masked; ordinary text is not", () => {
 });
 
 test("redaction is idempotent", () => {
-  const once = redact(SHAPES.map(([, s]) => s).join("\n") + "\n" + j("TOKEN=", "abcd-synthetic"));
+  const once = redact(SHAPES.map(([, s]) => s).join("\n") + "\n" + j("TOKEN=", "abcd-synthetic") + "\n" + j("pass", 'word: "', "hunter2-synthetic", '"'));
   const twice = redact(once.text);
   assert.equal(twice.text, once.text);
   assert.equal(twice.count, 0);
+});
+
+test("adversarial input stays linear (256 KB in well under a second)", () => {
+  for (const s of ["a-".repeat(131072), "x.".repeat(131072), "eyJ-".repeat(65536), "a=".repeat(131072), "ab://".repeat(52429)]) {
+    const t0 = performance.now();
+    redact(s);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 500, `${s.slice(0, 4)}…: ${Math.round(ms)} ms`);
+  }
 });
 
 test("the notice says redaction is not a guarantee", () => {
   assert.match(REDACTION_NOTICE, /does not guarantee/);
 });
 
-test("the jail's injection point is the redactor", async () => {
+test("the jail's injection point is the redactor, and every jail context uses it", async () => {
   const { redactToolOutput } = await import("../../src/jail/redact.ts");
   const token = j("gh", "p_", random(36, 11));
   assert.equal(redactToolOutput(`x ${token}`), "x [REDACTED:github-token]");
-  const main = fs.readFileSync(fileURLToPath(new URL("../../src/jail/main.ts", import.meta.url)), "utf8");
-  assert.match(main, /import \{ redactToolOutput \} from "\.\/redact\.ts";/); // M2: main.ts takes it only from redact.ts
-  assert.doesNotMatch(main, /redact: \(s\) => s/);
+  // Every `redact:` value set in src/jail/ (a JailContext) must be redactToolOutput, so no other jail
+  // entry (for example one that companiond's relay starts) can pass an identity redactor.
+  const dir = fileURLToPath(new URL("../../src/jail/", import.meta.url));
+  let assigned = 0;
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    for (const m of src.matchAll(/\bredact:\s*([^,;}\n]+?)\s*[,}]/g)) {
+      assert.equal(m[1], "redactToolOutput", `${f}: redact: ${m[1]}`);
+      assigned++;
+    }
+    assert.doesNotMatch(src, /[{,]\s*redact\s*[,}]/, `${f}: shorthand redact property`);
+  }
+  assert.ok(assigned >= 1, "main.ts sets redact: redactToolOutput");
 });
 ```
 
@@ -157,19 +203,48 @@ Expected: FAIL — module not found.
 ```ts
 // Best-effort secret masking (spec §7.4). It reduces risk; it never guarantees every secret is gone.
 // Pure, no imports: it runs inside the jailed MCP server and in ContextBuilder.
+// Every pattern is linear-time: bounded or non-overlapping quantifiers only, because the jail feeds it
+// up to 256 KB of untrusted repo text per tool call.
 
 export interface RedactResult { text: string; count: number }
 
+// Known limit: M3's parser trims transcript text and tool output (TEXT_MAX, TOOL_OUTPUT_MAX) before this
+// runs, so a secret cut at that boundary can reach the context partly visible. ContextBuilder itself
+// redacts before it clips.
 export const REDACTION_NOTICE = "Redaction reduces risk; it does not guarantee every secret is removed.";
 
 const mark = (kind: string) => `[REDACTED:${kind}]`;
 const isMarked = (s: string) => s.includes("[REDACTED:");
+const WHOLE_MARK = /^\[REDACTED:[a-z-]+\]$/;
 
-interface Rule { kind: string; re: RegExp; replace?: (match: string, groups: Array<string | undefined>) => string }
+/** `after` is the character right after the match ("" at the end of the input). */
+interface Rule { kind: string; re: RegExp; replace?: (match: string, groups: Array<string | undefined>, after: string) => string }
+
+const KEY_WORD = /password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth/i;
+/** An identifier or member path with no digit (`string`, `process.env.API_KEY`): code, not a literal. */
+const CODE_REF = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
+
+function maskValue(m: string, g: Array<string | undefined>, after: string): string {
+  const [key = "", quote = "", sep = "", dq, sq, bare] = g;
+  if (!KEY_WORD.test(key)) return m;
+  if (dq !== undefined || sq !== undefined) {
+    const v = dq ?? sq ?? "";
+    const q = dq !== undefined ? '"' : "'";
+    return isMarked(v) ? m : `${key}${quote}${sep}${q}${mark("value")}${q}`;
+  }
+  const v = bare ?? "";
+  // A call (`getToken()`) or a member path (`process.env.API_KEY`) is code. A tight `KEY=value` or an
+  // UPPER_SNAKE key (env files, YAML) is config: mask it even if the value is letters only. Otherwise a
+  // bare identifier with no digit (`password: string`) is code.
+  if (isMarked(v) || after === "(" || (CODE_REF.test(v) && v.includes(".") && !/[0-9]/.test(v))) return m;
+  const config = sep === "=" || /^[A-Z][A-Z0-9_]*$/.test(key);
+  if (!config && CODE_REF.test(v) && !/[0-9]/.test(v)) return m;
+  return `${key}${quote}${sep}${mark("value")}`;
+}
 
 const RULES: Rule[] = [
-  { kind: "private-key", re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g },
-  { kind: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  { kind: "private-key", re: /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|$)/g },
+  { kind: "jwt", re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
   { kind: "aws-key-id", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/g },
   { kind: "github-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})/g },
   { kind: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
@@ -180,15 +255,25 @@ const RULES: Rule[] = [
   { kind: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}/g },
   { kind: "google-oauth", re: /\bya29\.[0-9A-Za-z_-]{20,}/g },
   {
+    // user and password are captured apart, so a user an earlier rule masked does not shield the password.
     kind: "url-credentials",
-    re: /\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]+:[^\s@/]+@/gi,
-    replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("credentials")}@`),
+    re: /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s:@/]{1,256}):([^\s@/]{1,256})@/gi,
+    replace: (m, g) => {
+      const [scheme = "", user = "", pass = ""] = g;
+      if (WHOLE_MARK.test(`${user}:${pass}`) || WHOLE_MARK.test(pass)) return m;
+      return `${scheme}${mark("credentials")}@`;
+    },
   },
-  { kind: "bearer", re: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/g, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("bearer")}`) },
+  { kind: "bearer", re: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("bearer")}`) },
+  { kind: "basic-auth", re: /\b(Basic\s+)[A-Za-z0-9+/]{16,}={0,2}/gi, replace: (m, g) => (isMarked(m) ? m : `${g[0] ?? ""}${mark("basic-auth")}`) },
   {
+    // KEY=value, key: value, "key": "value". Only literals: a quoted string, or an unquoted value that is
+    // not code (no call, no member access; a bare identifier such as a type name counts as code unless
+    // the pair is a tight KEY=value or has an UPPER_SNAKE key).
+    // The key starts only where a key-character run starts, so a long run is scanned once.
     kind: "value",
-    re: /\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(["']?)([^\s"',;]{4,})\2/gi,
-    replace: (m, g) => (isMarked(g[2] ?? "") ? m : `${g[0] ?? ""}${g[1] ?? ""}${mark("value")}${g[1] ?? ""}`),
+    re: /(?<![\w.$-])([A-Za-z_][\w.-]{0,63})(["']?)(\s*(?::|=(?![=>]))\s*)(?:"([^"\\\n]{4,1024})"|'([^'\\\n]{4,1024})'|([^\s"'`,;(){}[\]<>]{4,}))/g,
+    replace: maskValue,
   },
 ];
 
@@ -217,8 +302,11 @@ export function redact(input: string): RedactResult {
   let text = input;
   for (const rule of RULES) {
     text = text.replace(rule.re, (match: string, ...rest: unknown[]) => {
+      const source = rest.at(-1) as string;
+      const offset = rest.at(-2) as number;
       const groups = rest.slice(0, -2) as Array<string | undefined>;
-      const out = rule.replace ? rule.replace(match, groups) : isMarked(match) ? match : mark(rule.kind);
+      const after = source.charAt(offset + match.length);
+      const out = rule.replace ? rule.replace(match, groups, after) : isMarked(match) ? match : mark(rule.kind);
       if (out !== match) count++;
       return out;
     });
@@ -236,24 +324,27 @@ export function redactText(input: string): string {
 }
 ```
 
-Then plug it into M2's injection point. In `companiond/src/jail/redact.ts` replace the identity
+Known gap, kept on purpose: an unnamed base64 secret that contains `/` (for example a bare AWS secret access key) is not caught by the entropy pass, because `CANDIDATE` excludes `/` so that ordinary paths are never masked. A named one (`aws_secret_access_key = …`) is caught by the `value` rule.
+
+Then plug it into M2's injection point. Replace the whole of `companiond/src/jail/redact.ts` (M2's identity and its header comment) with:
 
 ```ts
-export const redactToolOutput: Redact = (text) => text;
-```
+// Tool-output redaction hook (spec §7.4). Tool output goes from this server to Codex (directly or
+// through companiond's relay), so redaction has to happen here, inside the jail. M4 plugs in the
+// Redactor and keeps it in src/jail/, so the no-writes scan covers it.
+import { redactText } from "./redactor.ts";
 
-with
+export type Redact = (text: string) => string;
 
-```ts
 export const redactToolOutput: Redact = redactText;
 ```
 
-and add `import { redactText } from "./redactor.ts";` at the top of that file. `main.ts` already passes `redactToolOutput` into the jail context (M2 Task 7), so it is not edited. Every tool's output now goes through the redactor before it leaves the jail.
+`main.ts` already passes `redactToolOutput` into the jail context (M2 Task 7), so it is not edited. Every tool's output now goes through the redactor before it leaves the jail.
 
 - [ ] **Step 4: Run tests and type-check**
 
-Run: `cd companiond && node --test test/jail/redactor.test.ts test/jail/noWrites.test.ts test/jail/mcpServer.test.ts && npm run typecheck`
-Expected: PASS (the no-writes scan now also covers `redactor.ts`).
+Run: `cd companiond && node --test test/jail/redactor.test.ts test/jail/noWrites.test.ts test/jail/mcpServer.test.ts test/jail/tools.test.ts test/launch/jailedServer.test.ts && npm run typecheck`
+Expected: PASS (the no-writes scan now also covers `redactor.ts`; `tools.test.ts` and `jailedServer.test.ts` now run tool output through the real redactor via `main.ts`).
 
 - [ ] **Step 5: Commit**
 
@@ -267,7 +358,7 @@ git commit -m "feat(jail): add the best-effort redactor and apply it to tool out
 
 ### Task 2: Store (`node:sqlite`)
 
-`node:sqlite` is in Node ≥ 22.5 with no flag; `@types/node` 24.19 marks the module `@experimental` (it prints an ExperimentalWarning on first use). Verified in `node_modules/@types/node/sqlite.d.ts`: `new DatabaseSync(path, { enableForeignKeyConstraints })`, `exec(sql)`, `prepare(sql).run/get/all(...anonymousParameters)`, `close()`. Chosen over a dependency because the data is tiny and the repo adds no npm packages beyond the pinned Codex; if the API changes, only this file changes.
+`node:sqlite` is in Node ≥ 22.5 with no flag; `@types/node` 24.19 marks the module `@experimental`. Node 24 (CI) may print an ExperimentalWarning on first use; Node 26.7 prints none. Because the daemon's stderr carries short codes only, Task 7 starts the daemon with `--disable-warning=ExperimentalWarning`. Verified in `node_modules/@types/node/sqlite.d.ts`: `new DatabaseSync(path, { enableForeignKeyConstraints })`, `exec(sql)`, `prepare(sql).run/get/all(...anonymousParameters)`, `close()`. Chosen over a dependency because the data is tiny and the repo adds no npm packages beyond the pinned Codex; if the API changes, only this file changes.
 
 **Files:**
 - Create: `companiond/src/store/store.ts`
@@ -279,6 +370,8 @@ git commit -m "feat(jail): add the best-effort redactor and apply it to tool out
   - `interface ApprovedRoot { root: string; commonDir: string; includeWorktrees: boolean; approvedAt: number }`
   - `SCHEMA_VERSION = 1`, `class StoreError extends Error`
   - `class Store { static open(file, now?): Store; static memory(now?): Store; close(); getThread(sessionId): string | null; setThread(sessionId, threadId); sessionForThread(threadId): string | null; getCursor(sessionId): string | null; setCursor(sessionId, uuid); clearCursor(sessionId); listApprovals(): ApprovedRoot[]; putApproval(a); deleteApproval(root): boolean; getPin(): string | null; setPin(sessionId | null); getSharingMode(): SharingMode; setSharingMode(m); getUiSetting(key): string | null; setUiSetting(key, value) }`
+- Consumes: `redact` (Task 1), so a UI setting cannot hold a secret-shaped value.
+- `Store.open` checks the folder itself: it must be a real directory, mode 0700, owned by the current uid (M4a's `ensureAppDirs` creates it so; Task 7's wiring relies on that). A symlink or non-file at the DB path is refused (`O_NOFOLLOW`), and an existing file is tightened to 0600 through its descriptor.
 
 - [ ] **Step 1: Write the failing test** — `companiond/test/store/store.test.ts`:
 
@@ -292,6 +385,8 @@ import { Store, StoreError } from "../../src/store/store.ts";
 import { removeTempDirs, tempDir } from "../helpers/fixtures.ts";
 
 after(removeTempDirs);
+
+const j = (...p: string[]) => p.join("");
 
 test("threads, reverse lookup and cursors round-trip", () => {
   const s = Store.memory(() => 5);
@@ -328,6 +423,15 @@ test("approvals, pin, sharing mode and UI settings", () => {
   assert.throws(() => s.setUiSetting("ui.big", "x".repeat(5000)), StoreError);
 });
 
+test("UI settings refuse credential keys and secret-shaped values", () => {
+  const s = Store.memory();
+  for (const key of ["ui.openai_api_key", "ui.github.token", "ui.auth_header", "ui.password"]) {
+    assert.throws(() => s.setUiSetting(key, "x"), StoreError, key);
+  }
+  assert.throws(() => s.setUiSetting("ui.note", j("sk", "-proj-", "SYNTHETICsynthetic0123456789")), StoreError);
+  assert.equal(s.getUiSetting("ui.note"), null);
+});
+
 test("the file is 0600, persists, and refuses a newer schema", () => {
   const file = path.join(tempDir(), "companion.db");
   const a = Store.open(file);
@@ -341,6 +445,31 @@ test("the file is 0600, persists, and refuses a newer schema", () => {
   raw.exec("PRAGMA user_version = 99");
   raw.close();
   assert.throws(() => Store.open(file), StoreError);
+});
+
+test("a pre-existing 0644 file is tightened to 0600", () => {
+  const file = path.join(tempDir(), "companion.db");
+  fs.writeFileSync(file, "", { mode: 0o644 });
+  fs.chmodSync(file, 0o644);
+  Store.open(file).close();
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test("a symlink at the DB path, a non-file, and a folder that is not 0700 are refused", () => {
+  const dir = tempDir();
+  const target = path.join(tempDir(), "elsewhere.db");
+  fs.writeFileSync(target, "", { mode: 0o644 });
+  fs.chmodSync(target, 0o644);
+  fs.symlinkSync(target, path.join(dir, "companion.db"));
+  assert.throws(() => Store.open(path.join(dir, "companion.db")), StoreError);
+  assert.equal(fs.statSync(target).mode & 0o777, 0o644); // the link target is untouched
+  const d2 = tempDir();
+  fs.mkdirSync(path.join(d2, "companion.db"));
+  assert.throws(() => Store.open(path.join(d2, "companion.db")), StoreError);
+  const open = tempDir();
+  fs.chmodSync(open, 0o755);
+  assert.throws(() => Store.open(path.join(open, "companion.db")), StoreError);
+  assert.equal(fs.existsSync(path.join(open, "companion.db")), false);
 });
 
 test("no column is meant for secrets", () => {
@@ -364,7 +493,9 @@ Expected: FAIL — module not found.
 // companion.db (spec §3, §7.8): session → Codex thread, cursors, approved roots, pin, sharing mode, UI settings.
 // Holds no secrets. node:sqlite is @experimental in @types/node 24; this file is the only user.
 import fs from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { redact } from "../jail/redactor.ts";
 
 export type SharingMode = "off" | "ask" | "automatic";
 export const SHARING_MODES: readonly SharingMode[] = ["off", "ask", "automatic"];
@@ -386,9 +517,25 @@ CREATE TABLE IF NOT EXISTS approvals (root TEXT PRIMARY KEY, common_dir TEXT NOT
 CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
 `;
 const UI_KEY = /^ui\.[a-z0-9_.]{1,64}$/;
+/** UI settings never hold credentials (spec §7.8): refuse secret-sounding keys and secret-shaped values. */
+const SECRET_KEY = /token|secret|password|passwd|api[_-]?key|auth|credential/i;
 const MAX_SETTING = 4096;
 
 type Row = Record<string, unknown>;
+
+/** The folder must be a real directory, 0700 and ours (M4a's ensureAppDirs makes it so; spec §7.8). */
+function checkFolder(dir: string): void {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(dir);
+  } catch {
+    throw new StoreError("The companion data folder is missing.");
+  }
+  const uid = process.getuid?.();
+  if (!st.isDirectory() || (st.mode & 0o777) !== 0o700 || (uid !== undefined && st.uid !== uid)) {
+    throw new StoreError("The companion data folder must be a 0700 folder owned by you.");
+  }
+}
 
 export class Store {
   #db: DatabaseSync;
@@ -408,8 +555,20 @@ export class Store {
   }
 
   static open(file: string, now?: () => number): Store {
-    fs.closeSync(fs.openSync(file, "a", 0o600));
-    fs.chmodSync(file, 0o600);
+    checkFolder(path.dirname(file));
+    // O_NOFOLLOW: a symlink at the DB path is refused instead of followed (and chmod-ed).
+    let fd: number;
+    try {
+      fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+    } catch {
+      throw new StoreError("companion.db is not a regular file.");
+    }
+    try {
+      if (!fs.fstatSync(fd).isFile()) throw new StoreError("companion.db is not a regular file.");
+      fs.fchmodSync(fd, 0o600); // tightens a pre-existing file too
+    } finally {
+      fs.closeSync(fd);
+    }
     const db = new DatabaseSync(file, { enableForeignKeyConstraints: true });
     db.exec("PRAGMA journal_mode = DELETE");
     return new Store(db, now);
@@ -499,7 +658,9 @@ export class Store {
 
   setUiSetting(key: string, value: string): void {
     if (!UI_KEY.test(key)) throw new StoreError("UI setting keys look like ui.<name>.");
+    if (SECRET_KEY.test(key)) throw new StoreError("UI settings cannot hold credentials.");
     if (value.length > MAX_SETTING) throw new StoreError("UI setting value is too long.");
+    if (redact(value).count > 0) throw new StoreError("UI settings cannot hold credentials.");
     this.#set(key, value);
   }
 
@@ -517,7 +678,7 @@ export class Store {
 - [ ] **Step 4: Run tests and type-check**
 
 Run: `cd companiond && node --test test/store/store.test.ts && npm run typecheck`
-Expected: PASS (an ExperimentalWarning for SQLite on stderr is expected).
+Expected: PASS (on Node 24 an ExperimentalWarning for SQLite may appear on stderr; Node 26.7 prints none).
 
 - [ ] **Step 5: Commit**
 
@@ -580,6 +741,34 @@ test("exact match only; worktrees only by common dir when asked", async () => {
   assert.equal(p.isApproved(makeRepo(), "/elsewhere/.git"), false);
   assert.equal(p.revoke(main), true);
   assert.equal(p.isApproved(main, a.commonDir), false);
+});
+
+test("approving a linked worktree with its worktrees covers the main checkout; a symlink stores the real path", async () => {
+  const main = makeRepo();
+  const wt = makeWorktree(main, "feature-b");
+  const p = new Privacy(Store.memory(), safeGitInspector(testGitPath()), tempDir(), () => 1);
+  const a = await p.approve(wt, true);
+  assert.equal(a.root, wt);
+  assert.equal(p.isApproved(wt, a.commonDir), true);
+  assert.equal(p.isApproved(main, a.commonDir), true);
+  const link = path.join(tempDir(), "link-to-repo");
+  fs.symlinkSync(main, link);
+  const b = await p.approve(link, false);
+  assert.equal(b.root, main);
+  assert.ok(p.approvals().some((x) => x.root === main));
+  assert.ok(!p.approvals().some((x) => x.root === link));
+});
+
+test("a worktree at home, / or above home is not approved through its common dir", async () => {
+  const home = tempDir();
+  const repo = tempDir();
+  const common = `${repo}/.git`;
+  const p = new Privacy(Store.memory(), fakeInspector({ [repo]: { toplevel: repo, gitDir: common, commonDir: common } }), home);
+  await p.approve(repo, true);
+  assert.equal(p.isApproved(repo, common), true);
+  assert.equal(p.isApproved(home, common), false);
+  assert.equal(p.isApproved(path.dirname(home), common), false);
+  assert.equal(p.isApproved("/", common), false);
 });
 
 test("home, /, folders above home, relative and missing paths are refused", async () => {
@@ -680,6 +869,7 @@ export class Privacy {
   readonly isApproved: IsApproved = (root, gitCommonDir) => {
     const r = real(root) ?? root;
     const c = real(gitCommonDir) ?? gitCommonDir;
+    if (this.#homeOrRoot(r)) return false; // a worktree at $HOME, / or above $HOME is never approved
     return this.#cache.some((a) => a.root === r || (a.includeWorktrees && a.commonDir === c));
   };
 
@@ -691,7 +881,7 @@ export class Privacy {
     if (!path.isAbsolute(dir)) throw new ApprovalRefusedError("not_absolute", "Choose a full folder path.");
     const r = real(dir);
     if (!r) throw new ApprovalRefusedError("missing", "That folder does not exist.");
-    if (r === "/" || r === this.#home || this.#home.startsWith(r.endsWith("/") ? r : `${r}/`)) {
+    if (this.#homeOrRoot(r)) {
       throw new ApprovalRefusedError("home_or_root", "Your home folder, / and folders that contain your home folder cannot be approved.");
     }
     let dirs: RepoDirs;
@@ -711,6 +901,11 @@ export class Privacy {
     const removed = this.#store.deleteApproval(real(root) ?? root);
     this.#cache = this.#store.listApprovals();
     return removed;
+  }
+
+  /** `/`, $HOME, or a folder that contains $HOME (spec §7.5, Spec change 4). `r` is a real path. */
+  #homeOrRoot(r: string): boolean {
+    return r === "/" || r === this.#home || this.#home.startsWith(r.endsWith("/") ? r : `${r}/`);
   }
 
   sharingMode(): SharingMode {
@@ -753,6 +948,11 @@ git commit -m "feat(privacy): approve exact roots and worktrees by common dir" -
   - `interface ContextPreview { items: PreviewItem[]; notes: string[]; omitted: number; bytes: number; cursorAfter: string | null; subagents: SubagentUpdate[] }`
   - `interface RepoLine { state: "bound" | "unavailable" | "none"; root: string | null; branch: string | null; detail: string | null }`
   - `CURSOR_RESET_NOTE`, `eventsSince(events, cursor)`, `formatFailure(f, command, exitCode)`, `buildPreview(input)`, `escapeData(s)`, `composeTurnText(input): { text: string; contextBlock: string }`, `class SubagentTracker { update(u); pending(): SubagentUpdate[]; markSent(list) }`
+- Rules this task pins with tests:
+  - Each field is redacted whole, then clipped; a clip never splits a `[REDACTED:…]` marker.
+  - `totalBytes` caps the context block as sent (after `<`/`&` escaping, header lines included): `buildPreview` reserves a fixed share for the header, and `composeTurnText` fits each header line into its share. `preview.bytes` is the escaped size of the notes and items.
+  - With `preview: null` (sharing Off) the block holds only the repository line: no session title and no repository note (spec §7.5 "nothing from Claude's transcript is sent"). ChatService (Task 5) needs no change for this.
+  - A failed Bash result with no stdout/stderr fields takes its output from the result text (M3 `parser.ts` puts it there, after an `Exit code N` line).
 
 - [ ] **Step 1: Test helpers** — `companiond/test/helpers/m4b.ts`:
 
@@ -767,10 +967,11 @@ const base = (uuid: string | null = `u-${++n}`) => ({ uuid, timestamp: null, isS
 
 export const userText = (text: string, uuid?: string | null): TranscriptEvent => ({ ...base(uuid), kind: "user_text", text });
 export const assistantText = (text: string, uuid?: string | null): TranscriptEvent => ({ ...base(uuid), kind: "assistant_text", text });
-export function bash(command: string, o: { stdout?: string; stderr?: string; exitCode?: number; failure?: { kind: "test_failure" | "build_failure" | "command_failed"; summary: string } } = {}): TranscriptEvent {
+/** `text` alone (no stdout/stderr) is the shape M3's parser gives when toolUseResult has no stdout/stderr. */
+export function bash(command: string, o: { stdout?: string; stderr?: string; text?: string; exitCode?: number; failure?: { kind: "test_failure" | "build_failure" | "command_failed"; summary: string } } = {}): TranscriptEvent {
   return {
     ...base(), kind: "tool_result", toolUseId: `t-${n}`, toolName: "Bash", command, isError: (o.exitCode ?? 0) !== 0,
-    stdout: o.stdout ?? "", stderr: o.stderr ?? "", exitCode: o.exitCode ?? 0, interrupted: false, text: "", failure: o.failure ?? null,
+    stdout: o.stdout ?? "", stderr: o.stderr ?? "", exitCode: o.exitCode ?? 0, interrupted: false, text: o.text ?? "", failure: o.failure ?? null,
   };
 }
 export const readResult = (): TranscriptEvent => ({
@@ -802,6 +1003,7 @@ import {
 import { assistantText, bash, fileEdit, readResult, userText } from "../helpers/m4b.ts";
 
 const bound: RepoLine = { state: "bound", root: "/r", branch: "main", detail: null };
+const ghToken = () => ["gh", "p_", "a1B2c3D4e5F6g7H8i9J0".repeat(2)].join("");
 
 test("eventsSince: whole window without a cursor, after it when found, whole window when gone", () => {
   const ev = [userText("a", "u1"), userText("b", "u2"), userText("c", "u3")];
@@ -832,6 +1034,18 @@ test("events become labelled items; reads, tool calls and sidechains are left ou
   assert.equal(p.omitted, 0);
 });
 
+test("a failed command with no stdout/stderr fields keeps its output from the result text", () => {
+  const p = buildPreview({
+    events: [
+      bash("npm test", { exitCode: 1, text: "Exit code 1\nSYNTHETIC FIXTURE 2 tests failed", failure: { kind: "test_failure", summary: "2 failed" } }),
+      bash("make lint", { exitCode: 2, text: "Exit code 2\nSYNTHETIC FIXTURE lint error" }),
+    ],
+    hadCursor: false, cursorFound: false,
+  });
+  assert.equal(p.items[0]?.text, "Tests failed in `npm test` (exit 1): 2 failed\nSYNTHETIC FIXTURE 2 tests failed");
+  assert.equal(p.items[1]?.text, "exit 2\nSYNTHETIC FIXTURE lint error");
+});
+
 test("the newest items win under the byte cap; the rest are counted", () => {
   const ev = Array.from({ length: 30 }, (_, i) => userText(`${i} `.padEnd(1500, "x"), `u${i}`));
   const p = buildPreview({ events: ev, hadCursor: true, cursorFound: true });
@@ -839,10 +1053,23 @@ test("the newest items win under the byte cap; the rest are counted", () => {
   assert.ok(p.items.length < 30);
   assert.equal(p.omitted, 30 - p.items.length);
   assert.match(p.items.at(-1)?.text ?? "", /^29 /);
-  assert.match(p.notes.join(), /older item\(s\) left out/);
+  assert.match(p.notes.join(), /older item\(s\) left out to stay under 12 KB/);
   assert.equal(p.cursorAfter, "u29");
   const few = buildPreview({ events: ev, hadCursor: false, cursorFound: false, caps: { ...DEFAULT_CAPS, maxItems: 2 } });
   assert.equal(few.items.length, 2);
+  assert.match(few.notes.join(), /28 older item\(s\) left out \(2-item limit\)/);
+});
+
+test("the cap holds for the block as sent, after escaping", () => {
+  const ev = Array.from({ length: 30 }, (_, i) => userText("<&".repeat(1000), `u${i}`));
+  const p = buildPreview({ events: ev, hadCursor: true, cursorFound: false });
+  const { contextBlock } = composeTurnText({
+    sessionTitle: "<&".repeat(500), repo: { state: "bound", root: `/r/${"<&".repeat(400)}`, branch: "main", detail: null },
+    repoNote: "&".repeat(400), preview: p, removeIds: new Set(), question: "Q",
+  });
+  assert.ok(p.items.length >= 1);
+  assert.ok(p.bytes <= DEFAULT_CAPS.totalBytes);
+  assert.ok(Buffer.byteLength(contextBlock, "utf8") <= DEFAULT_CAPS.totalBytes, `${Buffer.byteLength(contextBlock, "utf8")} bytes`);
 });
 
 test("a lost cursor adds the reset line (spec §6.4)", () => {
@@ -854,10 +1081,27 @@ test("cursorAfter is the newest uuid even when the newest event has none", () =>
 });
 
 test("items are redacted and counted", () => {
-  const token = ["gh", "p_", "a1B2c3D4e5F6g7H8i9J0".repeat(2)].join("");
-  const p = buildPreview({ events: [userText(`use ${token} please`)], hadCursor: false, cursorFound: false });
+  const p = buildPreview({ events: [userText(`use ${ghToken()} please`)], hadCursor: false, cursorFound: false });
   assert.equal(p.items[0]?.text, "use [REDACTED:github-token] please");
   assert.equal(p.items[0]?.redactions, 1);
+});
+
+test("redaction runs before clipping, so a secret across a cut does not leak", () => {
+  const token = ghToken();
+  for (const pad of [1985, 1990, 1995, 1998]) {
+    const p = buildPreview({ events: [userText(`${"x".repeat(pad)} ${token}`)], hadCursor: false, cursorFound: false });
+    const text = p.items[0]?.text ?? "";
+    assert.ok(text.length <= DEFAULT_CAPS.textChars, `${pad}`);
+    assert.doesNotMatch(text, /ghp_|a1B2/, `${pad}`);
+    assert.doesNotMatch(text, /\[REDACTED:[a-z-]*…/, `${pad}: no split marker`);
+    assert.equal(p.items[0]?.redactions, 1, `${pad}`);
+  }
+  const out = buildPreview({ events: [bash("deploy", { stdout: `${token} ${"y".repeat(1490)}`, exitCode: 0 })], hadCursor: false, cursorFound: false });
+  assert.doesNotMatch(out.items[0]?.text ?? "", /a1B2|REDACTED:[a-z-]*\]?y/);
+  assert.equal(out.items[0]?.redactions, 1);
+  const cmd = buildPreview({ events: [bash(`curl -H "Authorization: Bearer ${"Z9".repeat(80)}" ${"https://example.invalid/".repeat(2)}`, { exitCode: 0 })], hadCursor: false, cursorFound: false });
+  assert.doesNotMatch(cmd.items[0]?.label ?? "", /Z9Z9/);
+  assert.equal(cmd.items[0]?.redactions, 1);
 });
 
 test("the turn text wraps everything untrusted, escapes it, and honours removals", () => {
@@ -867,7 +1111,7 @@ test("the turn text wraps everything untrusted, escapes it, and honours removals
     removeIds: new Set(["item-2"]), question: "What changed?",
   });
   assert.ok(text.startsWith(contextBlock));
-  assert.match(contextBlock, /^<untrusted_data source="claude-session">\nClaude session: Fix &lt;login>\nRepository: \/r \(branch main\)/);
+  assert.match(contextBlock, /^<untrusted_data source="claude-session">\nClaude session: Fix &lt;login>\nRepository: \/r \(branch main\)\. Read it with the read-only repository tools\./);
   assert.match(contextBlock, /Note: Repository changed from \/a to \/r/);
   assert.match(contextBlock, /keep me/);
   assert.doesNotMatch(contextBlock, /drop me/);
@@ -876,9 +1120,13 @@ test("the turn text wraps everything untrusted, escapes it, and honours removals
   assert.match(text, /\n\nQuestion:\nWhat changed\?$/);
 });
 
-test("without a preview (sharing Off) only the session and repo lines are sent", () => {
-  const { contextBlock } = composeTurnText({ sessionTitle: "T", repo: { state: "unavailable", root: "/r", branch: null, detail: "not approved" }, repoNote: null, preview: null, removeIds: new Set(), question: "Q" });
-  assert.equal(contextBlock, '<untrusted_data source="claude-session">\nClaude session: T\nRepository: unavailable (not approved). Repo tools are off.\n</untrusted_data>');
+test("without a preview (sharing Off) only the repository line is sent: no session title or note", () => {
+  const { contextBlock, text } = composeTurnText({
+    sessionTitle: "SYNTHETIC FIXTURE title from the first prompt", repo: { state: "unavailable", root: "/r", branch: null, detail: "not approved" },
+    repoNote: "Repository changed from /a to /r", preview: null, removeIds: new Set(), question: "Q",
+  });
+  assert.equal(contextBlock, '<untrusted_data source="claude-session">\nRepository: unavailable (not approved). Repo tools are off.\n</untrusted_data>');
+  assert.doesNotMatch(text, /SYNTHETIC FIXTURE|Claude session|changed from/);
   const none = composeTurnText({ sessionTitle: "T", repo: { state: "none", root: null, branch: null, detail: null }, repoNote: null, preview: null, removeIds: new Set(), question: "Q" });
   assert.match(none.contextBlock, /Repository: none for this session\. Repo tools are off\./);
 });
@@ -910,7 +1158,8 @@ Expected: FAIL — module not found.
 - [ ] **Step 4: Implement** — `companiond/src/context/contextBuilder.ts`:
 
 ```ts
-// ContextBuilder (spec §4): delta since cursor → items → redact → caps → preview → turn text.
+// ContextBuilder (spec §4): delta since cursor → items → redact → clip → caps → preview → turn text.
+// Redaction runs on whole fields before any clipping, so a cut never splits a secret out of its pattern.
 // M3 detects failures; this file only formats them (ruling: spec §3 vs §14 resolved toward §14).
 import { redact } from "../jail/redactor.ts";
 import type { SubagentUpdate } from "../transcript/subagents.ts";
@@ -926,6 +1175,7 @@ export interface ContextPreview {
   items: PreviewItem[];
   notes: string[];
   omitted: number;
+  /** Bytes of the notes and items exactly as composeTurnText emits them (after escaping). */
   bytes: number;
   cursorAfter: string | null;
   subagents: SubagentUpdate[];
@@ -934,10 +1184,52 @@ export interface RepoLine { state: "bound" | "unavailable" | "none"; root: strin
 
 export const CURSOR_RESET_NOTE = "Cursor reset: Claude's transcript was rewritten, so this context starts from the latest messages.";
 
-type Draft = { kind: PreviewItemKind; label: string; text: string };
+/**
+ * Bytes kept for what composeTurnText adds around the items: the wrapper tags, the session line, the
+ * repository line, the repository note, and the "left out" note. Each of those is fitted to its share.
+ */
+const HEADER_BYTES = { title: 256, repo: 512, repoNote: 192 } as const;
+const OMITTED_NOTE_BYTES = 96;
+const OPEN_TAG = '<untrusted_data source="claude-session">';
+const CLOSE_TAG = "</untrusted_data>";
+const RESERVED_BYTES = OPEN_TAG.length + 1 + HEADER_BYTES.title + 1 + HEADER_BYTES.repo + 1 + HEADER_BYTES.repoNote + 1 + CLOSE_TAG.length + OMITTED_NOTE_BYTES;
 
-const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
-const tail = (s: string, max: number) => (s.length <= max ? s : `…${s.slice(s.length - max + 1)}`);
+type Cut = "head" | "tail";
+/** One field before redaction. `max` is in characters; it is applied after redaction. */
+interface Part { s: string; max: number; cut: Cut }
+interface Draft { kind: PreviewItemKind; label: Part; text: Part[]; redacted: number }
+
+const part = (s: string, max = Number.POSITIVE_INFINITY, cut: Cut = "head"): Part => ({ s, max, cut });
+const MARKER = /\[REDACTED:[a-z-]+\]/g;
+
+/** Keeps the head. A cut that would fall inside a [REDACTED:…] marker moves to the marker's start. */
+function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = max - 1;
+  for (const m of s.matchAll(MARKER)) {
+    if (m.index >= cut) break;
+    if (m.index + m[0].length > cut) {
+      cut = m.index;
+      break;
+    }
+  }
+  return `${s.slice(0, cut)}…`;
+}
+
+/** Keeps the tail. A cut that would fall inside a marker moves to the marker's end. */
+function tail(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let start = s.length - max + 1;
+  for (const m of s.matchAll(MARKER)) {
+    const end = m.index + m[0].length;
+    if (m.index >= start) break;
+    if (end > start) {
+      start = end;
+      break;
+    }
+  }
+  return `…${s.slice(start)}`;
+}
 
 /**
  * M3 gives a rolling window (newest 2,000 events / ~8 MiB). `known` is bridge.hasUuid, which also covers
@@ -953,64 +1245,96 @@ export function eventsSince(
   return { events: [...events], cursorFound: known(cursor) };
 }
 
+/** `command` must already be redacted: it is clipped here. */
 export function formatFailure(f: TerminalFailure, command: string | null, exitCode: number | null): string {
   const what = f.kind === "test_failure" ? "Tests failed" : f.kind === "build_failure" ? "Build failed" : "Command failed";
   return `${what}${command ? ` in \`${clip(command, 200)}\`` : ""}${exitCode !== null ? ` (exit ${exitCode})` : ""}: ${f.summary}`;
 }
 
+/** stdout/stderr when the parser split them; otherwise the result text minus its "Exit code N" line (M3 parser). */
+function shellOutput(e: Extract<TranscriptEvent, { kind: "tool_result" }>, order: "err-first" | "out-first"): string {
+  const parts = order === "err-first" ? [e.stderr, e.stdout] : [e.stdout, e.stderr];
+  return parts.filter((s) => s.length > 0).join("\n") || e.text.replace(/^Exit code \d+\n?/, "");
+}
+
 function draft(e: TranscriptEvent, caps: ContextCaps): Draft | null {
   switch (e.kind) {
     case "user_text":
-      return { kind: "user", label: "Claude user message", text: clip(e.text, caps.textChars) };
+      return { kind: "user", label: part("Claude user message"), text: [part(e.text, caps.textChars)], redacted: 0 };
     case "assistant_text":
-      return { kind: "assistant", label: "Claude reply", text: clip(e.text, caps.textChars) };
+      return { kind: "assistant", label: part("Claude reply"), text: [part(e.text, caps.textChars)], redacted: 0 };
     case "tool_result": {
-      const output = [e.stderr, e.stdout].filter((s) => s.length > 0).join("\n");
       if (e.failure) {
-        return { kind: "failure", label: "Failure", text: `${formatFailure(e.failure, e.command, e.exitCode)}\n${tail(output, caps.toolChars)}`.trimEnd() };
+        const cmd = e.command === null ? null : redact(e.command);
+        return {
+          kind: "failure", label: part("Failure"), redacted: cmd?.count ?? 0,
+          text: [part(formatFailure(e.failure, cmd?.text ?? null, e.exitCode)), part(shellOutput(e, "err-first"), caps.toolChars, "tail")],
+        };
       }
       if (e.command) {
-        return { kind: "command", label: `$ ${clip(e.command, 120)}`, text: tail(`exit ${e.exitCode ?? "?"}\n${[e.stdout, e.stderr].filter((s) => s.length > 0).join("\n")}`.trimEnd(), caps.toolChars) };
+        return {
+          kind: "command", label: part(`$ ${e.command}`, 122), redacted: 0,
+          text: [part(`exit ${e.exitCode ?? "?"}`), part(shellOutput(e, "out-first"), caps.toolChars, "tail")],
+        };
       }
       return null; // non-shell tool output is not sent: GPT reads the repo through the jail
     }
     case "file_edit":
-      return { kind: "file_edit", label: "Claude edited a file", text: e.filePath };
+      return { kind: "file_edit", label: part("Claude edited a file"), text: [part(e.filePath)], redacted: 0 };
     case "subagent_summary":
-      return { kind: "subagent", label: "Subagent result", text: clip(e.text, caps.textChars) };
+      return { kind: "subagent", label: part("Subagent result"), text: [part(e.text, caps.textChars)], redacted: 0 };
     case "cwd_change":
-      return { kind: "folder", label: "Claude changed folder", text: `${e.from} → ${e.to}` };
+      return { kind: "folder", label: part("Claude changed folder"), text: [part(`${e.from} → ${e.to}`)], redacted: 0 };
     default:
       return null; // tool_call: its result carries the command
   }
 }
 
+/** Redact the whole field, then clip it. Returns the text and the number of redactions. */
+function finish(p: Part): { text: string; count: number } {
+  const r = redact(p.s);
+  return { text: p.cut === "head" ? clip(r.text, p.max) : tail(r.text, p.max), count: r.count };
+}
+
+const itemBytes = (label: string, text: string) => Buffer.byteLength(`[${escapeData(label)}]\n${escapeData(text)}\n`, "utf8");
+const noteBytes = (n: string) => Buffer.byteLength(`Note: ${escapeData(n)}\n`, "utf8");
+
 export function buildPreview(input: {
   events: readonly TranscriptEvent[]; hadCursor: boolean; cursorFound: boolean; subagents?: readonly SubagentUpdate[]; caps?: ContextCaps;
 }): ContextPreview {
   const caps = input.caps ?? DEFAULT_CAPS;
-  const drafts: Array<Draft & { redactions: number }> = [];
+  const drafts: Array<{ kind: PreviewItemKind; label: string; text: string; redactions: number }> = [];
   const add = (d: Draft) => {
-    const l = redact(d.label);
-    const t = redact(d.text);
-    drafts.push({ kind: d.kind, label: l.text, text: t.text, redactions: l.count + t.count });
+    const l = finish(d.label);
+    const ts = d.text.map(finish);
+    const text = ts.map((t) => t.text).filter((s) => s.length > 0).join("\n").trimEnd();
+    drafts.push({ kind: d.kind, label: l.text, text, redactions: d.redacted + l.count + ts.reduce((n, t) => n + t.count, 0) });
   };
   for (const e of input.events) {
     if (e.isSidechain) continue;
     const d = draft(e, caps);
     if (d) add(d);
   }
+  // Both a main-chain "Subagent result" (the final Task/Agent result) and a tracker "Subagent summary"
+  // (progress read from the subagent's own file) can appear for one agent. They are kept on purpose:
+  // M3 links neither to the other (toolUseId vs agentId), and they say different things.
   const subagents = [...(input.subagents ?? [])];
-  for (const s of subagents) add({ kind: "subagent", label: "Subagent summary", text: clip(s.summary, caps.textChars) });
+  for (const s of subagents) add({ kind: "subagent", label: part("Subagent summary"), text: [part(s.summary, caps.textChars)], redacted: 0 });
 
+  const notes: string[] = [];
+  if (input.hadCursor && !input.cursorFound) notes.push(CURSOR_RESET_NOTE);
+  // The cap covers the whole block as sent (after escaping), so the header's share is reserved first.
+  const budget = caps.totalBytes - RESERVED_BYTES - notes.reduce((n, s) => n + noteBytes(s), 0);
   const picked: typeof drafts = [];
   let bytes = 0;
   let omitted = 0;
+  let stoppedBy: "items" | "bytes" | null = null;
   for (let i = drafts.length - 1; i >= 0; i--) {
     const d = drafts[i];
     if (!d) continue;
-    const size = Buffer.byteLength(`${d.label}\n${d.text}\n`, "utf8");
-    if (picked.length >= caps.maxItems || bytes + size > caps.totalBytes) {
+    const size = itemBytes(d.label, d.text);
+    if (picked.length >= caps.maxItems || bytes + size > budget) {
+      stoppedBy = picked.length >= caps.maxItems ? "items" : "bytes";
       omitted = i + 1;
       break;
     }
@@ -1019,9 +1343,12 @@ export function buildPreview(input: {
   }
   picked.reverse();
 
-  const notes: string[] = [];
-  if (input.hadCursor && !input.cursorFound) notes.push(CURSOR_RESET_NOTE);
-  if (omitted > 0) notes.push(`${omitted} older item(s) left out to stay under ${Math.round(caps.totalBytes / 1024)} KB.`);
+  if (omitted > 0) {
+    notes.push(stoppedBy === "items"
+      ? `${omitted} older item(s) left out (${caps.maxItems}-item limit).`
+      : `${omitted} older item(s) left out to stay under ${Math.round(caps.totalBytes / 1024)} KB.`);
+  }
+  bytes += notes.reduce((n, s) => n + noteBytes(s), 0);
   let cursorAfter: string | null = null;
   for (let k = input.events.length - 1; k >= 0 && cursorAfter === null; k--) cursorAfter = input.events[k]?.uuid ?? null;
 
@@ -1039,23 +1366,43 @@ export function escapeData(s: string): string {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
 }
 
+/** Fits an already-escaped line into `max` UTF-8 bytes without splitting a character, an entity or a marker. */
+function fitBytes(line: string, max: number): string {
+  if (Buffer.byteLength(line, "utf8") <= max) return line;
+  let out = "";
+  let used = 0;
+  for (const ch of line) {
+    const b = Buffer.byteLength(ch, "utf8");
+    if (used + b > max - 3) break; // "…" is 3 bytes
+    out += ch;
+    used += b;
+  }
+  return `${out.replace(/&[a-z]{0,3}$/, "").replace(/\[REDACTED:[a-z-]*$/, "")}…`;
+}
+
 function repoText(r: RepoLine): string {
-  if (r.state === "bound") return `Repository: ${r.root ?? "?"} (branch ${r.branch ?? "detached"}). Read it with the companion-readonly tools.`;
+  if (r.state === "bound") return `Repository: ${r.root ?? "?"} (branch ${r.branch ?? "detached"}). Read it with the read-only repository tools.`;
   if (r.state === "unavailable") return `Repository: unavailable (${r.detail ?? "unknown reason"}). Repo tools are off.`;
   return "Repository: none for this session. Repo tools are off.";
 }
 
+/**
+ * `preview: null` means sharing is Off: the block then carries only the repository line, so GPT can
+ * use repo tools if the root is approved. Nothing from Claude's session, not even its title, is sent.
+ */
 export function composeTurnText(i: {
   sessionTitle: string; repo: RepoLine; repoNote: string | null; preview: ContextPreview | null; removeIds: ReadonlySet<string>; question: string;
 }): { text: string; contextBlock: string } {
-  const lines = ['<untrusted_data source="claude-session">', `Claude session: ${escapeData(redact(i.sessionTitle).text)}`, escapeData(repoText(i.repo))];
-  if (i.repoNote) lines.push(`Note: ${escapeData(i.repoNote)}`);
+  const lines = [OPEN_TAG];
+  if (i.preview) lines.push(fitBytes(`Claude session: ${escapeData(redact(i.sessionTitle).text)}`, HEADER_BYTES.title));
+  lines.push(fitBytes(escapeData(repoText(i.repo)), HEADER_BYTES.repo));
+  if (i.preview && i.repoNote) lines.push(fitBytes(`Note: ${escapeData(i.repoNote)}`, HEADER_BYTES.repoNote));
   for (const n of i.preview?.notes ?? []) lines.push(`Note: ${escapeData(n)}`);
   for (const it of i.preview?.items ?? []) {
     if (i.removeIds.has(it.id)) continue;
     lines.push(`[${escapeData(it.label)}]`, escapeData(it.text));
   }
-  lines.push("</untrusted_data>");
+  lines.push(CLOSE_TAG);
   const contextBlock = lines.join("\n");
   return { contextBlock, text: `${contextBlock}\n\nQuestion:\n${i.question}` };
 }
@@ -2219,8 +2566,11 @@ codesign --force --options runtime --timestamp=none \
 
 # Verification
 codesign --verify --strict --verbose=2 "$out"
-codesign -d --entitlements - --xml "$out" 2>/dev/null | grep -q "com.apple.security.device.audio-input"
-codesign -d --verbose=2 "$out" 2>&1 | grep -q "flags=.*runtime"
+# Capture first, then grep: `codesign | grep -q` can fail under pipefail when grep exits early (SIGPIPE).
+ents="$(codesign -d --entitlements - --xml "$out" 2>/dev/null)"
+grep -q "com.apple.security.device.audio-input" <<<"$ents"
+info="$(codesign -d --verbose=2 "$out" 2>&1)"
+grep -q "flags=.*runtime" <<<"$info"
 for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription CFBundleIdentifier LSMinimumSystemVersion; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$out/Contents/Info.plist" >/dev/null
 done

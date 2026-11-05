@@ -27,6 +27,22 @@ export function put(root: string, rel: string, body = ""): string {
   return f;
 }
 
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/** Deterministic pseudo-random base64, so a SYNTHETIC key body looks like a real one. */
+function b64(n: number, seed: number): string {
+  let x = seed >>> 0;
+  let s = "";
+  for (let i = 0; i < n; i++) {
+    x = (Math.imul(x, 1103515245) + 12345) >>> 0;
+    s += B64[(x >>> 16) & 63];
+  }
+  return s;
+}
+/** A SYNTHETIC PEM body (no header): full 64-char lines and a short padded last line. */
+export function pemBody(lines: number, seed: number): string[] {
+  return [...Array.from({ length: lines }, (_, i) => b64(64, seed + i)), `${b64(22, seed + lines)}==`];
+}
+
 let cachedGit: string | null = null;
 
 export function testGitPath(): string {
