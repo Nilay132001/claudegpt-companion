@@ -17,6 +17,11 @@ official Codex app-server. No API keys.
 - [Design](docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md) — architecture, security
   model, UI, milestones.
 
+## Install
+
+Build the app and install it from a DMG: [install guide](docs/install.md). Signing and notarization notes:
+[docs/signing.md](docs/signing.md).
+
 ## Try the proof of concept
 
 Requires macOS, Node 22+, and a ChatGPT plan that includes Codex.
@@ -39,6 +44,7 @@ Requires macOS 26+, full Xcode, Node 24+.
 ```bash
 (cd companiond && npm ci && npm test && npm run typecheck)
 (cd app && swift test)
+bash scripts/build-app.sh && bash scripts/smoke-bundle.sh
 bash scripts/check-repo.sh
 ```
 

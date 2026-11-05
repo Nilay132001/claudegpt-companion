@@ -1,6 +1,6 @@
 # ClaudeGPT Companion — design
 
-Status: **v3.5 — M6: read-only Jira (companion-jira proxy)** · Date: 2026-11-05 (v3:
+Status: **v3.6 — M7: packaging (bundled Node, signing notes)** · Date: 2026-11-05 (v3:
 2026-11-03) · Based on: `docs/findings/2026-11-03-phase1-poc.md`
 
 - v1 → v2: owner review (decisions D1–D3, required changes R1–R8, §15).
@@ -15,6 +15,7 @@ Status: **v3.5 — M6: read-only Jira (companion-jira proxy)** · Date: 2026-11-
 - v3.5 (M6): read-only Jira through a companion proxy, `companion-jira` (owner ruling B, §11), reached
   through the relay like the jail; the self-check fails on write-shaped tools; each change is marked "M6".
   Evidence: `companiond/itest/jira.itest.ts` and `itest/jiraProfile.itest.ts` (§11).
+- v3.6 (M7): M7 packaging: bundled Node, relay source in the bundle, signing notes.
 
 ## 1. Goal and acceptance test
 
@@ -73,6 +74,11 @@ mic, speech, with XCTest/Swift Testing once full Xcode is installed (D1).
 *M5:* the app runs `companiond` from `Contents/Resources/companiond` inside the bundle, with the user's
 Node 24 or newer (found at `COMPANION_NODE`, the Advanced setting, `/opt/homebrew/bin/node` or
 `/usr/local/bin/node`). Bundling Node is M7.
+*M7:* the bundle carries the pinned official Node.js 24 (`Contents/Resources/node`, re-signed with only the two
+JIT entitlements) and the relay source. The app runs `companiond` with the bundled Node first (`COMPANION_NODE`,
+then the bundled Node, then the Settings path, then the system paths). The jail's Node prefix is
+`Contents/Resources/node`. Apple silicon only. The Xcode command-line tools stay a runtime requirement (relay
+compile, `git`).
 
 **Root binding (F8) — option B (M4a, owner ruling (b), review I1).** One app-server per approved root
 (cap 3, idle LRU close) plus a base process for sign-in and for threads with no root. A thread moves
@@ -743,6 +749,8 @@ app's environment never reach it. The daemon's stderr is discarded; the app logs
   and notarization stay in M7.
   *M5:* the bundle contains `companiond` (Resources) and runs it with the user's Node 24 or newer (§2);
   bundling Node is M7.
+  *M7:* Developer ID and notarization are owner steps with `COMPANION_SIGN_IDENTITY` and
+  `COMPANION_NOTARY_PROFILE` (`docs/signing.md`); Codex keeps OpenAI's signature.
 
 ## 10. Terminal context
 
@@ -938,7 +946,7 @@ watcher failure.
 | M4 | CodexHost (self-check, runtime guard, replies), ContextBuilder, Redactor, Store, privacy model; signed `.app` bundle skeleton with usage strings | real-Codex integration tests green; live smoke passes. *M4a (CodexHost, relay, code mode) implemented; §7.1.9 measured "ok". M4b (Redactor, Store, privacy, ContextBuilder, chat service, daemon API, bundle skeleton) implemented; live smoke result: findings doc, "M4 live smoke"; M4b bundle ad-hoc signed by default (§9)* |
 | M5 | SwiftUI app: panel, hotkey, chat, picker, refresh, preview sheet, approvals, settings, follow-window opt-in, dictation, Read Aloud, §12.3 tests | Swift tests green; mic/playback checklist passes; **primary acceptance test passes → first usable release**. *M5: implemented; acceptance test: see docs/manual/m5-checklist.md* |
 | M6 | Jira, read-only, through the companion's own `companion-jira` proxy (owner ruling B, §11); read-only allowlist enforced by self-check | self-check proves no write tool is visible. *M6: implemented; self-check measured with real Codex (itest/jira.itest.ts)* |
-| M7 | Packaging, install guide, signing notes | clean install on this Mac |
+| M7 | Packaging, install guide, signing notes | clean install on this Mac. *M7: implemented — build, bundle smoke, DMG, install guide (docs/install.md), signing notes (docs/signing.md); clean install: owner checklist docs/manual/m7-checklist.md* |
 
 A short progress summary is given after each milestone.
 
