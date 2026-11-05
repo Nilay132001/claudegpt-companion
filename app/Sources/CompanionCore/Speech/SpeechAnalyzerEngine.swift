@@ -19,6 +19,11 @@ public final class SpeechAnalyzerEngine: DictationEngine {
     private var analyzer: SpeechAnalyzer?
     private var input: AsyncStream<AnalyzerInput>.Continuation?
     private var results: Task<Void, Never>?
+    /// Test seam: when set, called in place of creating and starting AVAudioEngine (the test runner never opens the mic).
+    var microphoneOverride: (@MainActor () -> Void)?
+    /// Bumped by every start() and stop(). A start() that sees it move during an await was cancelled by Stop
+    /// (or replaced by a newer start) and must never turn the microphone on.
+    private var generation = 0
 
     public init() {}
 
@@ -41,29 +46,43 @@ public final class SpeechAnalyzerEngine: DictationEngine {
     }
 
     public func start(_ events: @escaping @MainActor (DictationEvent) -> Void) async throws {
+        generation += 1
+        let gen = generation
+        /// Called after every await: Stop (or a newer start) moved the generation, so give up before the mic opens.
+        func checkNotCancelled() throws { guard gen == generation else { throw CancellationError() } }
+
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) else { throw DictationError.unsupportedLocale }
+        try checkNotCancelled()
         let transcriber = Self.transcriber(locale, volatile: true)
-        try await Self.ensureAssets(transcriber) { events(.installing($0)) }
+        try await Self.ensureAssets(transcriber) { [weak self] p in if self?.generation == gen { events(.installing(p)) } }
+        try checkNotCancelled()
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else { throw DictationError.noAudioFormat }
+        try checkNotCancelled()
 
         let (stream, builder) = AsyncStream.makeStream(of: AnalyzerInput.self)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
-        // Stored before anything below can throw, so stop() (or the catch) can always clean up.
-        self.analyzer = analyzer
-        input = builder
-        results = Task { @MainActor in
+        let resultsTask = Task { @MainActor [weak self] in
             do {
                 for try await r in transcriber.results {
                     let text = String(r.text.characters)
                     events(r.isFinal ? .final(text) : .volatile(text))
                 }
             } catch {
-                events(.failed("Dictation stopped."))
+                // A cancelled or stopped session's teardown is not a failure the user needs to see.
+                if self?.generation == gen { events(.failed("Dictation stopped.")) }
             }
         }
+        // Stored before anything below can throw, so stop() (or the catch) can always clean up.
+        self.analyzer = analyzer
+        input = builder
+        results = resultsTask
+        var mic: AVAudioEngine?
         do {
             try await analyzer.start(inputSequence: stream)
+            try checkNotCancelled()              // the last await: from here to engine.start() nothing suspends
+            if let open = microphoneOverride { open(); return }
             let engine = AVAudioEngine()
+            mic = engine
             audioEngine = engine
             let node = engine.inputNode
             let micFormat = node.outputFormat(forBus: 0)
@@ -73,20 +92,24 @@ public final class SpeechAnalyzerEngine: DictationEngine {
             engine.prepare()
             try engine.start()
         } catch {
-            audioEngine?.inputNode.removeTap(onBus: 0)
-            audioEngine?.stop()
-            audioEngine = nil
+            // Tear down only what this start() created; a newer start() may own the stored fields by now.
+            mic?.inputNode.removeTap(onBus: 0)
+            mic?.stop()
             builder.finish()
-            input = nil
+            resultsTask.cancel()
+            if self.analyzer === analyzer {
+                audioEngine = nil
+                input = nil
+                self.analyzer = nil
+                results = nil
+            }
             await analyzer.cancelAndFinishNow()
-            self.analyzer = nil
-            results?.cancel()
-            results = nil
             throw error
         }
     }
 
     public func stop() async {
+        generation += 1
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil

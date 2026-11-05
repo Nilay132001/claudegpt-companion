@@ -10,17 +10,33 @@ import Testing
     var finalOnStop: String?
     var holdStart = false
     var held: CheckedContinuation<Void, Never>?
+    /// Set only when the fake "turns the microphone on": after the last await, once it has re-checked for a Stop.
+    var micStarted = false
     func start(_ events: @escaping @MainActor (DictationEvent) -> Void) async throws {
         started += 1
+        let stopsAtStart = stopped
         if holdStart { await withCheckedContinuation { held = $0 } }
         if let e = startError { throw e }
+        // Like SpeechAnalyzerEngine: a Stop that arrived during an await cancels the start before the mic goes on.
+        guard stopped == stopsAtStart else { throw CancellationError() }
         emit = events
         events(.installing(0.5))
+        micStarted = true
     }
     func stop() async {
         stopped += 1
         if let f = finalOnStop { emit?(.final(f)) }
     }
+}
+
+/// Ignores Stop during start (no cancellation check): exercises the controller's own guard.
+@MainActor final class LateEngine: DictationEngine {
+    var stopped = 0
+    var held: CheckedContinuation<Void, Never>?
+    func start(_ events: @escaping @MainActor (DictationEvent) -> Void) async throws {
+        await withCheckedContinuation { held = $0 }
+    }
+    func stop() async { stopped += 1 }
 }
 
 struct FakePermissions: DictationPermissions {
@@ -72,9 +88,23 @@ struct FakePermissions: DictationPermissions {
         #expect(c.state == .idle)
         e.held?.resume()
         await starting.value
-        #expect(e.stopped == 2)                  // the late start is stopped again
+        #expect(!e.micStarted)                   // the start was cancelled: the mic never turned on after Stop
+        #expect(e.stopped == 1)
         #expect(c.state == .idle)
         #expect(!c.isRecording)
+    }
+
+    @Test func aLateStartThatIgnoresStopIsStoppedAgain() async {
+        // Second layer: an engine that turns the mic on anyway is stopped again by the controller's generation guard.
+        let e = LateEngine()
+        let c = DictationController(engine: e, permissions: FakePermissions(mic: true, speech: true))
+        let starting = Task { await c.toggle(appendTo: { _ in }) }
+        while e.held == nil { await Task.yield() }
+        await c.toggle(appendTo: { _ in })
+        e.held?.resume()
+        await starting.value
+        #expect(e.stopped == 2)
+        #expect(c.state == .idle)
     }
 
     @Test func aFailureWhileRecordingStopsTheEngine() async {
@@ -95,6 +125,28 @@ struct FakePermissions: DictationPermissions {
         await c.toggle(appendTo: { _ in })
         #expect(c.state == .failed(DictationError.unsupportedLocale.errorDescription!))
         #expect(c.statusText == DictationError.unsupportedLocale.errorDescription)
+    }
+
+    /// The real engine: Stop pressed while start() is still awaiting (locale, assets, analyzer) cancels the start
+    /// before the microphone would open. The mic is replaced by a seam, so the runner never asks for it. Needs speech assets.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["COMPANION_SPEECH_TESTS"] == "1"), .timeLimit(.minutes(5)))
+    func realEngineStopDuringStartNeverOpensTheMic() async throws {
+        let control = SpeechAnalyzerEngine()
+        var controlOpened = false
+        control.microphoneOverride = { controlOpened = true }
+        try await control.start { _ in }
+        #expect(controlOpened)                   // without a Stop, start() does reach the microphone
+        // Not stopped here: with no audio ever fed (the seam), stop() waits on a results stream that never ends.
+
+        let engine = SpeechAnalyzerEngine()
+        var opened = false
+        engine.microphoneOverride = { opened = true }
+        let starting = Task { try await engine.start { _ in } }
+        await Task.yield()                       // start() is now suspended at its first await
+        await engine.stop()
+        let result = await starting.result
+        #expect(!opened)
+        #expect(throws: CancellationError.self) { try result.get() }
     }
 
     /// Spec §12.3: a clip made with `say -o`, fed through SpeechAnalyzer from a file. Needs speech assets: opt-in (ruling 10).
