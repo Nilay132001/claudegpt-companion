@@ -6,7 +6,7 @@ import type { AppPaths } from "../../src/app/appPaths.ts";
 import { inertOverride, relayOverride } from "../../src/codex/binding.ts";
 import { prepareCodeMode } from "../../src/codex/codeMode.ts";
 import { findCodex } from "../../src/codex/codexInstall.ts";
-import { buildCodexLaunch } from "../../src/codex/codexSeatbelt.ts";
+import { buildCodexLaunch, type CodexLaunch } from "../../src/codex/codexSeatbelt.ts";
 import { RuntimeGuard } from "../../src/codex/guard.ts";
 import { DEVELOPER_INSTRUCTIONS } from "../../src/codex/instructions.ts";
 import { COMPANION_ALLOWLIST, decideServerRequest } from "../../src/codex/serverRequests.ts";
@@ -41,7 +41,9 @@ export interface Session {
  * M5); the raw items are the only harness-side record of what a cell returned. Production never sets it. */
 /** developerInstructions: measurement only (the exec-cell gate). Production always sends DEVELOPER_INSTRUCTIONS, and
  * safety never depends on them (spec §7.6), so the gate may swap them; profile, config and tools stay identical. */
-export async function startSession(o: { paths: AppPaths; root?: string | null; jail?: LaunchSpec; rawEvents?: boolean; developerInstructions?: string }): Promise<Session> {
+/** launchTransform: MEASUREMENT ONLY (the model-steered fetch probe's negative control). It edits the Codex launch
+ * after buildCodexLaunch, in itest code; production code has no such option. */
+export async function startSession(o: { paths: AppPaths; root?: string | null; jail?: LaunchSpec; rawEvents?: boolean; developerInstructions?: string; launchTransform?: (l: CodexLaunch) => CodexLaunch }): Promise<Session> {
   const install = findCodex();
   const tc = discoverToolchain();
   const relay = ensureRelayDirs(relayPaths(o.paths.supportDir));
@@ -62,7 +64,8 @@ export async function startSession(o: { paths: AppPaths; root?: string | null; j
       },
       alert: (x) => alerts.push(`${x.itemType}: ${x.detail}`),
     });
-    const a = await startAppServer(buildCodexLaunch({ install, paths: o.paths, sandboxed: true, relay: { binary: relay.binary, socket: relay.socket } }), async (method, params) => {
+    const launch0 = buildCodexLaunch({ install, paths: o.paths, sandboxed: true, relay: { binary: relay.binary, socket: relay.socket } });
+    const a = await startAppServer(o.launchTransform ? o.launchTransform(launch0) : launch0, async (method, params) => {
       const d = decideServerRequest(method, params, COMPANION_ALLOWLIST, guard.lookup);
       decisions.push(`${method}:${d.outcome}`);
       return d.reply;

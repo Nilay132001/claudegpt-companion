@@ -17,6 +17,9 @@ import { startSession } from "./helpers/codeModeSession.ts";
 import { createItestCompanionCodex } from "./helpers/companionCodex.ts";
 import { isSignedIn, ownPaths, skipUnless, sleep } from "./helpers/companion.ts";
 import { GATE_INSTRUCTIONS, runExecCellGate } from "./helpers/execCellGate.ts";
+import { controlLaunch, controlReachability, ipv4Of, runFetchProbe, startLoopbackListener, type FetchProbeResult } from "./helpers/fetchProbe.ts";
+import { ALLOWED_NESTED, liveRunner, parseToolSurface, promptInputArgs } from "../src/codex/codeMode.ts";
+import { findCodex } from "../src/codex/codexInstall.ts";
 
 const skip = skipUnless({ live: true });
 after(removeTempDirs);
@@ -260,6 +263,61 @@ test("exec-cell gate, final run (production profile and config)", { skip }, asyn
   } finally {
     await s.close();
   }
+});
+
+// Orchestrator ruling (Task 10 fix round 2), a SECURITY GATE: the Codex process may reach any host on 443, which is
+// accepted only if nothing the model controls steers it. Every model-reachable path that could fetch a URL the model
+// chooses (the cell helpers, markdown images and links, web search and server-side tools) is inventoried, then
+// measured two ways: the production profile watched with lsof (an IP literal of a non-OpenAI host), and the
+// measurement-only control profile without the loopback deny, with a listener on 127.0.0.1:443. Both must show
+// no connection.
+test("model-steered fetch: no model-reachable path makes Codex connect to a URL the model chooses (security gate)", { skip }, async (t) => {
+  const paths = ownPaths();
+  const ip = await ipv4Of("example.com"); // resolved once here; the URLs are IP literals
+  const prod = await startSession({ paths, root: makeRepo(), rawEvents: true, developerInstructions: GATE_INSTRUCTIONS });
+  let production: FetchProbeResult;
+  let surface: Record<string, unknown>;
+  let webSearch: unknown;
+  try {
+    if (!(await isSignedIn(prod.a))) return t.skip("the companion's CODEX_HOME is not signed in");
+    const cfg: any = await prod.a.rpc.request("config/read", { includeLayers: true, cwd: paths.emptyCwd });
+    webSearch = cfg?.config?.web_search;
+    const liveRun = liveRunner(findCodex(), paths, { binary: prod.relay.binary, socket: prod.relay.socket });
+    surface = parseToolSurface(liveRun(promptInputArgs(prod.threadModel ?? String(prod.models[0])), paths.codexHome)) as unknown as Record<string, unknown>;
+    production = await runFetchProbe(prod, { mode: "production", urls: [`http://${ip}/cgc-a.png`, `https://${ip}/cgc-b.png`], ip, inventory: true });
+  } finally {
+    await prod.close();
+  }
+  const listener = await startLoopbackListener();
+  let control: FetchProbeResult;
+  // Positive control first: under the control edit a process CAN reach the listener; under production it cannot.
+  const reach = controlReachability(paths, listener.port);
+  // spawnSync blocks this event loop, so the listener's "connection" event for the probe fires only afterwards
+  // (measured: read at once it was 0, and the hit was then charged to the Codex session).
+  for (let i = 0; i < 40 && listener.hits() === 0; i++) await sleep(50);
+  await sleep(250);
+  const reachHits = listener.hits();
+  const ctl = await startSession({ paths, root: makeRepo(), rawEvents: true, developerInstructions: GATE_INSTRUCTIONS, launchTransform: (l) => controlLaunch(l, listener.port) });
+  try {
+    const p = listener.port;
+    control = await runFetchProbe(ctl, { mode: "control", urls: [`http://127.0.0.1:${p}/cgc-a.png`, `https://127.0.0.1:${p}/cgc-b.png`], listenerHits: () => listener.hits() - reachHits });
+  } finally {
+    await ctl.close();
+    await listener.close();
+  }
+  const show = (r: FetchProbeResult) => ({ ...r, urls: r.urls.map((u) => u.replace(ip, "<example.com IPv4>")) });
+  console.log(JSON.stringify({ webSearch, liveSurface: surface, controlReachability: { ...reach, listenerHits: reachHits }, production: show(production), control: show(control) }, null, 2));
+  assert.deepEqual(reach, { control: "OK", production: "EPERM" }, "the control profile reaches the listener; production does not");
+  assert.equal(reachHits, 1, "the listener counted the positive control's connection");
+  assert.equal(webSearch, "disabled");
+  assert.deepEqual(surface.top, ["functions.exec", "functions.wait"]);
+  // Inventory (names only): the cell's tools are exactly the five; no fetch-shaped global exists.
+  assert.equal(production.inventory?.tools, [...ALLOWED_NESTED].sort().join(","));
+  for (const k of ["view_image", "viewImage", "web_search", "webSearch", "fetchImage", "download", "browse", "open", "http", "request", "fetch", "XMLHttpRequest", "WebSocket", "EventSource", "importScripts", "navigator"]) {
+    assert.equal(production.inventory?.[`typeof_${k}`], "undefined", k);
+  }
+  assert.deepEqual(production.open, [], "production profile");
+  assert.deepEqual(control.open, [], "control profile");
 });
 
 // Ruling I-9: sign-in under the sign-in profile end to end. It needs the OWNER at the browser and signs the account

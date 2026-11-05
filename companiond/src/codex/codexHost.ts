@@ -310,8 +310,9 @@ export class CodexHost {
 
   async openThread(threadId: string | null, binding: RootBinding | null): Promise<string> {
     const open = (): Promise<string> => {
-      if (!binding) return this.#openThread(threadId, null);
-      // Bindings are made one at a time, so the acceptor never sees more than one handshake from us at once (I-3).
+      // Every open runs one at a time, bound or not: the acceptor never sees more than one handshake from us at once
+      // (I-3), and a move that closes a process (#leaveProcess) can never kill it under another open in flight on it,
+      // the base process included (Task 10 review I2).
       const run = this.#bindQueue.then(() => this.#openThread(threadId, binding));
       this.#bindQueue = run.catch(() => undefined);
       return run;
@@ -345,6 +346,8 @@ export class CodexHost {
       if (loaded.activeTurn) throw new TurnBusyError();
       if (loaded.rootKey !== rootKey && !loaded.proc.rpc.isClosed) await this.#leaveProcess(loaded);
       else await this.#unload(loaded);
+      // A #fail during the wait (review I1) ends the move here: nothing is spawned, granted or resumed.
+      this.#requireReady();
     }
     let grant: RelayGrant | null = null;
     let t: ThreadState | null = null;
@@ -467,6 +470,11 @@ export class CodexHost {
     if (this.#state.state !== "ready") throw new HostNotReadyError();
   }
 
+  /** Processes may be spawned only while the host is starting or ready, never after a #fail or stop(). */
+  #requireLive(): void {
+    if (this.#state.state !== "ready" && this.#state.state !== "starting") throw new HostNotReadyError();
+  }
+
   /** A security event that arrived while start() was waiting is latched: start() never goes ready over it. */
   #requireNoSecurityStop(): void {
     if (this.#securityStopped !== null) throw new SecurityCheckError(this.#securityStopped);
@@ -512,13 +520,16 @@ export class CodexHost {
   }
 
   async #proc(key: string): Promise<Proc> {
+    this.#requireLive();
     const existing = this.#procs.get(key);
     if (existing && !existing.rpc.isClosed) {
       existing.lastUsed = ++this.#clock;
       await existing.checked; // a process still in its self-check is not used before it passes (review fix 3)
+      this.#requireLive();
       return existing;
     }
     if (key !== BASE) await this.#evictIfFull();
+    this.#requireLive(); // nothing is spawned after a #fail or stop() that ran during an await (review I1)
     this.#requireProtected();
     const launch = this.#o.makeLaunch();
     this.#requireSandboxed(launch);
@@ -564,8 +575,10 @@ export class CodexHost {
     this.#procs.set(key, proc);
     try {
       const init = await rpc.request("initialize", { clientInfo: CLIENT_INFO, capabilities: null });
+      this.#requireLive();
       rpc.notify("initialized");
       const check = await this.#processCheck(rpc, init);
+      this.#requireLive(); // a process that finished its check after a #fail is closed below, never used
       if (check.failures.length > 0) throw new SecurityCheckError(check.failures.join("; "));
       this.#addWarnings(check.warnings);
     } catch (e) {

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { appPaths, ensureAppDirs, type AppPaths } from "../../src/app/appPaths.ts";
 import { snapshotProtectedFiles, type PreparedCodeMode } from "../../src/codex/codeMode.ts";
-import { CodexHost, HostBusyError, SecurityCheckError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
+import { CodexHost, HostBusyError, HostNotReadyError, SecurityCheckError, TurnBusyError, type HostEvent, type HostState } from "../../src/codex/codexHost.ts";
 import { CATALOG_FILE, writeCodexHomeFile } from "../../src/codex/config.ts";
 import { COMPANION_ALLOWLIST } from "../../src/codex/serverRequests.ts";
 import { SANDBOX_EXEC, type LaunchSpec } from "../../src/launch/seatbelt.ts";
@@ -195,6 +195,62 @@ test("root move: an old process that does not exit in time fails the host; nothi
   await assert.rejects(h.openThread(t, bind("/r2")), /Codex did not stop/);
   assert.equal(h.state().state, "failed");
   assert.equal(f.servers.some((s) => s.methods().includes("thread/resume")), false);
+});
+
+test("root move: a security stop during the exit wait ends the move: no new spawn, no grant, no thread/resume (review I1)", async () => {
+  const { h, f, broker } = host();
+  await h.start();
+  const t = await h.openThread(null, bind("/r1"));
+  srv(f, 1).exitOnKill = false;
+  const move = h.openThread(t, bind("/r2")).catch((e: unknown) => e);
+  await tick(20);
+  broker.emit({ type: "refused", reason: "SYNTHETIC" });
+  assert.match(detail(h.state()), /Security check failed: an unknown program/);
+  const servers = f.servers.length;
+  const grants = broker.grants.length;
+  srv(f, 1).exit("killed");
+  const r = await move;
+  assert.equal(r instanceof HostNotReadyError, true, String(r));
+  assert.equal(f.servers.length, servers, "nothing spawned after the stop");
+  assert.equal(broker.grants.length, grants, "no grant after the stop");
+  assert.equal(f.servers.some((s) => s.methods().includes("thread/resume")), false);
+  assert.match(detail(h.state()), /Security check failed: an unknown program/, "the latched detail stays");
+});
+
+test("a process whose spawn races a stop is never used, and nothing is spawned once the host has stopped (review I1)", async () => {
+  const { h, f } = host();
+  await h.start();
+  await h.stop();
+  await assert.rejects(h.openThread(null, bind("/r1")), HostNotReadyError);
+  assert.equal(f.servers.length, 1, "only the base from start()");
+});
+
+test("all opens are serialised: a move to the base never closes a root process under a bound open in flight (review I2)", async () => {
+  const { h, f } = host();
+  await h.start();
+  const x = await h.openThread(null, bind("/r1"));
+  const w = h.openThread(null, bind("/r1")).catch((e: unknown) => e);
+  const m = h.openThread(x, null).catch((e: unknown) => e);
+  const [wr, mr] = await Promise.all([w, m]);
+  assert.equal(typeof wr, "string", `bound open: ${String(wr)}`);
+  // The move waited for W, so W's thread is a sibling on /r1 when the move closes that process: it is unloaded with it.
+  assert.equal(mr, x);
+  assert.equal(h.state().state, "ready");
+  assert.equal(srv(f, 1).killed, true);
+  assert.equal(srv(f, 0).last("thread/resume").threadId, x);
+});
+
+test("all opens are serialised: a move off the base never closes it under an unbound open in flight (review I2)", async () => {
+  const { h, f } = host();
+  await h.start();
+  const x = await h.openThread(null, null); // in the base
+  const w = h.openThread(null, null).catch((e: unknown) => e);
+  const m = h.openThread(x, bind("/r1")).catch((e: unknown) => e);
+  const [wr, mr] = await Promise.all([w, m]);
+  assert.equal(typeof wr, "string", `unbound open: ${String(wr)}`);
+  assert.equal(mr, x);
+  assert.equal(h.state().state, "ready");
+  assert.equal(srv(f, 0).killed, true);
 });
 
 test("root move from the base process closes it; auth() spawns a new base on demand", async () => {

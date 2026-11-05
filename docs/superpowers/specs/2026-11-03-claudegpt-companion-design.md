@@ -366,7 +366,8 @@ No single layer is trusted, including the Codex sandbox (R1).
      (API keys in terminals, IDEs).
    - (ii) TCP 443 to **any non-local** host: SBPL cannot name hosts. Measured: the Codex process itself
      can connect to a non-OpenAI host on 443 (port 80 is EPERM); local addresses on 443 are denied. A cell
-     has no network API at all (exec-cell gate).
+     has no network API at all (exec-cell gate), and no model-reachable path was measured to steer a
+     connection (vi-a).
    - (iii) Codex can read the login keychain file (Keychain item ACLs still apply).
    - (iv) `CODEX_HOME` stays writable to Codex apart from the two denied files; other files Codex might
      read from it are covered only by the config-layer check (§7.1.5) and not by any write deny.
@@ -375,12 +376,38 @@ No single layer is trusted, including the Codex sandbox (R1).
      and re-measured by the exec-cell gate) and on every side effect going through a nested tool that does
      produce an item. The cell runtime offers helpers that are not Codex tools (the model listed `text`,
      `image`, `audio`, `generatedImage`, `store`, `load`, `notify`, `setTimeout`, `clearTimeout`,
-     `yield_control`, `exit`). Measured by the gate (Task 10 fix round 1, two runs): `image`, `audio`,
-     `generatedImage`, `notify`, `store`, `load` and `yield_control` are all functions; `load` of the
-     canaries gives no data; `image("https://example.com/…")` and `generatedImage` with the same URL both
-     throw (`Error`); the exec output then holds only `input_text` items, and the URL appears neither in
-     the exec output nor in any later notification; no loopback or decoy hit. Not measured: `audio`,
-     `notify` and `store` beyond their type, and `image` with a `data:` URL or another argument shape.
+     `yield_control`, `exit`).
+   - (vi-a) **Model-steered fetch — a security gate (orchestrator ruling, Task 10 fix round 2).** Residual
+     (ii) is accepted only because nothing the model controls steers Codex's network. Measured, signed in:
+     - Inventory (names only, from inside a cell): the cell's globals are the standard JS built-ins plus
+       `ALL_TOOLS`, `as_settled`, `audio`, `clearTimeout`, `exit`, `generatedImage`, `image`, `load`,
+       `notify`, `setTimeout`, `store`, `stream_settled`, `text`, `tools`, `yield_control`; `tools` and
+       `ALL_TOOLS` hold exactly the five `mcp__companion_readonly__*` names; `view_image`, `web_search`,
+       `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator` and similar names are
+       `undefined`. `config/read` shows `web_search = "disabled"`; the live surface is `functions.exec` /
+       `functions.wait` only (no server-side tool).
+     - Paths exercised: `image`, `generatedImage` and `audio` with a URL string and with `{url}` (and
+       `image` with `{image_url}`), `notify(url)`, and a reply of markdown images and links of the same
+       URLs. `image`, `generatedImage` and `audio` threw (`Error`) in every shape; `notify` returned and
+       handed the URL to the model as text (`input_text`); no exec output held a URL under an image or
+       URL field.
+     - Way 1, production profile: URLs are IP literals of a non-OpenAI host (example.com's IPv4, resolved
+       once by the test; `http://` and `https://`). The Codex process tree's TCP peers were sampled with
+       `lsof` about every 50 ms through all turns and 5 s after: 0 connections to that IP in ~490 samples
+       (every sample saw Codex's own provider connection, so the sampler worked). Port 80 is EPERM under
+       this profile anyway.
+     - Way 2, a measurement-only control profile (itest code only: the production profile minus the
+       loopback deny, plus one allow for the listener's own loopback port, because macOS refuses a
+       non-root bind of 127.0.0.1:443 and a 0.0.0.0:443 listener would expose the LAN): a raw TCP
+       listener on 127.0.0.1 counted 0 connections from Codex for the same paths with
+       `http://127.0.0.1:<port>/…` and `https://127.0.0.1:<port>/…`. A positive control, the probe fixture
+       under the same edit, connected (`OK`, counted once); under production it got `EPERM`.
+     - Not measured: `image` / `generatedImage` with a `data:` URL; `audio`, `notify` and `store` beyond
+       what is above (`store`/`load` by type and the canary loads only); `as_settled` and
+       `stream_settled` by type only; rendering of markdown in the client (M4b's job: the companion must
+       not auto-load remote images in replies). Re-run on every Codex upgrade (`itest/live.itest.ts`).
+     Earlier gate rows (fix round 1): `load` of the canaries gives no data; `image` and `generatedImage`
+     with `https://example.com/…` throw and the URL reaches no exec output.
    - (vii) Same-uid processes can deny service (a refused connection stops the host) and can replace files
      in App Support (out of scope: same uid). The handshake is not bound to the channel: a same-uid process
      that swaps the socket and restores it between two dev/ino checks (each accept, before each hand-off,
@@ -401,8 +428,8 @@ No single layer is trusted, including the Codex sandbox (R1).
    **§7.1.9 measured (2026-11-05, Task 10): `CODEX_SEATBELT_MEASURED = "ok"`.** Codex runs under the
    profile above. The self-check suite, the profile probe, the sign-in profile, tool calls through the
    relay, the attack prompts, interrupt during a tool call, moving a thread to another root (after the
-   §2 fix), the token scan and the exec-cell gate with the runtime-helper rows all passed; only the
-   owner-only sign-in test was skipped. Evidence: findings doc, "M4 Codex measurements", "Relay and
+   §2 fix), the token scan, the exec-cell gate with the runtime-helper rows and the model-steered fetch
+   gate (vi-a, both ways) all passed; only the owner-only sign-in test was skipped. Evidence: findings doc, "M4 Codex measurements", "Relay and
    code mode (Task 8)" and "End to end with the relay and code mode (Task 10)".
 
 ### 7.2 `companion-readonly` jail
