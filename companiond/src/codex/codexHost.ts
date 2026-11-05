@@ -435,11 +435,12 @@ export class CodexHost {
       if (!id) throw new SecurityCheckError("app-server returned no thread id");
       // Final review m5: a resume must answer for the thread it was asked for, never store state under another id.
       if (threadId && id !== threadId) throw new SecurityCheckError("app-server resumed a different thread");
-      // setJira ran while Codex answered: that grant is already revoked; the thread rebinds at its next turn.
-      const jiraChanged = jiraGrant !== null && jiraGen !== this.#jiraGen;
+      // setJira ran while Codex answered (to null, to another binding, or from null to a binding): any grant made
+      // here is revoked and the thread rebinds with the current binding at its next turn (fix M-1).
+      const jiraChanged = jiraGen !== this.#jiraGen;
       if (jiraGrant) this.#pendingJira.delete(jiraGrant);
-      if (jiraChanged) {
-        jiraGrant?.revoke();
+      if (jiraChanged && jiraGrant) {
+        jiraGrant.revoke();
         jiraGrant = null;
       }
       t = { threadId: id, proc, rootKey, binding, grant, jiraGrant, activeTurn: null, finished: new Set(), needsRebind: jiraChanged, lastUsed: ++this.#clock };
@@ -454,12 +455,15 @@ export class CodexHost {
       proc.threads.add(id);
       if (grant) this.#byGrant.set(grant.id, id);
       if (jiraGrant) this.#byGrant.set(jiraGrant.id, id);
-      // A server is "bound" when this thread holds its grant: it must then run with every allowlisted tool.
-      const bound = new Set<string>();
-      if (grant) bound.add(SERVER_NAME);
-      if (jiraGrant) bound.add(JIRA_SERVER_NAME);
       const mcp = await this.#threadStatus(proc, id, jiraGrant !== null);
       this.#requireReady();
+      // A server is "bound" when this thread holds its grant: it must then run with every allowlisted tool. Read AFTER
+      // the await (fix I-1): a setJira or an ended binding during the status call superseded the Jira grant, so its
+      // full tool list is no longer required. Its entries stay in `mcp`: they still pass the allowlist and write-shape
+      // checks.
+      const bound = new Set<string>();
+      if (grant) bound.add(SERVER_NAME);
+      if (jiraGrant && t.jiraGrant === jiraGrant && this.#jiraGen === jiraGen) bound.add(JIRA_SERVER_NAME);
       const check = mergeChecks(
         checkThreadResponse(resp, cwd),
         checkThreadModel(resp, this.#models),
@@ -582,6 +586,8 @@ export class CodexHost {
   async #makeRoomForBinding(needed: number): Promise<void> {
     const max = this.#o.maxBindings ?? 12;
     const grants = (t: ThreadState) => (t.grant ? 1 : 0) + (t.jiraGrant ? 1 : 0);
+    // Fix M-2: an open that can never fit closes nothing.
+    if (needed > max) throw new HostBusyError("Too many repository and Jira connections are needed. Try again later.");
     for (;;) {
       const holding = [...this.#threads.values()].filter((t) => grants(t) > 0);
       const live = holding.reduce((n, t) => n + grants(t), 0);

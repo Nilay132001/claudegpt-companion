@@ -849,3 +849,60 @@ test("M6: setJira(null) while an open is in flight revokes that open's Jira gran
   await h.startTurn(id, "SYNTHETIC question");
   assert.equal(f.servers[0]!.lastThreadParams().config[`${JIRA}.command`], "/usr/bin/false");
 });
+
+test("M6 fix I-1: setJira(null) during the thread status check does not fail the host; the thread reopens without Jira", async () => {
+  let hostRef: CodexHost | null = null;
+  const { h, f, broker } = host({
+    handlers: withHandler("mcpServerStatus/list", (p, fake) => {
+      if (p?.serverName === "companion-jira" && p?.threadId) {
+        hostRef?.setJira(null); // the owner removes Jira while the check waits; the revoked server lists nothing
+        return { data: [{ name: "companion-jira", tools: {} }], nextCursor: null };
+      }
+      return goodHandlers()["mcpServerStatus/list"]!(p, fake);
+    }),
+  });
+  hostRef = h;
+  await h.start();
+  h.setJira(jiraBinding());
+  const id = await h.openThread(null, null);
+  assert.equal(h.state().state, "ready");
+  assert.equal(broker.live(), 0, "the Jira grant is revoked");
+  await h.startTurn(id, "SYNTHETIC question");
+  assert.equal(h.state().state, "ready");
+  assert.equal(f.servers[0]!.lastThreadParams().config[`${JIRA}.command`], "/usr/bin/false");
+  assert.equal(broker.grants.length, 1, "no Jira grant at the reopen");
+});
+
+test("M6 fix M-1: setJira(binding) while an open without Jira is in flight rebinds that thread with Jira at the next turn", async () => {
+  let hostRef: CodexHost | null = null;
+  let set = false;
+  const { h, f, broker } = host({
+    handlers: withHandler("thread/start", (p, fake) => {
+      if (!set) {
+        set = true;
+        hostRef?.setJira(jiraBinding());
+      }
+      return goodHandlers()["thread/start"]!(p, fake);
+    }),
+  });
+  hostRef = h;
+  await h.start();
+  const id = await h.openThread(null, null);
+  assert.equal(f.servers[0]!.lastThreadParams().config[`${JIRA}.command`], "/usr/bin/false");
+  await h.startTurn(id, "SYNTHETIC question");
+  const g = broker.grants.find((x) => x.secret !== null);
+  assert.ok(g && !g.revoked, "a live Jira grant after the rebind");
+  assert.equal(f.servers[0]!.lastThreadParams().config[`${JIRA}.command`], RELAY);
+});
+
+test("M6 fix M-2: an open that needs more grants than the cap is refused without closing any thread", async () => {
+  const { h, broker } = host({ maxBindings: 1 });
+  await h.start();
+  h.setJira(jiraBinding());
+  const first = await h.openThread(null, null); // one Jira grant: fits
+  assert.equal(broker.live(), 1);
+  await assert.rejects(h.openThread(null, bind("/r1")), HostBusyError); // needs 2 > 1
+  assert.equal(h.state().state, "ready");
+  assert.equal(broker.live(), 1, "the idle thread was not evicted for nothing");
+  await h.startTurn(first, "SYNTHETIC question");
+});
