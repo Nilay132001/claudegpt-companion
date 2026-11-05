@@ -42,12 +42,13 @@ public struct UISettings: Equatable, Sendable {
     public static func load(_ get: @Sendable (String) async throws -> String?) async -> UISettings {
         var s = UISettings()
         func read(_ k: String) async -> String? { (try? await get(k)) ?? nil }
-        if let v = await read(UIKey.speechRate).flatMap(Double.init) { s.speechRate = min(max(v, 0.5), 2.0) }
+        func finite(_ k: String) async -> Double? { await read(k).flatMap(Double.init).flatMap { $0.isFinite ? $0 : nil } }
+        if let v = await finite(UIKey.speechRate) { s.speechRate = min(max(v, 0.5), 2.0) }
         if let v = await read(UIKey.voice), !v.isEmpty { s.voiceIdentifier = v }
         if let v = await read(UIKey.autoPlay) { s.autoPlay = v == "true" }
         if let v = await read(UIKey.readCode) { s.readCode = v == "true" }
         if let v = await read(UIKey.follow) { s.followClaude = v == "true" }
-        if let v = await read(UIKey.width).flatMap(Double.init) { s.panelWidth = Double(PanelGeometry.clampWidth(v)) }
+        if let v = await finite(UIKey.width) { s.panelWidth = Double(PanelGeometry.clampWidth(v)) }
         if let v = await read(UIKey.hotkey).flatMap(HotkeySpec.init(string:)) { s.hotkey = v }
         if let v = await read(UIKey.editor).flatMap(EditorChoice.init(rawValue:)) { s.editor = v }
         return s

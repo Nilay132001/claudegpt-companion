@@ -21,6 +21,15 @@ import Testing
         #expect(!s.followClaude)
     }
 
+    @Test func nonFiniteNumbersKeepDefaults() async {
+        for bad in ["nan", "inf", "-inf"] {
+            let stored = ["ui.speech.rate": bad, "ui.window.width": bad]
+            let s = await UISettings.load { stored[$0] }
+            #expect(s.speechRate == 1.0 && s.panelWidth == 360, "\(bad)")
+            #expect(s.values["ui.window.width"] == "360" && s.values["ui.speech.rate"] == "1.0", "\(bad)")
+        }
+    }
+
     @Test func aFailingStoreGivesDefaults() async {
         struct Boom: Error {}
         #expect(await UISettings.load { _ in throw Boom() } == UISettings())
