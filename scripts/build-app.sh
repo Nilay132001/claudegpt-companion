@@ -63,14 +63,14 @@ ent_keys() {
 runtime_flag() { local i; i="$(codesign -d --verbose=2 "$1" 2>&1)"; grep -q "flags=.*runtime" <<<"$i"; }
 
 # The app: hardened runtime, exactly the microphone entitlement, arm64.
-runtime_flag "$out"
+runtime_flag "$out" || { echo "build-app: no hardened runtime: the app"; exit 1; }
 [ "$(ent_keys "$out")" = "com.apple.security.device.audio-input" ] || { echo "build-app: unexpected app entitlements"; exit 1; }
 [ "$(lipo -archs "$out/Contents/MacOS/CompanionApp")" = arm64 ] || { echo "build-app: the app is not arm64-only"; exit 1; }
 
 # Node: the pinned version, hardened runtime, exactly the two JIT entitlements, arm64.
 want_node="v$(sed -n 's/^NODE_VERSION=//p' app/bundle/node.pin)"
 [ "$("$node_bin" --version)" = "$want_node" ] || { echo "build-app: the bundled Node is not $want_node"; exit 1; }
-runtime_flag "$node_bin"
+runtime_flag "$node_bin" || { echo "build-app: no hardened runtime: node/bin/node"; exit 1; }
 [ "$(ent_keys "$node_bin")" = "com.apple.security.cs.allow-jit com.apple.security.cs.allow-unsigned-executable-memory" ] \
   || { echo "build-app: unexpected Node entitlements"; exit 1; }
 [ "$(lipo -archs "$node_bin")" = arm64 ] || { echo "build-app: Node is not arm64-only"; exit 1; }
@@ -79,10 +79,21 @@ runtime_flag "$node_bin"
 vendor="$res/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
 [ "$(plutil -extract version raw "$vendor/codex-package.json")" = "0.166.0" ] || { echo "build-app: Codex is not 0.166.0"; exit 1; }
 [ ! -e "$res/node_modules/@openai/codex-darwin-x64" ] || { echo "build-app: an x64 Codex was installed"; exit 1; }
+checked=0
+seen=" "
+while IFS= read -r -d '' f; do
+  kind="$(file -b "$f")"
+  case "$kind" in Mach-O*) ;; *) continue ;; esac
+  rel="${f#"$vendor"/}"
+  codesign --verify --strict "$f" || { echo "build-app: codex signature invalid: $rel"; exit 1; }
+  runtime_flag "$f" || { echo "build-app: no hardened runtime: $rel"; exit 1; }
+  auth="$(codesign -d --verbose=2 "$f" 2>&1)"
+  grep -q "^Authority=Developer ID Application: " <<<"$auth" || { echo "build-app: $rel is not Developer ID signed"; exit 1; }
+  checked=$((checked + 1))
+  seen="$seen$rel "
+done < <(find "$vendor" -type f -print0)
 for b in bin/codex bin/codex-code-mode-host codex-path/rg; do
-  codesign --verify --strict "$vendor/$b"
-  runtime_flag "$vendor/$b"
-  auth="$(codesign -d --verbose=2 "$vendor/$b" 2>&1)"
-  grep -q "^Authority=Developer ID Application: " <<<"$auth" || { echo "build-app: $b is not Developer ID signed"; exit 1; }
+  case "$seen" in *" $b "*) ;; *) echo "build-app: expected Codex binary not checked: $b"; exit 1 ;; esac
 done
+echo "codex: $checked Mach-O files verified"
 echo "built and verified: $out (version $version, identity: $identity)"
