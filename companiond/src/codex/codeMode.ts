@@ -82,6 +82,12 @@ export function trimCatalog(raw: string): { json: string; models: string[] } {
   return { json: JSON.stringify({ ...obj(c), models: kept }), models: kept.map((m) => String(m.slug)) };
 }
 
+/** Every additional_tools item counts; any other item type that carries tools fails closed (format drift).
+ *
+ * Known risk: 0.166.0 lists the tools reachable from a cell only as `### \`name\`` headings in exec's description.
+ * If a later Codex renders them differently, the parser stops seeing them. The canary in prepareCodeMode catches a
+ * parser that sees NO nested tool; it cannot catch a partial change where only some tools use another format. The
+ * pin to 0.166.0 is what keeps this format fixed. */
 export function parseToolSurface(raw: string): ToolSurface {
   let items: unknown;
   try {
@@ -89,24 +95,33 @@ export function parseToolSurface(raw: string): ToolSurface {
   } catch {
     throw new CodeModeError("codex debug prompt-input did not print JSON");
   }
-  const add = Array.isArray(items) ? items.map(obj).find((x) => x?.type === "additional_tools") : undefined;
-  if (!add || !Array.isArray(add.tools)) throw new CodeModeError("codex debug prompt-input lists no tools");
+  if (!Array.isArray(items)) throw new CodeModeError("codex debug prompt-input lists no tools");
   const top: string[] = [];
-  let nested: string[] = [];
-  for (const nsRaw of add.tools) {
-    const ns = obj(nsRaw);
-    const name = String(ns?.name ?? "?");
-    if (!Array.isArray(ns?.tools)) {
-      top.push(name);
+  const nested: string[] = [];
+  let seen = false;
+  for (const item of items.map(obj)) {
+    if (item?.type !== "additional_tools") {
+      if (item && "tools" in item) throw new CodeModeError("codex debug prompt-input lists tools in an item type the companion does not know");
       continue;
     }
-    for (const tRaw of ns.tools) {
-      const t = obj(tRaw);
-      const tool = String(t?.name ?? "?");
-      top.push(`${name}.${tool}`);
-      if (name === "functions" && tool === "exec") nested = [...String(t?.description ?? "").matchAll(/^### `([^`]+)`/gm)].map((m) => String(m[1]));
+    if (!Array.isArray(item.tools)) throw new CodeModeError("codex debug prompt-input lists no tools");
+    seen = true;
+    for (const nsRaw of item.tools) {
+      const ns = obj(nsRaw);
+      const name = String(ns?.name ?? "?");
+      if (!Array.isArray(ns?.tools)) {
+        top.push(name);
+        continue;
+      }
+      for (const tRaw of ns.tools) {
+        const t = obj(tRaw);
+        const tool = String(t?.name ?? "?");
+        top.push(`${name}.${tool}`);
+        if (name === "functions" && tool === "exec") nested.push(...[...String(t?.description ?? "").matchAll(/^### `([^`]+)`/gm)].map((m) => String(m[1])));
+      }
     }
   }
+  if (!seen) throw new CodeModeError("codex debug prompt-input lists no tools");
   return { top, nested };
 }
 

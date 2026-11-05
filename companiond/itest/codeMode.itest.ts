@@ -13,10 +13,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveRunner, prepareCodeMode, promptInputArgs, parseToolSurface } from "../src/codex/codeMode.ts";
 import { findCodex } from "../src/codex/codexInstall.ts";
-import { buildCodexLaunch, buildCodexProfile, LOGIN_CALLBACK_PORT } from "../src/codex/codexSeatbelt.ts";
+import { buildCodexLaunch, buildCodexProfile, LOGIN_CALLBACK_PORT, LOOPBACK_DENY } from "../src/codex/codexSeatbelt.ts";
 import { startAppServer } from "./helpers/appServer.ts";
 import { CATALOG_FILE, CODE_MODE_OFF_FEATURES, CODEX_PROTECTED_FILES, OFF_FEATURES, writeCodexConfig, writeCodexHomeFile } from "../src/codex/config.ts";
-import { checkCodeModeConfig, checkConfigRead, checkFeatureList, checkMcpStatus } from "../src/codex/selfCheck.ts";
+import { checkCodeModeConfig, checkConfigLayers, checkConfigRead, checkFeatureList, checkMcpStatus } from "../src/codex/selfCheck.ts";
 import { COMPANION_ALLOWLIST } from "../src/codex/serverRequests.ts";
 import { SERVER_NAME } from "../src/jail/mcpServer.ts";
 import { SANDBOX_EXEC } from "../src/launch/seatbelt.ts";
@@ -54,6 +54,7 @@ test("app-server under the production profile: config/read shows the code-mode c
     const st: any = await s.a.rpc.request("mcpServerStatus/list", { threadId: s.threadId, serverName: SERVER_NAME });
     const report = {
       configRead: checkConfigRead(cfg, [...OFF_FEATURES, ...CODE_MODE_OFF_FEATURES]).failures,
+      configLayers: checkConfigLayers(cfg, paths.codexHome).failures,
       codeMode: checkCodeModeConfig(cfg, features?.data ?? [], path.join(paths.codexHome, CATALOG_FILE)).failures,
       featureList: checkFeatureList(features?.data ?? [], OFF_FEATURES, "0.166.0").failures,
       boundTools: checkMcpStatus((st?.data ?? []).filter((e: any) => e?.name === SERVER_NAME), COMPANION_ALLOWLIST, "thread").failures,
@@ -63,7 +64,7 @@ test("app-server under the production profile: config/read shows the code-mode c
       signedIn: await isSignedIn(s.a),
     };
     console.log(JSON.stringify(report));
-    assert.deepEqual([report.configRead, report.codeMode, report.featureList, report.boundTools], [[], [], [], []]);
+    assert.deepEqual([report.configRead, report.configLayers, report.codeMode, report.featureList, report.boundTools], [[], [], [], [], []]);
     assert.ok(report.broker.includes("bound"));
     assert.equal(report.broker.includes("refused"), false);
   } finally {
@@ -73,15 +74,20 @@ test("app-server under the production profile: config/read shows the code-mode c
 
 // MEASUREMENT ONLY: the probe sits in the relay's exec slot of an otherwise production profile, so it runs with
 // exactly the rights Codex, its code-mode host and the relay have. errno is asserted, never exit codes (M8).
-function probeRun(paths: ReturnType<typeof freshPaths>, actions: Array<[string, string]>, o: { login?: boolean } = {}): Record<string, string> {
+// dropLoopbackDeny: the negative control only (review fix round 1), the same profile minus LOOPBACK_DENY.
+function probeRun(paths: ReturnType<typeof freshPaths>, actions: Array<[string, string]>, o: { login?: boolean; dropLoopbackDeny?: boolean } = {}): Record<string, string> {
   const d = tempDir("cgc-probe-");
   const probe = path.join(d, "probe");
   execFileSync("/usr/bin/xcrun", ["clang", "-O2", "-Wall", "-Werror", "-o", probe, fileURLToPath(new URL("./fixtures/probe.c", import.meta.url))], { stdio: ["ignore", "ignore", "ignore"] });
   const relay = relayPaths(paths.supportDir);
-  const profile = buildCodexProfile({
+  const full = buildCodexProfile({
     install: findCodex(), codexHome: paths.codexHome, emptyCwd: paths.emptyCwd, supportDir: paths.supportDir, home: os.homedir(),
     relay: { binary: probe, socket: relay.socket }, protectedFiles: CODEX_PROTECTED_FILES, login: o.login === true,
   });
+  const lines = full.split("\n");
+  const kept = o.dropLoopbackDeny ? lines.filter((l) => l !== LOOPBACK_DENY) : lines;
+  if (o.dropLoopbackDeny) assert.equal(lines.length - kept.length, 1, "the control drops exactly the loopback deny");
+  const profile = kept.join("\n");
   const r = spawnSync(SANDBOX_EXEC, ["-p", profile, probe, ...actions.map((a) => a[1])], { env: {}, cwd: paths.emptyCwd, encoding: "utf8", timeout: 60_000 });
   const out: Record<string, string> = {};
   for (const line of r.stdout.trim().split("\n").filter(Boolean)) {
@@ -105,18 +111,18 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
   await new Promise<void>((r) => decoy.listen(path.join(decoyDir, "d.sock"), r));
   const tcp = net.createServer((c) => { hits++; c.destroy(); });
   await new Promise<void>((r) => tcp.listen(0, "127.0.0.1", r));
-  // A service on all interfaces at 443 (Docker, dev proxies: review I5 / plan review I-7). macOS lets a user bind 443.
-  // Reachable from the LAN while the test runs, so only connections from this Mac's own addresses count (re-review N-6).
-  const ownIp = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address ?? null;
-  const localPeers = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", ...(ownIp ? [ownIp, `::ffff:${ownIp}`] : [])]);
-  const any443 = net.createServer((c) => {
-    if (localPeers.has(c.remoteAddress ?? "")) hits++;
-    c.destroy();
-  });
-  const listening443 = await new Promise<boolean>((r) => {
-    any443.once("error", () => r(false));
-    any443.listen(443, "0.0.0.0", () => r(true));
-  });
+  // Local services on 443 (Docker, dev proxies: review I5 / plan review I-7) are judged from errno alone: no listener
+  // on 443 is opened (review fix round 1). EPERM/EACCES = Seatbelt refused; anything else = the connect was allowed.
+  // The negative control below shows the same rows are NOT refused once the loopback deny is dropped.
+  const ifaces = Object.values(os.networkInterfaces()).flat();
+  const ownIp = ifaces.find((i) => i && i.family === "IPv4" && !i.internal)?.address ?? null;
+  // A routable own IPv6 address (link-local ones need a scope id the probe does not take).
+  const ownIp6 = ifaces.find((i) => i && i.family === "IPv6" && !i.internal && !i.address.toLowerCase().startsWith("fe80"))?.address ?? null;
+  const localRows: Array<[string, string]> = [
+    ["loopback443", "tcp:443"], ["loopback443v6", "tcp6:443"], ["anyAddr443", "host:0.0.0.0:443"], ["anyAddr443v6", "host:::443"],
+    ...(ownIp ? [["ownIp443", `host:${ownIp}:443`] as [string, string]] : []),
+    ...(ownIp6 ? [["ownIp6_443", `host:${ownIp6}:443`] as [string, string]] : []),
+  ];
   const config = "# SYNTHETIC FIXTURE config\n";
   writeCodexConfig(paths.codexHome, config);
   writeCodexHomeFile(paths.codexHome, CATALOG_FILE, "{}");
@@ -127,7 +133,7 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
   try {
     const out = probeRun(paths, [
       ["relaySocket", `unix:${relay.socket}`], ["decoySocket", `unix:${path.join(decoyDir, "d.sock")}`],
-      ["dnsSocket", "unix:/private/var/run/mDNSResponder"], ["loopback443", "tcp:443"], ["loopback443v6", "tcp6:443"],
+      ["dnsSocket", "unix:/private/var/run/mDNSResponder"], ...localRows,
       ["loopbackListener", `tcp:${(tcp.address() as net.AddressInfo).port}`], ["bindInCodexHome", `bind:${path.join(h, "b.sock")}`],
       ["execSh", "exec:/bin/sh"], ["execNode", `exec:${fs.realpathSync.native(process.execPath)}`], ["execSandboxExec", `exec:${SANDBOX_EXEC}`],
       ["execFalse", "exec:/usr/bin/false"], ["writeConfigToml", `write:${path.join(h, "config.toml")}`], ["writeCatalog", `write:${path.join(h, CATALOG_FILE)}`],
@@ -136,15 +142,16 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
       ["readRepo", `read:${path.join(repo, "README.md")}`], ["unlinkRelaySocket", `unlink:${relay.socket}`],
       ["linkConfigToml", `link:${path.join(h, "config.toml")}>${path.join(h, "cfg-link.toml")}`],
       ["linkCatalog", `link:${path.join(h, CATALOG_FILE)}>${path.join(h, "cat-link.json")}`],
-      ["anyAddr443", "host:0.0.0.0:443"], ...(ownIp ? [["ownIp443", `host:${ownIp}:443`] as [string, string]] : []),
       ["bindLoginPort", `bindtcp:127.0.0.1:${LOGIN_CALLBACK_PORT}`],
     ]);
+    // MEASUREMENT-ONLY negative control: the production profile minus the loopback deny, same local rows.
+    const control = probeRun(paths, localRows, { dropLoopbackDeny: true });
     // The sign-in profile (ruling I-9), signed out: only the callback port opens.
     const login = probeRun(paths, [
       ["bindLoginPort", `bindtcp:127.0.0.1:${LOGIN_CALLBACK_PORT}`], ["bindOtherPort", `bindtcp:127.0.0.1:${LOGIN_CALLBACK_PORT + 1}`],
       ["bindLoginPortAnyAddr", `bindtcp:0.0.0.0:${LOGIN_CALLBACK_PORT}`], ["loopback443", "tcp:443"], ["execSh", "exec:/bin/sh"],
     ], { login: true });
-    console.log(JSON.stringify({ profileProbe: out, loginProfileProbe: login, listening443, decoyAndLoopbackHits: hits }));
+    console.log(JSON.stringify({ profileProbe: out, loopbackDenyControl: control, loginProfileProbe: login, decoyAndLoopbackHits: hits }));
     assert.equal(out.relaySocket, "OK");
     assert.equal(out.dnsSocket, "OK");
     assert.equal(out.writeCodexHome, "OK");
@@ -153,9 +160,14 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
     for (const k of [
       "decoySocket", "loopbackListener", "bindInCodexHome", "execSh", "execNode", "execSandboxExec", "execFalse", "writeConfigToml",
       "writeCatalog", "unlinkConfigToml", "renameOntoConfigToml", "readHomeCanary", "writeHomeCanary", "readRepo", "unlinkRelaySocket",
-      "linkConfigToml", "linkCatalog", "loopback443", "loopback443v6", "anyAddr443", ...(ownIp ? ["ownIp443"] : []), "bindLoginPort",
+      "linkConfigToml", "linkCatalog", ...localRows.map((r) => r[0]), "bindLoginPort",
     ]) {
       assert.match(out[k] ?? "missing", DENIED, k);
+    }
+    // Without the deny the same connects are not refused by Seatbelt (ECONNREFUSED or OK): the deny is what blocks them.
+    for (const [k] of localRows) {
+      assert.ok(control[k] !== undefined, `control ${k}`);
+      assert.doesNotMatch(control[k] ?? "", DENIED, `control ${k}`);
     }
     assert.equal(login.bindLoginPort, "OK");
     for (const k of ["bindOtherPort", "loopback443", "execSh"]) assert.match(login[k] ?? "missing", DENIED, `login ${k}`);
@@ -167,7 +179,6 @@ test("Seatbelt at the profile level: one relay socket, no loopback, no exec, pro
     relayListener.close();
     decoy.close();
     tcp.close();
-    any443.close();
   }
 });
 
@@ -199,7 +210,8 @@ test("sign-in, signed out: the production profile refuses the callback server; t
 test("signed in: list_dir through the relay, then the exec-cell gate", { skip: live }, async (t) => {
   const paths = ownPaths();
   const repo = makeRepo({ "pelican-ledger.txt": "ledger entries\n" });
-  const s = await startSession({ paths, root: repo });
+  // rawEvents: the gate reads the cell's verdict from the exec call's own output (review fix round 1).
+  const s = await startSession({ paths, root: repo, rawEvents: true });
   try {
     if (!(await isSignedIn(s.a))) return t.skip("the companion's CODEX_HOME is not signed in");
     const baseline = await s.turn("Use functions.exec to call tools.mcp__companion_readonly__list_dir({}) once, then list the file names it returned.");

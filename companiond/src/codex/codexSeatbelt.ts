@@ -44,6 +44,8 @@ const KEYCHAIN_MACH = /SecurityServer|securityd|trustd/;
 export const CODEX_SEATBELT_MEASURED: "ok" | "stopped" = "stopped";
 
 export const DNS_SOCKET = "/private/var/run/mDNSResponder";
+/** Review I5: no local service on 443 (loopback, and in measurement 0.0.0.0, :: and the Mac's own addresses). */
+export const LOOPBACK_DENY = '(deny network-outbound (remote tcp "localhost:*"))';
 export const SYSTEM_READS: readonly string[] = [
   "/usr/lib", "/usr/share", "/System", "/Library/Preferences", "/Library/Keychains",
   "/private/etc/ssl", "/private/etc/codex", "/private/var/db/timezone",
@@ -100,7 +102,7 @@ export function buildCodexProfile(i: CodexProfileInput): string {
     ...(r
       ? [
           '(allow network-outbound (remote tcp "*:443"))',
-          '(deny network-outbound (remote tcp "localhost:*"))', // review I5: no local service on 443
+          LOOPBACK_DENY,
           `(allow network-outbound (remote unix-socket (path-literal ${sbplString(DNS_SOCKET)})))`,
           `(allow network-outbound (remote unix-socket (path-literal ${sbplString(r.socket)})))`,
         ]

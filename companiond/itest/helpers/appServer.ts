@@ -6,7 +6,7 @@ import { NOT_PERMITTED } from "../../src/codex/serverRequests.ts";
 import { nodeSpawn } from "../../src/codex/spawn.ts";
 
 export interface Seen { method: string; params: any }
-export interface AppServer { rpc: RpcClient; init: any; requests: Seen[]; notifications: Seen[]; kill(): void }
+export interface AppServer { rpc: RpcClient; init: any; requests: Seen[]; notifications: Seen[]; pid: number | undefined; kill(): void }
 
 export async function startAppServer(launch: CodexLaunch, onServerRequest?: (m: string, p: any) => Promise<ServerReply>): Promise<AppServer> {
   const s = nodeSpawn(launch);
@@ -24,7 +24,7 @@ export async function startAppServer(launch: CodexLaunch, onServerRequest?: (m: 
   s.onExit((d) => rpc.close(d));
   const init = await rpc.request("initialize", { clientInfo: CLIENT_INFO, capabilities: null });
   rpc.notify("initialized");
-  return { rpc, init, requests, notifications, kill: () => s.kill() };
+  return { rpc, init, requests, notifications, pid: s.pid, kill: () => s.kill() };
 }
 
 export async function threadTools(a: AppServer, threadId: string, serverName: string): Promise<{ tools: string[]; serverInfo: any; error: unknown }> {

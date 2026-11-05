@@ -45,6 +45,16 @@ test("the surface parser reads top-level tools and the tools nested in exec", ()
   assert.throws(() => parseToolSurface(JSON.stringify([{ type: "message" }])), CodeModeError);
 });
 
+test("the surface parser reads every additional_tools item and refuses tools under an unknown item type", () => {
+  const first = JSON.parse(promptInput({ functions: ["exec", "wait"] }, ["mcp__companion_readonly__list_dir"]));
+  const second = JSON.parse(promptInput({ collaboration: ["spawn_agent"] }, []))[1];
+  assert.deepEqual(parseToolSurface(JSON.stringify([...first, second])), {
+    top: ["functions.exec", "functions.wait", "collaboration.spawn_agent"], nested: ["mcp__companion_readonly__list_dir"],
+  });
+  assert.throws(() => parseToolSurface(JSON.stringify([...first, { type: "deferred_tools", tools: [{ name: "x" }] }])), CodeModeError);
+  assert.throws(() => parseToolSurface(JSON.stringify([...first, { type: "additional_tools", tools: null }])), CodeModeError);
+});
+
 test("the surface must be exactly exec and wait, with only the jail tools nested", () => {
   assert.deepEqual(checkToolSurface("m", { top: ["functions.wait", "functions.exec"], nested: [...ALLOWED_NESTED] }).failures, []);
   assert.match(checkToolSurface("m", { top: ["functions.exec", "functions.wait"], nested: ["apply_patch"] }).failures.join(), /apply_patch/);

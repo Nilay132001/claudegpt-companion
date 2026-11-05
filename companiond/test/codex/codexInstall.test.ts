@@ -45,3 +45,14 @@ test("a symlink inside the vendor folder may not lead out of it (M-7)", () => {
   fs.symlinkSync(path.join(outside, "codex"), path.join(d, "bin", "codex"));
   assert.throws(() => readVendorDir(d), CodexInstallError);
 });
+
+test("the code-mode host may not be a symlink that leads out of the vendor folder (M-7)", () => {
+  const d = vendor({ version: "0.166.0", entrypoint: "bin/codex" });
+  const outside = tempDir("cgc-outside-");
+  fs.writeFileSync(path.join(outside, "codex-code-mode-host"), MARK);
+  fs.symlinkSync(path.join(outside, "codex-code-mode-host"), path.join(d, "bin", "codex-code-mode-host"));
+  assert.throws(() => readVendorDir(d), CodexInstallError);
+  fs.rmSync(path.join(d, "bin", "codex-code-mode-host"));
+  fs.writeFileSync(path.join(d, "bin", "codex-code-mode-host"), MARK);
+  assert.equal(readVendorDir(d).codeModeHost, path.join(d, "bin", "codex-code-mode-host"));
+});
