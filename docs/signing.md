@@ -73,7 +73,7 @@ These steps need your own Apple Developer account. They are not run by any agent
    ```bash
    COMPANION_SIGN_IDENTITY="Developer ID Application: <you>" \
    COMPANION_NOTARY_PROFILE="<profile name>" \
-   bash scripts/notarize.sh app/build/ClaudeGPT-Companion-0.7.0.dmg
+   bash scripts/notarize.sh app/build/ClaudeGPT-Companion-0.8.0.dmg
    ```
 
    `scripts/notarize.sh` refuses an ad-hoc build. It reads no credential itself: `notarytool` takes them from your
