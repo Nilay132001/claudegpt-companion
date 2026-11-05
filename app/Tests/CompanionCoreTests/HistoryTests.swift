@@ -179,4 +179,52 @@ import Testing
         let none = try j(#"{"threadId":null,"turns":[]}"#, HistoryTurns.self)
         #expect(none.threadId == nil && none.turns.isEmpty)
     }
+
+    @Test func lateLoadAfterNewChatIsDropped() async {
+        let d = FakeDaemon()
+        d.turnsStore = [turn("u1")]
+        d.turnsGate = true
+        let m = AppModel(connector: { d.connection })
+        let start = Task { await m.start() }
+        for _ in 0..<200 where d.gateResume == nil { await Task.yield() }
+        #expect(d.gateResume != nil)
+        await m.newChat() // cancels the suspended load and bumps the token
+        d.gateResume?.resume()
+        await start.value
+        await m.chatLoad?.value
+        #expect(m.currentMessages.isEmpty)
+        #expect(m.records.isEmpty)
+    }
+
+    @Test func restoreWaitsForASendInFlight() async {
+        let d = FakeDaemon()
+        d.turnsStore = [turn("u1", q: "old", a: "older")]
+        let m = AppModel(connector: { d.connection })
+        d.turnsGate = true
+        let start = Task { await m.start() }
+        for _ in 0..<200 where d.gateResume == nil { await Task.yield() }
+        // The restore read finishes while chat.send is still unanswered; the store already holds the live turn.
+        d.duringSend = {
+            d.turnsStore.append(self.turn("u1x", q: "live", a: ""))
+            d.gateResume?.resume()
+            for _ in 0..<50 { await Task.yield() }
+        }
+        d.sendResults = [.success(SendResult(threadId: "t1", turnId: "u1x"))]
+        let ask = Task { await m.ask("live") }
+        await ask.value
+        await start.value
+        await m.chatLoad?.value
+        #expect(d.calls.contains("chat.send:p-auto"), "\(d.calls)")
+        #expect(m.currentMessages.map(\.text) == ["old", "older", "live", ""], "\(m.currentMessages.map(\.text))")
+    }
+
+    @Test func rejectedQuestionKeepsThePastChatOpen() async {
+        let d = FakeDaemon()
+        d.turnsStore = [turn("o1", thread: "old")]
+        let m = await started(d)
+        await m.loadHistory()
+        await m.openPastChat(m.history!.chats[0])
+        #expect(await m.ask(String(repeating: "x", count: 20_001)) == false)
+        #expect(m.pastChat != nil)
+    }
 }

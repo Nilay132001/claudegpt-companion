@@ -11,20 +11,30 @@ extension AppModel {
     public func loadCurrentChat(sessionId sid: String) async {
         guard let api, !loadedChats.contains(sid) else { return }
         loadedChats.insert(sid)
+        let gen = generation, token = chatTokens[sid, default: 0]
         do {
             let turns = try await api.historyTurns(sessionId: sid).turns
+            guard generation == gen, chatTokens[sid, default: 0] == token, !Task.isCancelled else { return }
+            if sendsInFlight[sid, default: 0] > 0 {
+                // A send is between chat.send and its answer: restore after it attaches, so its turn is not added twice.
+                loadedChats.remove(sid)
+                reloadAfterSend.insert(sid)
+                return
+            }
             conversations[sid, default: Conversation()].restore(turns)
             for t in turns { records[t.turnId] = t }
         } catch {
-            loadedChats.remove(sid) // try again at the next selection or reconnect
+            if generation == gen, chatTokens[sid, default: 0] == token { loadedChats.remove(sid) } // try again at the next selection or reconnect
         }
     }
 
     /// After a reply ends: the daemon now holds its context block and items.
     func refreshRecords(sessionId sid: String) {
         guard let api else { return }
+        let gen = generation, token = chatTokens[sid, default: 0]
         recordLoad = Task {
-            guard let turns = try? await api.historyTurns(sessionId: sid).turns else { return }
+            guard let turns = try? await api.historyTurns(sessionId: sid).turns,
+                  self.generation == gen, self.chatTokens[sid, default: 0] == token else { return }
             for t in turns { self.records[t.turnId] = t }
         }
     }
@@ -32,8 +42,11 @@ extension AppModel {
     /// ⌘K: the next question starts a new thread. Refused while GPT is answering.
     public func newChat() async {
         guard let api, let sid = selectedSessionId, !isAnswering else { return }
+        chatTokens[sid, default: 0] += 1
+        chatLoad?.cancel()
         do {
             try await api.chatNewChat(sessionId: sid)
+            chatTokens[sid, default: 0] += 1
             conversations[sid] = Conversation()
             records = records.filter { $0.value.sessionId != sid }
             pastChat = nil
@@ -50,8 +63,11 @@ extension AppModel {
 
     public func openPastChat(_ summary: ChatSummary) async {
         guard let api else { return }
+        pastToken += 1
+        let gen = generation, token = pastToken
         do {
             let turns = try await api.historyTurns(threadId: summary.threadId).turns
+            guard generation == gen, pastToken == token else { return }
             var c = Conversation()
             c.restore(turns)
             for t in turns { records[t.turnId] = t }
@@ -61,12 +77,18 @@ extension AppModel {
         }
     }
 
-    public func closePastChat() { pastChat = nil }
+    public func closePastChat() {
+        pastToken += 1
+        pastChat = nil
+    }
 
     /// nil clears every stored chat.
     public func clearHistory(threadId: String?) async {
         guard let api else { return }
         let current = history?.currentThreads ?? [:]
+        for sid in Array(conversations.keys) + Array(loadedChats) { chatTokens[sid, default: 0] += 1 }
+        pastToken += 1
+        chatLoad?.cancel()
         do {
             try await api.historyClear(threadId: threadId)
         } catch {

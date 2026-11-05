@@ -393,7 +393,7 @@ public struct TurnItem: Sendable, Equatable, Identifiable {
     /// Position in the turn's item list (assigned when the turn is decoded).
     public let index: Int
     public var id: String { "\(index)" }
-    public init(kind: String, label: String, text: String, redactions: Int, index: Int = 0) {
+    public init(kind: String, label: String, text: String, redactions: Int, index: Int) {
         self.kind = kind
         self.label = label
         self.text = text

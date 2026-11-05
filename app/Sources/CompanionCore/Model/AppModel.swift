@@ -72,7 +72,13 @@ public final class AppModel {
     @ObservationIgnored private let connector: Connector
     @ObservationIgnored private var current: Connection?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
-    @ObservationIgnored private var generation = 0
+    @ObservationIgnored var generation = 0
+    /// Bumped by newChat / clearHistory / session changes: a stored-chat read that started under an older token is dropped.
+    @ObservationIgnored var chatTokens: [String: Int] = [:]
+    @ObservationIgnored var pastToken = 0
+    /// Sends between chat.send being called and answering; a restore must not run in that window.
+    @ObservationIgnored var sendsInFlight: [String: Int] = [:]
+    @ObservationIgnored var reloadAfterSend: Set<String> = []
     /// False until this connection has told us the host state (host.status or host.changed). Until then a security
     /// stop cannot be ruled out, so restartDaemon reads the state first.
     @ObservationIgnored private var hostKnown = false
@@ -95,6 +101,9 @@ public final class AppModel {
         generation += 1
         hostKnown = false
         loadedChats = []
+        chatTokens = [:]
+        sendsInFlight = [:]
+        reloadAfterSend = []
         let gen = generation
         let c: Connection
         do {
@@ -256,11 +265,12 @@ public final class AppModel {
     public func ask(_ raw: String) async -> Bool {
         let q = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, let api, let sid = selectedSessionId, gate == .ready else { return false }
-        pastChat = nil // a past chat is only a view: asking always goes to the current chat
         guard q.utf16.count <= DaemonLimits.questionUTF16 else {
             errorMessage = "The question is too long. Keep it under 20,000 characters."
             return false
         }
+        pastChat = nil // a past chat is only a view: asking always goes to the current chat
+        pastToken += 1
         do {
             let p = try await api.chatPrepare(sessionId: sid, question: q)
             // Second guard: an Ask-mode prepare always goes through the sheet, whatever needsConfirm says.
@@ -314,6 +324,14 @@ public final class AppModel {
 
     private func send(sessionId sid: String, _ s: PendingSend, question: String, attempt: Int = 0) async {
         guard let api else { return }
+        sendsInFlight[sid, default: 0] += 1
+        defer {
+            sendsInFlight[sid, default: 1] -= 1
+            if sendsInFlight[sid] == 0 {
+                sendsInFlight[sid] = nil
+                if reloadAfterSend.remove(sid) != nil { chatLoad = Task { await self.loadCurrentChat(sessionId: sid) } }
+            }
+        }
         var conv = conversations[sid] ?? Conversation()
         let mid = conv.begin(question: question)
         conversations[sid] = conv

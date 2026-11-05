@@ -128,6 +128,9 @@ import Foundation
     // History (M8): `turnsStore` is the daemon's stored turns, oldest first.
     var turnsStore: [TurnRecord] = []
     var historyEnabled = true
+    /// When true, the next history.turns(sessionId:) suspends until `gateResume` is resumed (then answers from the store as it is).
+    var turnsGate = false
+    var gateResume: CheckedContinuation<Void, Never>?
     var historyListError: DaemonError?
     var newChatError: DaemonError?
     func historyList() async throws -> HistoryList {
@@ -145,6 +148,12 @@ import Foundation
     }
     func historyTurns(sessionId: String) async throws -> HistoryTurns {
         calls.append("history.turns:session:\(sessionId)")
+        if turnsGate {
+            turnsGate = false
+            await withCheckedContinuation { gateResume = $0 }
+            let mine = turnsStore.filter { $0.sessionId == sessionId }
+            return HistoryTurns(threadId: mine.last?.threadId, turns: mine)
+        }
         let mine = turnsStore.filter { $0.sessionId == sessionId }
         guard let thread = mine.last?.threadId else { return HistoryTurns(threadId: nil, turns: []) }
         return HistoryTurns(threadId: thread, turns: mine.filter { $0.threadId == thread })
