@@ -199,6 +199,18 @@ import Testing
         #expect(d.calls.filter { $0 == "daemon.hello" }.count == 2) // connected again
     }
 
+    @Test func aFailureAfterHelloKeepsTheDaemonConnectedAndTheSecurityStopBinding() async {
+        let d = FakeDaemon()
+        d.host = .failed(detail: "Security check failed: x")
+        d.privacyError = DaemonError(code: DaemonErrorCode.invalidParams, message: "privacy unavailable")
+        let (m, _) = await started(d)
+        #expect(m.connection == .connected(daemonVersion: "0.4.0"))
+        #expect(m.gate == .securityStop("Security check failed: x"))
+        #expect(m.errorMessage == "privacy unavailable")
+        await m.restartDaemon()
+        #expect(!d.calls.contains("daemon.shutdown"))
+    }
+
     @Test func authErrorHasAWayOut() async {
         let d = FakeDaemon()
         d.authError = DaemonError(code: DaemonErrorCode.hostNotReady, message: "Codex is not ready.")

@@ -77,8 +77,9 @@ public final class AppModel {
         connection = .connecting
         generation += 1
         let gen = generation
+        let c: Connection
         do {
-            let c = try await connector()
+            c = try await connector()
             current = c
             eventTask = Task { [weak self] in
                 for await e in c.events {
@@ -88,6 +89,14 @@ public final class AppModel {
             }
             let hello = try await c.api.hello()
             connection = .connected(daemonVersion: hello.daemonVersion)
+        } catch {
+            // No live daemon: only a connector failure or a failed hello means "stopped".
+            connection = .stopped(Self.describe(error))
+            return
+        }
+        // The daemon is alive from here on. A failure now must not read as "stopped": that would let a restart
+        // skip a security stop's acknowledgement (ruling 18).
+        do {
             host = try await c.api.hostStatus()
             privacy = try await c.api.privacyGet()
             settings = await UISettings.load { try await c.api.settingsGet($0) }
@@ -95,7 +104,7 @@ public final class AppModel {
             apply(snapshot: try await c.api.sessionsSnapshot())
             if host.isReady { await loadAuth() }
         } catch {
-            connection = .stopped(Self.describe(error))
+            errorMessage = Self.describe(error)
         }
     }
 

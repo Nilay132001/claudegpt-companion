@@ -81,7 +81,12 @@ import Foundation
         SyncStatus(state: "live", stats: SyncStats(records: 3, malformedLines: 1, unknownRecords: 0, droppedEvents: 0), lastPollAt: 1)
     }
     func sessionsWorktree(_ sessionId: String) async throws -> WorktreeResolution? { calls.append("sessions.worktree"); return worktree }
-    func privacyGet() async throws -> PrivacyState { calls.append("privacy.get"); return privacy }
+    var privacyError: DaemonError?
+    func privacyGet() async throws -> PrivacyState {
+        calls.append("privacy.get")
+        if let e = privacyError { throw e }
+        return privacy
+    }
     func privacySetSharingMode(_ mode: SharingMode) async throws -> SharingMode {
         calls.append("privacy.setSharingMode:\(mode.rawValue)")
         privacy = PrivacyState(sharingMode: mode, approvals: privacy.approvals, redactionNotice: privacy.redactionNotice)
