@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
-# Builds "ClaudeGPT Companion.app" from the Swift package and signs it.
-# Identity: COMPANION_SIGN_IDENTITY (default "-" = ad-hoc). No notarization here (M7).
+# Builds "ClaudeGPT Companion.app" (M7): the Swift app, companiond (sources, the relay source, production dependencies
+# with the pinned Codex) and the pinned official Node.js, signed inside out.
+# Identity: COMPANION_SIGN_IDENTITY (default "-" = ad-hoc). A real identity also gets a secure timestamp (R4).
+# Codex keeps OpenAI's own signature and is only checked; Node is re-signed with app/bundle/node.entitlements (R3).
+# No notarization here: scripts/notarize.sh (owner only).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 identity="${COMPANION_SIGN_IDENTITY:--}"
 out="app/build/ClaudeGPT Companion.app"
+[ "$(uname -m)" = arm64 ] || { echo "build-app: Apple silicon only"; exit 1; }
+if [ "$identity" = "-" ]; then ts=(--timestamp=none); else ts=(--timestamp); fi
+
+# One version (R6): companiond/package.json, and both Info.plist keys must match it.
+version="$(plutil -extract version raw companiond/package.json)"
+for key in CFBundleShortVersionString CFBundleVersion; do
+  v="$(/usr/libexec/PlistBuddy -c "Print :$key" app/bundle/Info.plist)"
+  [ "$v" = "$version" ] || { echo "build-app: Info.plist $key is $v, companiond is $version"; exit 1; }
+done
 
 (cd app && swift build -c release --product CompanionApp)
 bin_dir="$(cd app && swift build -c release --product CompanionApp --show-bin-path)"
@@ -13,28 +25,64 @@ rm -rf "$out"
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
 cp "$bin_dir/CompanionApp" "$out/Contents/MacOS/CompanionApp"
 cp app/bundle/Info.plist "$out/Contents/Info.plist"
-# companiond (M5, ruling 1): sources + production dependencies, run with the user's Node >= 24.
+plutil -lint "$out/Contents/Info.plist"
+
+# companiond: sources, the relay source (built at every daemon start, spec §7.1.9) and production dependencies.
 res="$out/Contents/Resources/companiond"
 mkdir -p "$res"
 cp companiond/package.json companiond/package-lock.json "$res/"
 cp -R companiond/src "$res/src"
+cp -R companiond/relay "$res/relay"
 (cd "$res" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
-plutil -lint "$out/Contents/Info.plist"
 
-codesign --force --options runtime --timestamp=none \
+# Node (R1): the pinned official build, re-signed with only the JIT entitlements (plan fact 2).
+bash scripts/fetch-node.sh "$out/Contents/Resources"
+node_bin="$out/Contents/Resources/node/bin/node"
+codesign --force --options runtime "${ts[@]}" --entitlements app/bundle/node.entitlements --sign "$identity" "$node_bin"
+
+codesign --force --options runtime "${ts[@]}" \
   --entitlements app/bundle/CompanionApp.entitlements --sign "$identity" "$out"
 
-# Verification
-codesign --verify --strict --verbose=2 "$out"
-test -f "$out/Contents/Resources/companiond/src/lineBuffer.ts"
-test -d "$out/Contents/Resources/companiond/node_modules/@openai/codex"
-test -f "$out/Contents/Resources/companiond/src/daemon/main.ts"
-# Capture first, then grep: `codesign | grep -q` can fail under pipefail when grep exits early (SIGPIPE).
-ents="$(codesign -d --entitlements - --xml "$out" 2>/dev/null)"
-grep -q "com.apple.security.device.audio-input" <<<"$ents"
-info="$(codesign -d --verbose=2 "$out" 2>&1)"
-grep -q "flags=.*runtime" <<<"$info"
+# ---- Verification ----
+codesign --verify --deep --strict --verbose=2 "$out"
+for f in src/lineBuffer.ts src/daemon/main.ts src/version.ts relay/relay.c package.json; do test -f "$res/$f"; done
 for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription CFBundleIdentifier LSMinimumSystemVersion; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$out/Contents/Info.plist" >/dev/null
 done
-echo "built and verified: $out (identity: $identity)"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# Entitlement keys of a signed file, sorted, one line. Capture first, then parse (no pipes into grep -q under pipefail).
+ent_keys() {
+  local xml="$work/ents.plist"
+  codesign -d --entitlements - --xml "$1" >"$xml" 2>/dev/null || true
+  [ -s "$xml" ] || { echo ""; return; }
+  plutil -convert json -o - "$xml" | node -e 'process.stdout.write(Object.keys(JSON.parse(require("fs").readFileSync(0,"utf8"))).sort().join(" "))'
+}
+runtime_flag() { local i; i="$(codesign -d --verbose=2 "$1" 2>&1)"; grep -q "flags=.*runtime" <<<"$i"; }
+
+# The app: hardened runtime, exactly the microphone entitlement, arm64.
+runtime_flag "$out"
+[ "$(ent_keys "$out")" = "com.apple.security.device.audio-input" ] || { echo "build-app: unexpected app entitlements"; exit 1; }
+[ "$(lipo -archs "$out/Contents/MacOS/CompanionApp")" = arm64 ] || { echo "build-app: the app is not arm64-only"; exit 1; }
+
+# Node: the pinned version, hardened runtime, exactly the two JIT entitlements, arm64.
+want_node="v$(sed -n 's/^NODE_VERSION=//p' app/bundle/node.pin)"
+[ "$("$node_bin" --version)" = "$want_node" ] || { echo "build-app: the bundled Node is not $want_node"; exit 1; }
+runtime_flag "$node_bin"
+[ "$(ent_keys "$node_bin")" = "com.apple.security.cs.allow-jit com.apple.security.cs.allow-unsigned-executable-memory" ] \
+  || { echo "build-app: unexpected Node entitlements"; exit 1; }
+[ "$(lipo -archs "$node_bin")" = arm64 ] || { echo "build-app: Node is not arm64-only"; exit 1; }
+
+# Codex (R3): the pinned version, OpenAI's own Developer ID signature with the hardened runtime, untouched.
+vendor="$res/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin"
+[ "$(plutil -extract version raw "$vendor/codex-package.json")" = "0.166.0" ] || { echo "build-app: Codex is not 0.166.0"; exit 1; }
+[ ! -e "$res/node_modules/@openai/codex-darwin-x64" ] || { echo "build-app: an x64 Codex was installed"; exit 1; }
+for b in bin/codex bin/codex-code-mode-host codex-path/rg; do
+  codesign --verify --strict "$vendor/$b"
+  runtime_flag "$vendor/$b"
+  auth="$(codesign -d --verbose=2 "$vendor/$b" 2>&1)"
+  grep -q "^Authority=Developer ID Application: " <<<"$auth" || { echo "build-app: $b is not Developer ID signed"; exit 1; }
+done
+echo "built and verified: $out (version $version, identity: $identity)"
