@@ -19,25 +19,31 @@ interface Rule { kind: string; re: RegExp; replace?: (match: string, groups: Arr
 
 /**
  * Key words match whole key segments, not substrings: the key is split on `_ - .` and camelCase
- * boundaries, so `author`, `tokenizer`, `maxTokens` and `oauth_callback` are not secret keys. A segment
- * may carry a glued prefix (`dbpassword`, `accesstoken`) but nothing after the word.
+ * boundaries, so `author`, `tokenizer` and `oauth_callback` are not secret keys. A segment may carry a
+ * glued prefix (`dbpassword`, `accesstoken`) and a plural, `key`/`keys` or digit suffix (`SECRETKEY`,
+ * `PASSWORD2`, `token2`, `apiKeys`), but no other word after it.
  */
 const KEY_SEGMENTS =
-  /(?:^|_)(?:[a-z0-9]{0,32}(?:passwords?|passwd|secrets?|token)|pwd|api_?key|access_?key|private_?key|auth|authorization|authkey)(?:_|$)/;
-function isSecretKey(key: string): boolean {
-  const norm = key
+  /(?:^|_)(?:[a-z0-9]{0,32}(?:password|passwd|secret|token)(?:s|keys?)?[0-9]{0,4}|pwd[0-9]{0,4}|(?:api|access|private)_?keys?[0-9]{0,4}|auth|authorization|authkeys?)(?:_|$)/;
+/** A token count or limit (`maxTokens`, `tokenCount`, `MAX_OUTPUT_TOKENS`): a number there is not a secret. */
+const TOKEN_SEGMENT = /(?:^|_)tokens?(?:_|$)/;
+const COUNT_SEGMENT = /(?:^|_)(?:max|min|count|limit|total|num|budget|used|remaining|input|output|prompt|completion)(?:_|$)/;
+const NOT_COUNT = /passw|secret|pwd|auth|key/;
+function normKey(key: string): string {
+  return key
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
     .toLowerCase()
     .replace(/[.-]/g, "_");
-  return KEY_SEGMENTS.test(norm);
 }
+const isTokenCountKey = (norm: string) => TOKEN_SEGMENT.test(norm) && COUNT_SEGMENT.test(norm) && !NOT_COUNT.test(norm);
 /** An identifier or member path with no digit (`string`, `process.env.API_KEY`): code, not a literal. */
 const CODE_REF = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
 
 function maskValue(m: string, g: Array<string | undefined>, after: string): string {
   const [key = "", quote = "", sep = "", dq, sq, bare] = g;
-  if (!isSecretKey(key)) return m;
+  const norm = normKey(key);
+  if (!KEY_SEGMENTS.test(norm)) return m;
   if (dq !== undefined || sq !== undefined) {
     const v = dq ?? sq ?? "";
     const q = dq !== undefined ? '"' : "'";
@@ -50,8 +56,9 @@ function maskValue(m: string, g: Array<string | undefined>, after: string): stri
   if (isMarked(v) || after === "(" || (CODE_REF.test(v) && v.includes(".") && !/[0-9]/.test(v))) return m;
   const config = sep === "=" || /^[A-Z][A-Z0-9_]*$/.test(key);
   if (!config && CODE_REF.test(v) && !/[0-9]/.test(v)) return m;
-  // A pure number outside config (`maxTokens: 4096`, `tokenCount = 1234`) is a count, not a secret.
-  if (!config && /^[0-9]+$/.test(v)) return m;
+  // A pure number under a token count/limit key (`maxTokens: 4096`, `tokenCount = 1234`) is a count.
+  // Password, secret and key values are masked even when they are numbers.
+  if (/^[0-9]+$/.test(v) && isTokenCountKey(norm)) return m;
   return `${key}${quote}${sep}${mark("value")}`;
 }
 

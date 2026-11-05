@@ -135,6 +135,18 @@ test("secret key words match whole key segments, and counts are not secrets", ()
   assert.equal(redactText(j("accessToken: ", "abc123-synthetic")), "accessToken: [REDACTED:value]");
   assert.equal(redactText(j("dbpass", "word=", "abc123")), "dbpassword=[REDACTED:value]");
   assert.equal(redactText(j("AUTH_", "TOKEN=", "12345678")), "AUTH_TOKEN=[REDACTED:value]");
+  // Plural, key and digit suffixes after the word are still secret keys, and numbers under a password key
+  // are still secrets: only token counts and limits keep their numbers.
+  const masked: Array<[string, string]> = [
+    [j("SECRET", "KEY=", "abc123xyz"), "SECRETKEY=[REDACTED:value]"],
+    [j("secret", "key=", "abc123xyz"), "secretkey=[REDACTED:value]"],
+    [j("PASS", "WORD2=", "abc123"), "PASSWORD2=[REDACTED:value]"],
+    [j("tok", "en2: ", "abc123xyz"), "token2: [REDACTED:value]"],
+    [j("api", "Keys: ", "abc123xyz"), "apiKeys: [REDACTED:value]"],
+    [j("pass", "word: ", "12345678"), "password: [REDACTED:value]"],
+    [j('"pass', 'word": ', "12345678"), '"password": [REDACTED:value]'],
+  ];
+  for (const [s, want] of masked) assert.equal(redactText(s), want, s);
 });
 
 test("the word basic in prose is not basic auth", () => {
