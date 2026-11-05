@@ -1,6 +1,7 @@
 // The validator's own Seatbelt profile (spec §7.1.9; review C1): Node and companiond's code read-only, no network,
-// no exec beyond Node itself, no process-fork, no file writes except /dev/null. The read rules mirror the jail's
-// measured Node rules (M2, src/launch/seatbelt.ts) without the root, git or the developer folder.
+// no exec beyond Node itself, no process-fork, no file writes of its own except /dev/null. The read rules mirror the jail's
+// measured Node rules (M2, src/launch/seatbelt.ts) without the root, git or the developer folder. It imports
+// system.sb's baseline (its mach-lookups, /dev/fd and its writes under /cores), the same baseline the M2 jail accepted.
 import path from "node:path";
 import { assertReadablePrefix, SANDBOX_EXEC, sbString, type LaunchSpec } from "../launch/seatbelt.ts";
 import type { Toolchain } from "../launch/toolchain.ts";

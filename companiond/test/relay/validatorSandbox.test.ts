@@ -65,3 +65,17 @@ test("under the profile Node runs; network, exec, outside reads and writes fail 
     unix.close();
   }
 });
+
+test("under the profile, execve (replacing the validator's own image) fails with EPERM (review 3)", { skip }, () => {
+  const tc = discoverToolchain();
+  const probe = `
+    let out;
+    try { process.execve("/bin/sh", ["sh", "-c", "true"], {}); out = "ran"; } catch (x) { out = x.code ?? String(x); }
+    process.stdout.write(JSON.stringify({ execve: out }));
+  `;
+  const r = spawnSync(SANDBOX_EXEC, ["-p", buildValidatorProfile(tc), tc.nodePath, "-e", probe], {
+    env: { PATH: "/usr/bin:/bin", OPENSSL_CONF: "/dev/null" }, cwd: "/", encoding: "utf8", timeout: 30_000,
+  });
+  assert.equal(r.status, 0, `Node must start; stderr: ${r.stderr}`);
+  assert.match((JSON.parse(r.stdout) as { execve: string }).execve, DENIED);
+});

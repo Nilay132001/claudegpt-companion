@@ -64,6 +64,8 @@ export class RelayAcceptor implements RelayBroker {
   #timer: NodeJS.Timeout | null = null;
   #grants = new Map<string, Grant>();
   #bound = new Map<string, Binding>();
+  /** Grants whose proof matched and whose reader proof is still being written: revoke() marks them (review 1). */
+  #matched = new Map<string, { revoked: boolean }>();
   #pending = new Set<net.Socket>();
   #listeners = new Set<(e: BrokerEvent) => void>();
   #seq = 0;
@@ -121,7 +123,7 @@ export class RelayAcceptor implements RelayBroker {
   async stop(): Promise<void> {
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;
-    for (const id of [...this.#grants.keys(), ...this.#bound.keys()]) this.#revoke(id);
+    this.#revokeAll();
     for (const s of this.#pending) s.destroy();
     this.#pending.clear();
     const server = this.#server;
@@ -203,12 +205,23 @@ export class RelayAcceptor implements RelayBroker {
       finish();
       s.pause();
       this.#grants.delete(g.id); // one use
+      const mark = { revoked: false };
+      this.#matched.set(g.id, mark);
       s.write(`${proof(g.token, nonce, "reader")}\n`, (err) => {
+        this.#matched.delete(g.id);
+        if (mark.revoked) {
+          // Revoked (or the socket replaced) between the match and the bind: never bind it.
+          s.destroy();
+          this.#emit({ type: "closed", grantId: g.id, end: "revoked" });
+          return;
+        }
         // pause() does not stop libuv reads, so a client that sent bytes before the validator's OK would leave them
         // in companiond's buffer. The real relay sends nothing before OK: anything here is a violation (M-8).
         if (err || s.readableLength > 0 || !this.#inodeOk()) {
+          const replaced = !err && !this.#inodeOk();
           s.destroy();
           this.#emit({ type: "closed", grantId: g.id, end: err ? "dropped" : "violation" });
+          if (replaced) this.#replaced();
           return;
         }
         this.#bind(s, g);
@@ -232,15 +245,28 @@ export class RelayAcceptor implements RelayBroker {
 
   #bind(s: net.Socket, g: Grant): void {
     const l = g.launch;
-    const jail = spawn(l.command, l.args, { env: l.env, cwd: l.cwd, stdio: ["pipe", "pipe", "ignore"] });
-    if (!jail.stdin || !jail.stdout) {
+    const fail = (jail?: ChildProcess): void => {
       s.destroy();
-      jail.kill("SIGKILL");
+      jail?.stdin?.destroy();
+      jail?.stdout?.destroy();
+      jail?.kill("SIGKILL");
       this.#emit({ type: "closed", grantId: g.id, end: "error" });
-      return;
+    };
+    // spawn() can throw (a bad argument, no fds left): that must end this one binding, not the acceptor.
+    let jail: ChildProcess;
+    try {
+      jail = spawn(l.command, l.args, { env: l.env, cwd: l.cwd, stdio: ["pipe", "pipe", "ignore"] });
+    } catch {
+      return fail();
     }
+    if (!jail.stdin || !jail.stdout) return fail(jail);
     const v = this.#o.validator;
-    const validator = spawn(v.command, v.args, { env: v.env, cwd: v.cwd, stdio: ["ignore", "ignore", "ignore", s, jail.stdin, jail.stdout] });
+    let validator: ChildProcess;
+    try {
+      validator = spawn(v.command, v.args, { env: v.env, cwd: v.cwd, stdio: ["ignore", "ignore", "ignore", s, jail.stdin, jail.stdout] });
+    } catch {
+      return fail(jail);
+    }
     // The children hold their own copies now; companiond closes its own and parses nothing (it has read only the
     // fixed-size handshake lines).
     s.destroy();
@@ -282,8 +308,14 @@ export class RelayAcceptor implements RelayBroker {
     this.#emit({ type: "bound", grantId: g.id });
   }
 
+  #revokeAll(): void {
+    for (const id of [...this.#grants.keys(), ...this.#matched.keys(), ...this.#bound.keys()]) this.#revoke(id);
+  }
+
   #revoke(id: string): void {
     this.#grants.delete(id);
+    const m = this.#matched.get(id);
+    if (m) m.revoked = true;
     const b = this.#bound.get(id);
     if (!b) return;
     b.revoked = true;
@@ -311,7 +343,7 @@ export class RelayAcceptor implements RelayBroker {
 
   #replaced(): void {
     if (!this.#server) return;
-    for (const id of [...this.#grants.keys(), ...this.#bound.keys()]) this.#revoke(id);
+    this.#revokeAll();
     const server = this.#server;
     this.#server = null;
     this.#ino = null;

@@ -153,6 +153,8 @@ test("the socket is rechecked before binding: a swap after the proof is reported
     const nonce = Buffer.from(buf.subarray(5, HELLO_BYTES - 1).toString("latin1"), "hex");
     s.write(`${proof(g.token, nonce, "relay")}\n`);
     assert.ok(await until(() => has(events, "closed", "violation")));
+    assert.ok(await until(() => has(events, "socketReplaced")), "a failed recheck reports the replaced socket (review 2)");
+    assert.equal(a.healthy(), false);
     assert.equal(has(events, "bound"), false);
     assert.equal(a.counts.bound, 0);
   } finally {
@@ -260,4 +262,97 @@ test("a validator that crashes or exits with an unknown code ends the binding as
     await c.closed;
     assert.ok(await until(() => has(events, "closed", "violation")), script);
   }
+});
+
+test("a grant revoked between the proof match and the bind is never bound (review 1)", async () => {
+  const { a, events, rp } = await start();
+  const g = a.grant(jail());
+  // Delay only companiond's write callback for its own 65-byte reader proof (the only write that passes a callback).
+  const realWrite = net.Socket.prototype.write;
+  net.Socket.prototype.write = function (this: net.Socket, chunk: any, ...rest: any[]) {
+    const cb = rest.find((x) => typeof x === "function");
+    if (typeof chunk === "string" && chunk.length === 65 && cb) {
+      const done = realWrite.call(this, chunk);
+      setTimeout(() => cb(), 200);
+      return done;
+    }
+    return (realWrite as any).call(this, chunk, ...rest);
+  } as typeof net.Socket.prototype.write;
+  try {
+    const pending = connectRelay(rp.socket, g.token);
+    await sleep(100); // matched; the callback is still 100 ms away
+    assert.equal(a.counts.grants, 0, "the grant is matched");
+    g.revoke();
+    const c = await pending;
+    await c.closed;
+  } finally {
+    net.Socket.prototype.write = realWrite;
+  }
+  assert.ok(await until(() => has(events, "closed", "revoked")));
+  assert.equal(has(events, "bound"), false);
+  assert.equal(a.counts.bound, 0);
+});
+
+test("a revoked grant is refused at connect; an unarmed grant ends at maxAgeMs (I1)", async () => {
+  const { a, events, rp } = await start({ maxAgeMs: 150 });
+  const g = a.grant(jail());
+  g.revoke();
+  await (await connectRelay(rp.socket, g.token)).closed;
+  assert.ok(await until(() => events.filter((e) => e.type === "refused").length === 1));
+  const old = a.grant(jail()); // never armed
+  await sleep(300);
+  await (await connectRelay(rp.socket, old.token)).closed;
+  assert.ok(await until(() => events.filter((e) => e.type === "refused").length === 2));
+  assert.equal(has(events, "bound"), false);
+});
+
+test("live bindings are capped at maxBound (M4)", async () => {
+  const { a, events, rp } = await start({ maxBound: 1 });
+  const first = await connectRelay(rp.socket, a.grant(jail()).token);
+  assert.equal(first.isClosed(), false);
+  const second = await connectRelay(rp.socket, a.grant(jail()).token);
+  await second.closed;
+  assert.ok(await until(() => events.some((e) => e.type === "refused" && e.reason === "too many connections")));
+  assert.equal(a.counts.bound, 1);
+  first.end();
+});
+
+test("the socket is checked at accept: a swap between connect and accept is reported (I-8)", async () => {
+  const { a, events, rp } = await start({ inodeCheckMs: 60_000 });
+  const s = net.connect(rp.socket);
+  s.on("error", () => {});
+  // The kernel completes a unix connect synchronously; the acceptor's accept callback runs on a later tick.
+  fs.renameSync(rp.socket, `${rp.socket}.moved`);
+  assert.ok(await until(() => has(events, "socketReplaced")));
+  assert.equal(events.some((e) => e.type === "refused"), false);
+  assert.equal(a.healthy(), false);
+  s.destroy();
+});
+
+test("a spawn that throws ends that binding with error, kills the jail and leaves the acceptor working (review 6)", async () => {
+  const dir = tempDir("cgc-acc-");
+  const pidFile = `${dir}/jail.pid`;
+  const sleeper: LaunchSpec = {
+    command: process.execPath,
+    args: ["-e", 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)', pidFile],
+    env: { PATH: "/usr/bin:/bin" }, cwd: "/",
+  };
+  // A NUL byte in an argument makes child_process.spawn throw synchronously.
+  const { a, events, rp } = await start({ validator: { command: process.execPath, args: ["a\0b"], env: { PATH: "/usr/bin:/bin" }, cwd: "/" } });
+  await (await connectRelay(rp.socket, a.grant(sleeper).token)).closed;
+  assert.ok(await until(() => has(events, "closed", "error")));
+  // The jail is killed at once, normally before Node has even started it; one that survived would write its pid.
+  await sleep(1000);
+  if (fs.existsSync(pidFile)) {
+    assert.throws(() => process.kill(Number(fs.readFileSync(pidFile, "utf8")), 0), "the jail that did start was killed");
+  }
+  assert.equal(has(events, "bound"), false);
+  assert.equal(a.counts.bound, 0);
+  // The jail's own spawn throwing is handled the same way.
+  const b = await start();
+  await (await connectRelay(b.rp.socket, b.a.grant({ ...jail(), args: ["a\0b"] }).token)).closed;
+  assert.ok(await until(() => has(b.events, "closed", "error")));
+  const c = await connectRelay(b.rp.socket, b.a.grant(jail()).token);
+  c.send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.ok(await c.reply(1), "the acceptor still serves");
 });
