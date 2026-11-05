@@ -1,6 +1,7 @@
 // companion-jira: MCP over newline-delimited JSON-RPC on stdio (owner ruling B). Only initialize, ping, tools/list and
 // tools/call; the validator in front of it allows nothing else either.
 import { SUPPORTED_PROTOCOL_VERSIONS } from "../mcpStdio.ts";
+import { COMPANION_VERSION } from "../version.ts";
 import { JIRA_SERVER_NAME, JIRA_TOOL_DEFS, runJiraTool, type JiraApi } from "./tools.ts";
 
 export type JiraServerState = { kind: "ready"; api: JiraApi } | { kind: "refused"; reason: string };
@@ -22,7 +23,7 @@ export async function handleJiraMessage(state: JiraServerState, raw: unknown): P
       return result(id, {
         protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(asked) ? asked : SUPPORTED_PROTOCOL_VERSIONS[0],
         capabilities: { tools: {} },
-        serverInfo: { name: JIRA_SERVER_NAME, version: "0.6.0" },
+        serverInfo: { name: JIRA_SERVER_NAME, version: COMPANION_VERSION },
       });
     }
     case "ping":

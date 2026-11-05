@@ -4,9 +4,18 @@ import Testing
 
 @Suite struct DaemonLocatorTests {
     @Test func nodeCandidatesInOrder() {
-        #expect(DaemonLocator.nodeCandidates(env: ["COMPANION_NODE": "/x/node"], configured: "/y/node")
-            == ["/x/node", "/y/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"])
-        #expect(DaemonLocator.nodeCandidates(env: [:], configured: "") == ["/opt/homebrew/bin/node", "/usr/local/bin/node"])
+        // Ruling R5: developer override, then the bundled Node, then the Settings path, then the system paths.
+        #expect(DaemonLocator.nodeCandidates(env: ["COMPANION_NODE": "/x/node"], bundled: "/App.app/Contents/Resources/node/bin/node", configured: "/y/node")
+            == ["/x/node", "/App.app/Contents/Resources/node/bin/node", "/y/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"])
+        #expect(DaemonLocator.nodeCandidates(env: [:], bundled: nil, configured: "") == ["/opt/homebrew/bin/node", "/usr/local/bin/node"])
+        #expect(DaemonLocator.nodeCandidates(env: ["COMPANION_NODE": ""], bundled: "", configured: "/y/node")
+            == ["/y/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"])
+    }
+
+    @Test func bundledNodeSitsInResources() {
+        #expect(DaemonLocator.bundledNode(resourceURL: URL(fileURLWithPath: "/Applications/ClaudeGPT Companion.app/Contents/Resources"))
+            == "/Applications/ClaudeGPT Companion.app/Contents/Resources/node/bin/node")
+        #expect(DaemonLocator.bundledNode(resourceURL: nil) == nil)
     }
 
     @Test func parsesNodeVersions() {

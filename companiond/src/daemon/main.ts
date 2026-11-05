@@ -16,11 +16,12 @@ import { discoverToolchain, type Toolchain } from "../launch/toolchain.ts";
 import { Privacy, safeGitInspector } from "../privacy/privacy.ts";
 import { RelaySetupError } from "../relay/relayPaths.ts";
 import { Store } from "../store/store.ts";
+import { COMPANION_VERSION } from "../version.ts";
 import { DisabledHost } from "./disabledHost.ts";
 import { buildHandlers, toDaemonError, wireEvents, type DaemonHost } from "./handlers.ts";
 import { DaemonServer } from "./server.ts";
 
-const VERSION = "0.6.0";
+const VERSION = COMPANION_VERSION;
 const log = (code: string) => process.stderr.write(`companiond: ${code}\n`);
 const errName = (e: unknown) => (e instanceof Error ? e.name : "error");
 

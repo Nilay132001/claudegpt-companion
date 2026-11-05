@@ -39,6 +39,7 @@ jobs:
 
   app:
     runs-on: macos-26
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: app
@@ -53,7 +54,21 @@ jobs:
         run: npm ci
       - name: Point the daemon integration test at this Node
         run: echo "COMPANION_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: Cache the pinned Node.js tarball
+        uses: actions/cache@v4
+        with:
+          path: app/build/cache
+          key: node-${{ hashFiles('app/bundle/node.pin') }}
       - run: swift test
       - name: Build and verify the signed bundle (ad-hoc)
         working-directory: .
         run: bash scripts/build-app.sh
+      - name: Smoke the built bundle (signed out, throw-away HOME)
+        working-directory: .
+        run: bash scripts/smoke-bundle.sh
+      - name: Package the DMG
+        working-directory: .
+        run: bash scripts/package-app.sh
+      - name: Packaging script checks (offline)
+        working-directory: .
+        run: bash scripts/test-packaging.sh

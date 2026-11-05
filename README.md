@@ -9,7 +9,8 @@ official Codex app-server. No API keys.
 - It explains code, Claude's last message, test failures and Jira tickets in plain language.
 - Microphone dictation and Read Aloud use on-device macOS speech.
 
-> Status: **Phase 1 done (proof of concept), design v2 in review.** Not usable yet.
+> Status: **Milestones M1–M7 are implemented.** You can build an installable app from source (see Install).
+> The owner checklists in `docs/manual/` are still pending.
 
 ## Docs
 
@@ -17,7 +18,12 @@ official Codex app-server. No API keys.
 - [Design](docs/superpowers/specs/2026-11-03-claudegpt-companion-design.md) — architecture, security
   model, UI, milestones.
 
-## Try the proof of concept
+## Install
+
+Build the app and install it from a DMG: [install guide](docs/install.md). Signing and notarization notes:
+[docs/signing.md](docs/signing.md).
+
+## Try the old Phase 1 proof of concept
 
 Requires macOS, Node 22+, and a ChatGPT plan that includes Codex.
 
@@ -39,6 +45,7 @@ Requires macOS 26+, full Xcode, Node 24+.
 ```bash
 (cd companiond && npm ci && npm test && npm run typecheck)
 (cd app && swift test)
+bash scripts/build-app.sh && bash scripts/smoke-bundle.sh
 bash scripts/check-repo.sh
 ```
 

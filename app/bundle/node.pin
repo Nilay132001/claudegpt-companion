@@ -1,0 +1,5 @@
+# The official Node.js bundled into the app (M7, ruling R1). Only these two lines are read.
+# To change it: pick a v24 release on https://nodejs.org/dist/, copy the node-v<version>-darwin-arm64.tar.gz line
+# from its SHASUMS256.txt, then run scripts/build-app.sh and scripts/smoke-bundle.sh.
+NODE_VERSION=24.22.2
+NODE_SHA256_DARWIN_ARM64=aa9549349e47dffaa42dcf95d6e06ade8c4bdafc980979883b88767670df385a

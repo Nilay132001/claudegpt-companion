@@ -11,7 +11,7 @@ public enum DaemonLaunchError: Error, LocalizedError, Equatable {
     case nodeNotFound, daemonNotFound
     public var errorDescription: String? {
         switch self {
-        case .nodeNotFound: "Node.js 24 or newer was not found. Install it (brew install node) or set its path in Settings › Advanced."
+        case .nodeNotFound: "Node.js 24 or newer was not found. The app's own Node.js is missing or broken: rebuild it with scripts/build-app.sh, or set a path in Settings › Advanced."
         case .daemonNotFound: "companiond was not found in the app bundle. Rebuild the app with scripts/build-app.sh, or set COMPANIOND_DIR."
         }
     }
@@ -22,12 +22,20 @@ public enum DaemonLocator {
     public static let minimumNodeMajor = 24
     static let passedEnv = ["HOME", "USER", "LOGNAME", "TMPDIR", "COMPANIOND_CODEX"]
 
-    public static func nodeCandidates(env: [String: String], configured: String?) -> [String] {
+    /// Ruling R5 (M7): `COMPANION_NODE`, the bundled Node, the Settings › Advanced path, then the system paths.
+    /// The bundled Node comes before the setting so an older stored path does not shadow it.
+    public static func nodeCandidates(env: [String: String], bundled: String?, configured: String?) -> [String] {
         var out: [String] = []
         if let p = env["COMPANION_NODE"], !p.isEmpty { out.append(p) }
+        if let p = bundled, !p.isEmpty { out.append(p) }
         if let p = configured, !p.isEmpty { out.append(p) }
         out += ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
         return out
+    }
+
+    /// The official Node.js that scripts/build-app.sh puts into the bundle.
+    public static func bundledNode(resourceURL: URL?) -> String? {
+        resourceURL?.appending(path: "node/bin/node").path
     }
 
     public static func nodeMajor(_ versionOutput: String) -> Int? {
@@ -78,7 +86,7 @@ public enum DaemonLocator {
     /// The production connector. `configuredNode` is read at every (re)connect.
     public static func live(env: [String: String], configuredNode: @escaping @Sendable () -> String?, resourceURL: URL?) -> Connector {
         return {
-            let node = try findNode(candidates: nodeCandidates(env: env, configured: configuredNode()),
+            let node = try findNode(candidates: nodeCandidates(env: env, bundled: bundledNode(resourceURL: resourceURL), configured: configuredNode()),
                                     isExecutable: FileManager.default.isExecutableFile(atPath:), version: runVersion).get()
             let dir = try daemonDirectory(env: env, resourceURL: resourceURL, fileExists: FileManager.default.fileExists(atPath:)).get()
             let client = DaemonClient(transport: try ProcessTransport(launch: launch(node: node, daemonDir: dir, env: env)))

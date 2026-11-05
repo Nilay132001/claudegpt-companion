@@ -178,7 +178,7 @@ struct AdvancedSettings: View {
                 ForEach(EditorChoice.allCases, id: \.self) { Text($0.title).tag($0) }
             }
             TextField("Node.js path (empty = automatic)", text: $nodePath)
-            Text("companiond needs Node.js 24 or newer. Empty uses /opt/homebrew/bin/node or /usr/local/bin/node. Restart companiond after a change.")
+            Text("The app runs companiond with its own bundled Node.js. This path is used only when the bundle has none or it does not run (for example swift run); it needs Node.js 24 or newer. Restart companiond after a change.")
                 .font(.caption).foregroundStyle(.secondary)
             LabeledContent("companiond") { Text(daemonText) }
             if model.isSecurityStop {

@@ -9,7 +9,7 @@ enum DaemonITest {
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         .appending(path: "companiond").path
     static let node: String? = try? DaemonLocator.findNode(
-        candidates: DaemonLocator.nodeCandidates(env: ProcessInfo.processInfo.environment, configured: nil),
+        candidates: DaemonLocator.nodeCandidates(env: ProcessInfo.processInfo.environment, bundled: nil, configured: nil),
         isExecutable: FileManager.default.isExecutableFile(atPath:),
         version: DaemonLocator.runVersion).get()
     static var available: Bool {
