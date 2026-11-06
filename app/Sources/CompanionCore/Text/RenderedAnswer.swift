@@ -37,6 +37,35 @@ public struct ListItem: Equatable, Sendable {
     }
 }
 
+/// What a code block's highlight task is keyed on: a stream closing the fence changes `isOpen` without changing
+/// the text, and must still re-run it.
+public struct HighlightKey: Hashable, Sendable {
+    public var text: String
+    public var isOpen: Bool
+    public init(text: String, isOpen: Bool) { self.text = text; self.isOpen = isOpen }
+}
+
+/// A small count-capped LRU for computed values (highlighted code).
+public struct BoundedCache<Key: Hashable, Value> {
+    private var values: [Key: Value] = [:]
+    private var order: [Key] = []
+    public let capacity: Int
+    public init(capacity: Int) { self.capacity = max(1, capacity) }
+    public var count: Int { values.count }
+
+    public mutating func value(for key: Key) -> Value? {
+        guard let v = values[key] else { return nil }
+        if let i = order.lastIndex(of: key) { order.remove(at: i); order.append(key) }
+        return v
+    }
+
+    public mutating func insert(_ value: Value, for key: Key) {
+        if values.updateValue(value, forKey: key) != nil, let i = order.lastIndex(of: key) { order.remove(at: i) }
+        order.append(key)
+        while order.count > capacity { values[order.removeFirst()] = nil }
+    }
+}
+
 public struct CodeModel: Equatable, Sendable {
     public var language: String?
     public var text: String
@@ -48,11 +77,30 @@ public struct CodeModel: Equatable, Sendable {
     }
 
     /// The first `shownLines` lines and how many are hidden, or nil when the block has at most `maxLines` lines.
+    /// Scans only as far as the 24th line break, so it is cheap to call on every render.
     public func preview(maxLines: Int = 40, shownLines: Int = 24) -> (text: String, hiddenLines: Int)? {
-        guard lineCount > maxLines else { return nil }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        guard lines.count > shownLines else { return nil }
-        return (lines.prefix(shownLines).joined(separator: "\n"), lineCount - shownLines)
+        guard lineCount > maxLines, shownLines > 0 else { return nil }
+        var seen = 0
+        var cut: String.Index?
+        let bytes = text.utf8
+        for i in bytes.indices where bytes[i] == 10 {
+            seen += 1
+            if seen == shownLines { cut = i; break }
+        }
+        guard let cut else { return nil }
+        return (String(text[..<cut]), lineCount - shownLines)
+    }
+
+    /// A line longer than this (UTF-16 units) is never laid out in one unwrapped row: giant single-line text
+    /// renders blank or clipped, so such a block wraps whatever the Wrap setting says.
+    public static let veryLongLine = 2000
+
+    public var hasVeryLongLine: Bool {
+        var run = 0
+        for u in text.utf16 {
+            if u == 10 { run = 0 } else { run += 1; if run > Self.veryLongLine { return true } }
+        }
+        return false
     }
 }
 

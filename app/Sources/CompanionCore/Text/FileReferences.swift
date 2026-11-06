@@ -55,6 +55,17 @@ public enum FileReferences {
     }
 }
 
+public enum FileDisplay {
+    /// `path` relative to `root` when it is inside it (whole path components only), otherwise the file name.
+    public static func relative(_ path: String, root: String?) -> String {
+        if let root, !root.isEmpty {
+            let prefix = root.hasSuffix("/") ? root : root + "/"
+            if path.hasPrefix(prefix) { return String(path.dropFirst(prefix.count)) }
+        }
+        return path.split(separator: "/").last.map(String.init) ?? path
+    }
+}
+
 public enum EditorLink {
     public static let scheme = "companion-open"
 

@@ -238,3 +238,48 @@ func describe(_ b: AnswerBlock) -> String {
         #expect(CodeModel(language: nil, text: "a", isOpen: false, lineCount: 40, reference: nil).preview() == nil)
     }
 }
+
+@Suite struct CodeBlockLogicTests {
+    @Test func veryLongLineThresholdIsPerLine() {
+        func m(_ t: String) -> CodeModel { CodeModel(language: nil, text: t, isOpen: false, lineCount: 1, reference: nil) }
+        let limit = CodeModel.veryLongLine
+        #expect(!m(String(repeating: "a", count: limit)).hasVeryLongLine)
+        #expect(m(String(repeating: "a", count: limit + 1)).hasVeryLongLine)
+        // Many short lines adding up past the limit are fine; one long line among them is not.
+        #expect(!m(Array(repeating: String(repeating: "a", count: 100), count: 50).joined(separator: "\n")).hasVeryLongLine)
+        #expect(m("x\n" + String(repeating: "a", count: limit + 1) + "\ny").hasVeryLongLine)
+    }
+
+    @Test func relativePathsUseWholeComponents() {
+        #expect(FileDisplay.relative("/a/b/src/x.ts", root: "/a/b") == "src/x.ts")
+        #expect(FileDisplay.relative("/a/b/src/x.ts", root: "/a/b/") == "src/x.ts")
+        #expect(FileDisplay.relative("/a/bc/x.ts", root: "/a/b") == "x.ts")
+        #expect(FileDisplay.relative("/a/b", root: "/a/b") == "b")
+        #expect(FileDisplay.relative("/other/y.ts", root: "/a/b") == "y.ts")
+        #expect(FileDisplay.relative("/a/b/x.ts", root: nil) == "x.ts")
+    }
+
+    @Test func highlightKeyTracksOpenState() {
+        // The same text closing (fence arrives without new text) must still change the key.
+        #expect(HighlightKey(text: "a", isOpen: true) != HighlightKey(text: "a", isOpen: false))
+    }
+}
+
+@Suite struct BoundedCacheTests {
+    @Test func evictsLeastRecentlyUsed() {
+        var c = BoundedCache<String, Int>(capacity: 2)
+        c.insert(1, for: "a"); c.insert(2, for: "b")
+        _ = c.value(for: "a")           // a is now the most recent
+        c.insert(3, for: "c")           // evicts b
+        #expect(c.value(for: "b") == nil)
+        #expect(c.value(for: "a") == 1 && c.value(for: "c") == 3)
+        c.insert(9, for: "a")
+        #expect(c.count == 2 && c.value(for: "a") == 9)
+    }
+
+    @Test func previewHandlesCRLF() {
+        let text = (1...45).map { "l\($0)" }.joined(separator: "\r\n")
+        let m = CodeModel(language: nil, text: text, isOpen: false, lineCount: 45, reference: nil)
+        #expect(m.preview()?.hiddenLines == 21)
+    }
+}
