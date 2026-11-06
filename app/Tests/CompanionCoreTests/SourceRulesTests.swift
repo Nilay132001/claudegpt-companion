@@ -62,4 +62,11 @@ import Testing
             }
         }
     }
+
+    @Test func chartStringsAreAlwaysVerbatim() {
+        guard let f = Self.swiftFiles().first(where: { $0.name == "ChartBlock.swift" }) else { Issue.record("no ChartBlock.swift"); return }
+        for line in f.text.split(separator: "\n") where line.contains("Text(") {
+            #expect(line.contains("Text(verbatim:") || line.contains("Text(\""), "ChartBlock: \(line)")
+        }
+    }
 }

@@ -46,6 +46,8 @@ struct BlockView: View {
         case .table(let t): TableBlock(table: t)
         case .rule: RuleBlock()
         case .math(let m): MathBlock(text: m)
+        case .chart(.valid(let s)): ChartBlock(spec: s)
+        case .chart(.invalid(let json, let why)): InvalidChartBlock(json: json, reason: why)
         }
     }
 }

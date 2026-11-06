@@ -18,6 +18,8 @@ public enum AnswerBlock: Equatable, Sendable {
     case table(TableModel)
     case rule
     case math(String)
+    /// A closed `companion-chart` fence: a validated chart, or the source and why it was refused.
+    case chart(ChartBlockModel)
 }
 
 public struct ListModel: Equatable, Sendable {

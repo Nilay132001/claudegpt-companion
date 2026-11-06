@@ -70,6 +70,8 @@ public enum ReplyMarkdown {
             return ([t.header] + t.rows).map { $0.map { String($0.characters) }.joined(separator: "\t") }.joined(separator: "\n")
         case .rule: return "—"
         case .math(let m): return m
+        case .chart(.valid(let spec)): return spec.plainText
+        case .chart(.invalid(let json, _)): return json
         }
     }
 
@@ -166,6 +168,7 @@ extension ReplyMarkdown {
             let builder = BlockBuilder(root: root, style: style)
             blocks = builder.build(doc)
             if chunk.isOpen { blocks = markOpen(blocks) }
+            blocks = charts(blocks)
             blocks = mergeParagraphs(blocks, style: style)
         } else {
             blocks = [.paragraphs(AttributedString(chunk.text))]
@@ -186,6 +189,27 @@ extension ReplyMarkdown {
         default: break
         }
         return blocks
+    }
+
+    public static let chartLanguage = "companion-chart"
+
+    /// A closed `companion-chart` fence becomes a chart (validated once, here); an open one stays code, so a
+    /// streaming chart shows its JSON until the fence closes.
+    static func charts(_ blocks: [AnswerBlock]) -> [AnswerBlock] {
+        blocks.map { block in
+            switch block {
+            case .code(let c) where c.language == chartLanguage && !c.isOpen:
+                switch ChartSpec.parse(c.text) {
+                case .success(let spec): return .chart(.valid(spec))
+                case .failure(let e): return .chart(.invalid(json: c.text, reason: e.reason))
+                }
+            case .quote(let inner): return .quote(charts(inner))
+            case .list(var l):
+                for i in l.items.indices { l.items[i].content = charts(l.items[i].content) }
+                return .list(l)
+            default: return block
+            }
+        }
     }
 
     /// Top-level paragraphs in a row become one run, so a selection crosses them.

@@ -17,6 +17,8 @@ func describe(_ b: AnswerBlock) -> String {
     case .table(let t): "table \(t.columnCount)x\(t.rows.count)"
     case .rule: "hr"
     case .math(let m): "math:" + m
+    case .chart(.valid(let s)): "chart:" + s.title
+    case .chart(.invalid(_, let r)): "chart-invalid:" + r
     }
 }
 
