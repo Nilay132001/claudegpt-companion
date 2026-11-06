@@ -49,7 +49,7 @@ struct SidebarView: View {
         switch model.gate {
         case .ready:
             if let past = model.pastChat {
-                ChatView(messages: past.messages, readOnly: true)
+                ChatView(messages: past.messages, sessionKey: "past:" + past.summary.threadId, readOnly: true)
             } else if model.currentMessages.isEmpty {
                 if model.isLoadingCurrentChat {
                     GateView(symbol: nil, title: "Loading this chat…", spinner: true)
@@ -57,7 +57,7 @@ struct SidebarView: View {
                     EmptyStateView()
                 }
             } else {
-                ChatView(messages: model.currentMessages, readOnly: false)
+                ChatView(messages: model.currentMessages, sessionKey: model.selectedSessionId ?? "", readOnly: false)
             }
         case .connecting:
             GateView(symbol: nil, title: "Starting companiond…", detail: "The companion's local helper is starting up.", spinner: true)

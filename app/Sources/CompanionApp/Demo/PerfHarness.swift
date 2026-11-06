@@ -14,6 +14,7 @@ import os
 ///   switch  — switches between the two demo sessions repeatedly
 ///   resize  — steps the panel width between 300 and 600 pt at display rate
 ///   idle    — does nothing (memory baseline)
+///   position — scrolls to the middle, switches to the other session and back; the first visible turn must match
 /// COMPANION_PERF_SECONDS (default 10), COMPANION_PERF_STEP (pt per frame, default 20), COMPANION_PERF_SETTLE (s, 2).
 enum PerfFlags {
     static let env = ProcessInfo.processInfo.environment
@@ -40,6 +41,8 @@ enum PerfFlags {
     static let enabled = PerfFlags.mode != nil
     static var counts: [String: Int] = [:]
     static var nanos: [String: UInt64] = [:]
+    /// The chat's first visible turn (ChatView's scroll position), for the `position` driver.
+    static var firstVisibleTurn: UUID?
 
     /// Counts one evaluation of `name` (a view body, a parse).
     static func count(_ name: String) {
@@ -126,6 +129,7 @@ enum PerfFlags {
             case "scroll": await self.scroll()
             case "switch": await self.switchSessions(model)
             case "resize": await self.resize()
+            case "position": await self.position(model)
             default: try? await Task.sleep(for: .seconds(PerfFlags.seconds)) // stream, idle
             }
             self.measuring = false
@@ -209,11 +213,17 @@ enum PerfFlags {
     private func scroll() async {
         guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
         let clip = sv.contentView
-        var y = clip.bounds.origin.y, dir: CGFloat = -1, yanks = 0, passes = 0, steps = 0
+        var y = clip.bounds.origin.y, dir: CGFloat = -1, yanks = 0, yanksWhileReading = 0, passes = 0, steps = 0
         summary["scrollStartY"] = Double(y)
         let end = DispatchTime.now().uptimeNanoseconds + UInt64(PerfFlags.seconds * 1e9)
         onTick = { _ in
-            if abs(clip.bounds.origin.y - y) > 1 { yanks += 1; y = clip.bounds.origin.y } // someone else scrolled
+            // Was the driver reading above the bottom (by its own position) when someone else scrolled?
+            let readingAbove = max(0, (sv.documentView?.frame.height ?? 0) - clip.bounds.height) - y > ScrollFollow.nearBottom
+            if abs(clip.bounds.origin.y - y) > 1 { // someone else scrolled
+                yanks += 1
+                if readingAbove { yanksWhileReading += 1 }
+                y = clip.bounds.origin.y
+            }
             let maxY = max(0, (sv.documentView?.frame.height ?? 0) - clip.bounds.height)
             y += dir * PerfFlags.step
             if y <= 0 { y = 0; dir = 1; passes += 1 }
@@ -224,7 +234,8 @@ enum PerfFlags {
         }
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil
-        summary["scroll"] = ["steps": steps, "stepPt": Double(PerfFlags.step), "passes": passes, "yanksByOthers": yanks]
+        summary["scroll"] = ["steps": steps, "stepPt": Double(PerfFlags.step), "passes": passes, "yanksByOthers": yanks,
+                             "yanksWhileReading": yanksWhileReading]
     }
 
     private func switchSessions(_ model: AppModel) async {
@@ -246,6 +257,24 @@ enum PerfFlags {
             try? await Task.sleep(for: .milliseconds(250))
         }
         summary["switch"] = ["count": sync.count, "syncMs": Self.stats(sync), "toNextFrameMs": Self.stats(toFrame)]
+    }
+
+    /// Scroll to the middle, switch to the other session and back: the first visible turn should be the same.
+    private func position(_ model: AppModel) async {
+        guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
+        let clip = sv.contentView
+        let mid = max(0, ((sv.documentView?.frame.height ?? 0) - clip.bounds.height) / 2)
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: mid))
+        sv.reflectScrolledClipView(clip)
+        for _ in 0..<30 { await nextFrame() }
+        let before = PerfProbe.firstVisibleTurn
+        await model.pin("s2")
+        for _ in 0..<30 { await nextFrame() }
+        await model.pin("s1")
+        for _ in 0..<60 { await nextFrame() }
+        let after = PerfProbe.firstVisibleTurn
+        summary["position"] = ["before": before?.uuidString ?? "nil", "after": after?.uuidString ?? "nil",
+                               "same": before != nil && before == after]
     }
 
     private func resize() async {

@@ -45,6 +45,8 @@ public final class AppModel {
     /// Sessions whose stored chat is being read (the view shows a loading state instead of the empty state).
     public internal(set) var loadingChats: Set<String> = []
     public var draft = ""
+    /// Each chat's reading position while above the bottom (M9 §5.7); not observed, read on a session switch.
+    @ObservationIgnored public var scrollMemory = ChatScrollMemory()
     public var preview: PendingPreview?
     public var errorMessage: String?
     public internal(set) var jira: JiraStatus?
