@@ -62,6 +62,10 @@ struct ChatView: View {
                         .modifier(EntranceTransition(enabled: latest))
                 }
             }
+            // The entrance transition needs a transaction: animate only the turn-count change, on the stack and not
+            // the scroll view (spec §5.8). Older rows use .identity, so only the newly inserted newest turn animates;
+            // under Reduce Motion EntranceTransition is opacity only.
+            .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: turns.count)
             .scrollTargetLayout()
             .padding(.horizontal, Design.Space.l)
             .padding(.top, Design.Space.m)
