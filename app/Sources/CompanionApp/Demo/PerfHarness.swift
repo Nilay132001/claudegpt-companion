@@ -333,6 +333,7 @@ enum PerfFlags {
         var events: [String] = [] // the first few non-driver moves: kind@step:points (distance the driver had chosen)
         var driverDistance: CGFloat = 0
         var lastDocH = sv.documentView?.frame.height ?? 0
+        var travel: CGFloat = 0, lowY = y, lastClipY = y // how far the chat really moved, and its lowest offset
         summary["scrollStartY"] = Double(y)
         let live = PerfFlags.liveScroll && !PerfFlags.wheelInput
         summary["liveScroll"] = live
@@ -340,6 +341,7 @@ enum PerfFlags {
         let end = DispatchTime.now().uptimeNanoseconds + UInt64(PerfFlags.seconds * 1e9)
         onTick = { _ in
             frame += 1
+            travel += abs(clip.bounds.origin.y - lastClipY); lastClipY = clip.bounds.origin.y; lowY = min(lowY, lastClipY)
             if PerfProbe.programmaticScrolls != lastProg { lastProg = PerfProbe.programmaticScrolls; lastProgFrame = frame }
             let docH = sv.documentView?.frame.height ?? 0
             let legacyAbove = max(0, docH - clip.bounds.height) - y > ScrollFollow.nearBottom
@@ -388,7 +390,8 @@ enum PerfFlags {
         if PerfFlags.wheelInput { summary["wheelInput"] = wheelStats() }
         summary["scroll"] = ["steps": steps, "stepPt": Double(PerfFlags.step), "passes": passes, "yanksByOthers": yanks,
                              "yanksWhileReadingLegacy": legacy, "yanksWhileReading": reading, "pullbacks": pullbacks,
-                             "offsetCorrections": corrections, "events": events]
+                             "offsetCorrections": corrections, "events": events, "travelPt": Double(travel),
+                             "lowestY": Double(lowY)]
     }
 
     private func switchSessions(_ model: AppModel) async {
@@ -622,6 +625,8 @@ enum PerfFlags {
         wheelPendingPx = 0
     }
 
+    /// `noImmediateMove` counts events the chat applied on the next frame rather than inside `scrollWheel` (the usual
+    /// case): it does not mean the chat did not move. The scroll driver's `travelPt` / `lowestY` say how far it did.
     private func wheelStats() -> [String: Any] {
         ["events": wheelEvents, "noImmediateMove": wheelNoMove, "ptPerLine": Double(wheelScale)]
     }
