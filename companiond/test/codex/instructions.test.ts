@@ -61,10 +61,12 @@ test("the documented fields and limits match ChartSpec.swift", () => {
   const text = lines.join("\n");
   const keys = swift.match(/only\(o, \[([^\]]*)\]\)/)?.[1].match(/"(\w+)"/g)?.map((k) => k.slice(1, -1)) ?? [];
   assert.deepEqual(keys, ["version", "type", "title", "units", "x", "y", "series", "source"]);
-  for (const k of keys) assert.ok(text.includes(k), k);
+  const fieldLine = lines.find((l) => l.startsWith("Chart fields: "))!;
+  assert.ok(fieldLine);
+  for (const k of keys) assert.match(fieldLine, new RegExp(`(^|[ ,:])${k}( \\(| and )`), k);
   assert.match(swift, /maxBytes = 8 \* 1024/);
   for (const kind of ["bar", "line", "pie", "metric"]) assert.ok(text.includes(kind), kind);
-  for (const s of ["1-80 characters", "up to 16 characters", "1-200 characters", "1-4 series of 1-24 points", "1-4 series of 1-60 points",
+  for (const s of ["control or text-direction characters", "1-80 characters", "up to 16 characters", "1-200 characters", "1-4 series of 1-24 points", "1-4 series of 1-60 points",
     "exactly 1 series of 1-8 points", "exactly 1 series of 1-4 points", "1e12", "at most 8 KB"]) {
     assert.ok(text.includes(s), s);
   }

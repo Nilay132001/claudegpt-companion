@@ -173,8 +173,94 @@ import Testing
         var dir = URL(fileURLWithPath: #filePath)
         for _ in 0..<4 { dir.deleteLastPathComponent() }   // CompanionCoreTests, Tests, app, repo root
         let url = dir.appendingPathComponent("companiond/test/fixtures/companion-chart-example.json")
+        #expect(FileManager.default.fileExists(atPath: url.path), "fixture missing at \(url.path): the instructions example must be shared with companiond")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         let json = try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         guard case .success(let spec) = ChartSpec.parse(json) else { Issue.record("the instructions example is refused"); return }
         #expect(spec.kind == .bar && spec.series.count == 1 && !spec.source.isEmpty)
+    }
+
+    // MARK: - Drift guard: every number companiond/src/codex/instructions.ts states, valid at the limit and refused past it.
+
+    private func q(_ s: String) -> String { "\"" + s + "\"" }
+    private func pts(_ n: Int, labelPrefix: String = "p", value: String = "1") -> String {
+        (0..<n).map { #"{"label":"\#(labelPrefix)\#($0)","value":\#(value)}"# }.joined(separator: ",")
+    }
+    private func ser(_ name: String, _ n: Int, value: String = "1") -> String { #"{"name":\#(q(name)),"points":[\#(pts(n, value: value))]}"# }
+    private func chart(type: String = "bar", title: String = "T", extra: String = "", series: String? = nil, source: String = "src") -> String {
+        #"{"version":1,"type":\#(q(type)),"title":\#(q(title)),\#(extra)"series":[\#(series ?? ser("s", 2))],"source":\#(q(source))}"#
+    }
+    private func ok(_ json: String, _ note: String = "", line: UInt = #line) {
+        if case .failure(let e) = ChartSpec.parse(json) { Issue.record("\(note) refused: \(e.reason)", sourceLocation: .init(fileID: #fileID, filePath: #filePath, line: Int(line), column: 1)) }
+    }
+    private func refused(_ json: String, _ note: String = "", line: UInt = #line) {
+        if case .success = ChartSpec.parse(json) { Issue.record("\(note) accepted", sourceLocation: .init(fileID: #fileID, filePath: #filePath, line: Int(line), column: 1)) }
+    }
+    private func a(_ n: Int) -> String { String(repeating: "a", count: n) }
+
+    @Test func textLimitsMatchTheInstructions() {
+        ok(chart(title: a(80)), "title 80"); refused(chart(title: a(81)), "title 81")
+        ok(chart(extra: #""units":\#(q(a(16))),"#), "units 16"); refused(chart(extra: #""units":\#(q(a(17))),"#), "units 17")
+        for axis in ["x", "y"] {
+            ok(chart(extra: #""\#(axis)":{"label":\#(q(a(40)))},"#), "\(axis) label 40")
+            refused(chart(extra: #""\#(axis)":{"label":\#(q(a(41)))},"#), "\(axis) label 41")
+        }
+        ok(chart(source: a(200)), "source 200"); refused(chart(source: a(201)), "source 201")
+        ok(chart(series: ser(a(40), 2)), "series name 40"); refused(chart(series: ser(a(41), 2)), "series name 41")
+        ok(chart(series: #"{"name":"s","points":[{"label":\#(q(a(40))),"value":1}]}"#), "label 40")
+        refused(chart(series: #"{"name":"s","points":[{"label":\#(q(a(41))),"value":1}]}"#), "label 41")
+    }
+
+    @Test func seriesAndPointCountsMatchTheInstructions() {
+        let four = (0..<4).map { ser("s\($0)", 2) }.joined(separator: ","), five = four + "," + ser("s4", 2)
+        ok(chart(series: four), "bar 4 series"); refused(chart(series: five), "bar 5 series")
+        ok(chart(series: ser("s", 24)), "bar 24 points"); refused(chart(series: ser("s", 25)), "bar 25 points")
+        ok(chart(type: "line", series: four), "line 4 series"); refused(chart(type: "line", series: five), "line 5 series")
+        ok(chart(type: "line", series: ser("s", 60)), "line 60"); refused(chart(type: "line", series: ser("s", 61)), "line 61")
+        ok(chart(type: "pie", series: ser("s", 8)), "pie 8"); refused(chart(type: "pie", series: ser("s", 9)), "pie 9")
+        refused(chart(type: "pie", series: ser("s", 2) + "," + ser("t", 2)), "pie 2 series")
+        ok(chart(type: "metric", series: ser("s", 4)), "metric 4"); refused(chart(type: "metric", series: ser("s", 5)), "metric 5")
+        refused(chart(type: "metric", series: ser("s", 2) + "," + ser("t", 2)), "metric 2 series")
+        refused(chart(series: ""), "no series"); refused(chart(series: ser("s", 0)), "no points")
+    }
+
+    @Test func lineSeriesShareLabelsInOrder() {
+        let one = #"{"name":"a","points":[{"label":"x","value":1},{"label":"y","value":2}]}"#
+        ok(chart(type: "line", series: one + "," + one.replacingOccurrences(of: #""a""#, with: #""b""#)), "same labels")
+        refused(chart(type: "line", series: one + "," + #"{"name":"b","points":[{"label":"y","value":1},{"label":"x","value":2}]}"#), "reordered")
+        refused(chart(type: "line", series: one + "," + #"{"name":"b","points":[{"label":"x","value":1},{"label":"z","value":2}]}"#), "different")
+    }
+
+    @Test func valueRulesMatchTheInstructions() {
+        ok(chart(series: ser("s", 1, value: "1e12")), "1e12"); ok(chart(series: ser("s", 1, value: "-1e12")), "-1e12")
+        refused(chart(series: ser("s", 1, value: "1.0000001e12")), "just over 1e12")
+        refused(chart(series: ser("s", 1, value: "-1.0000001e12")), "just under -1e12")
+        ok(chart(type: "pie", series: #"{"name":"s","points":[{"label":"a","value":0},{"label":"b","value":3}]}"#), "pie with a zero")
+        refused(chart(type: "pie", series: #"{"name":"s","points":[{"label":"a","value":-1},{"label":"b","value":3}]}"#), "pie negative")
+        refused(chart(type: "pie", series: ser("s", 3, value: "0")), "pie all zero")
+        ok(chart(series: ser("s", 2, value: "-5")), "bar may be negative")
+    }
+
+    @Test func namesAndLabelsAreUnique() {
+        refused(chart(series: ser("s", 1) + "," + ser("s", 1)), "duplicate series name")
+        refused(chart(series: ser("s", 1) + "," + ser(" s ", 1)), "duplicate series name after trimming")
+        refused(chart(series: #"{"name":"s","points":[{"label":"a","value":1},{"label":"a","value":2}]}"#), "duplicate label")
+        refused(chart(series: #"{"name":"s","points":[{"label":"a","value":1},{"label":" a ","value":2}]}"#), "duplicate label after trimming")
+        refused(chart(title: "a\u{202E}b"), "bidi character"); refused(chart(title: "a\u{0007}b"), "control character")
+    }
+
+    @Test func unknownKeysAreRefusedAtEveryLevel() {
+        refused(chart(extra: #""colour":"red","#), "top")
+        refused(chart(series: #"{"name":"s","colour":"red","points":[{"label":"a","value":1}]}"#), "series")
+        refused(chart(series: #"{"name":"s","points":[{"label":"a","value":1,"note":"n"}]}"#), "point")
+        refused(chart(extra: #""x":{"label":"X","unit":"u"},"#), "x axis")
+        refused(chart(extra: #""y":{"label":"Y","unit":"u"},"#), "y axis")
+    }
+
+    @Test func eightKilobytesIsTheLimit() {
+        let base = chart()
+        let pad = 8 * 1024 - base.utf8.count
+        ok(base + String(repeating: " ", count: pad), "exactly 8 KB")
+        refused(base + String(repeating: " ", count: pad + 1), "8 KB + 1")
     }
 }
