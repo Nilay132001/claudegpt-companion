@@ -2,8 +2,9 @@ import CompanionCore
 import SwiftUI
 
 /// The chat: one column of turns on the window background, newest at the bottom.
-/// It follows streaming text only while the reader is within `ScrollFollow.nearBottom` of the bottom (M9 §5.7),
-/// offers "Jump to latest" (⌘↓) otherwise, and remembers each chat's position across session switches.
+/// It follows streaming text while the reader is at the bottom and stops the moment they scroll up (ScrollFollow,
+/// M9 §5.7), offers "Jump to latest" (⌘↓) while they read above it, and brings each chat back to the same line
+/// after a session switch or a past chat (ChatScrollMemory).
 /// It reads only the feed's turn ids (M9 §5.5): a streamed delta re-renders the growing answer, not the chat.
 struct ChatView: View {
     @Environment(AppModel.self) private var model
@@ -27,20 +28,23 @@ private struct ChatScroll: View {
     let feed: ChatFeed
     let sessionKey: String
     let readOnly: Bool
-    /// The first visible turn saved for this chat, or nil to start at the bottom.
-    let restore: UUID?
+    /// Where the reader was in this chat, or nil to start at the bottom.
+    let restore: ChatScrollAnchor?
 
-    @State private var position: ScrollPosition
-    @State private var follow: ScrollFollow
+    /// The follow state changes on every scroll and resize frame; a @State struct would start a SwiftUI transaction
+    /// (a second graph update in the frame) each time, and re-run this body. Only the Jump button observes it, and
+    /// only its visibility, which changes rarely.
+    @State private var follow: FollowBox
+    /// The laid-out turns' frames and the viewport, written by the rows and the scroll geometry; read when the chat
+    /// goes away. Not observed: scrolling never re-renders a view through it.
+    @State private var tracker = TurnTracker()
 
-    init(feed: ChatFeed, sessionKey: String, readOnly: Bool, restore: UUID?) {
+    init(feed: ChatFeed, sessionKey: String, readOnly: Bool, restore: ChatScrollAnchor?) {
         self.feed = feed
         self.sessionKey = sessionKey
         self.readOnly = readOnly
         self.restore = restore
-        _position = State(initialValue: restore.map { ScrollPosition(id: $0, anchor: .top) }
-            ?? ScrollPosition(idType: UUID.self, edge: Self.initialEdge))
-        _follow = State(initialValue: ScrollFollow(following: restore == nil))
+        _follow = State(initialValue: FollowBox(ScrollFollow(following: restore == nil)))
     }
 
     private static var initialAnchor: UnitPoint {
@@ -51,93 +55,176 @@ private struct ChatScroll: View {
         return .bottom
     }
 
-    private static var initialEdge: Edge { initialAnchor == .top ? .top : .bottom }
+    /// DEBUG: tells the perf harness the app is about to scroll by itself.
+    static func note(_ reason: String) {
+        #if DEBUG
+        PerfProbe.programmaticScroll(reason)
+        #endif
+    }
 
     var body: some View {
         #if DEBUG
         let _ = PerfProbe.count("body.ChatView")
         #endif
-        // This body re-runs whenever `position` changes (scrollTo while following the stream: SwiftUI re-evaluates
-        // the owner of a `.scrollPosition` binding on each write, even unread). So the turns are a child view whose
-        // inputs do not change, and following a delta never rebuilds the list.
-        ScrollView {
-            TurnList(feed: feed, readOnly: readOnly)
-        }
-        .scrollEdgeEffectStyle(.hard, for: .top)
-        // Text scrolling under the composer fades out instead of showing around the field.
-        .scrollEdgeEffectStyle(.soft, for: .bottom)
-        .scrollPosition($position, anchor: .top)
-        // Only the first appearance starts at the bottom. Size changes keep the turn being read in place
-        // (scrollPosition), instead of keeping the bottom pinned while the reader is above it.
-        .defaultScrollAnchor(restore == nil ? Self.initialAnchor : .top, for: .initialOffset)
-        // No .animation(value: messages.count) here: it animated the whole scroll view (spec §5.8).
-        .onScrollGeometryChange(for: ScrollMetrics.self) { g in
-            ScrollMetrics(offset: g.contentOffset.y, distance: g.contentSize.height - g.visibleRect.maxY)
-        } action: { _, m in
-            follow.geometry(offset: m.offset, distanceFromBottom: m.distance)
-        }
-        // The streaming answer's text is watched by a child view, so this body does not depend on it.
-        .background {
-            if let id = feed.turns.last?.answer, let answer = feed.model(id) {
-                LastAnswerFollower(model: answer) { if follow.following { position.scrollTo(edge: .bottom) } }
+        // No .scrollPosition binding (M9 Task 4b): with one, SwiftUI kept the bottom edge pinned while content grew
+        // under a reader it had not seen scroll, re-anchored every row on each resize frame, and adjusted the content
+        // offset from inside lazy placement. Programmatic scrolls go through the proxy; the reading position is
+        // tracked from the rows' frames. The body reads neither `follow` nor `tracker`, so scrolling and following
+        // never re-run it.
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    TurnList(feed: feed, readOnly: readOnly, tracker: tracker, restore: restore)
+                    Color.clear.frame(height: 1).id(Self.bottomID)
+                }
+                .coordinateSpace(.named(TurnTracker.space))
+            }
+            .scrollEdgeEffectStyle(.hard, for: .top)
+            // Text scrolling under the composer fades out instead of showing around the field.
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
+            .defaultScrollAnchor(restore == nil ? Self.initialAnchor : .top, for: .initialOffset)
+            // No .animation(value: messages.count) here: it animated the whole scroll view (spec §5.8).
+            .onScrollGeometryChange(for: ScrollMetrics.self) { g in
+                #if DEBUG
+                PerfProbe.contentInsetTop = g.contentInsets.top
+                #endif
+                // The reading area is the visible rect minus the insets (the header above, the composer below):
+                // scrollTo(…, anchor: .top) aligns to its top, so the saved position is measured from there too.
+                let top = g.visibleRect.minY + g.contentInsets.top
+                return ScrollMetrics(offset: g.contentOffset.y, top: top,
+                                     height: g.visibleRect.height - g.contentInsets.top - g.contentInsets.bottom,
+                                     distance: g.contentSize.height - g.visibleRect.maxY)
+            } action: { _, m in
+                follow.state.geometry(offset: m.offset, distanceFromBottom: m.distance)
+                tracker.viewport(top: m.top, height: m.height)
+                publish()
+                // Following, and the bottom moved away without the reader scrolling up (the answer grew, the panel
+                // was resized, a row above was measured): back to the bottom. Nothing else pins the bottom, so a
+                // reader above it is never moved.
+                if follow.state.shouldStickToBottom {
+                    Self.note("follow")
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
+            .onChange(of: feed.turns.last?.id) { _, _ in
+                // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last id.
+                if feed.isRunning {
+                    follow.state.followAgain()
+                    publish()
+                    Self.note("newTurn")
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
+            .onAppear {
+                // Back to where the reader was: first the saved turn (the lazy list lays it out), then, once it has
+                // a frame, the marker `inset` points into it, so the same line is at the top as before.
+                if let restore, feed.turns.contains(where: { $0.id == restore.turn }) {
+                    Self.note("restore")
+                    proxy.scrollTo(restore.turn, anchor: .top)
+                    tracker.whenLaidOut(restore.turn) {
+                        Self.note("restore")
+                        proxy.scrollTo(RestoreMarker.id, anchor: .top)
+                    }
+                }
+            }
+            .onDisappear {
+                model.scrollMemory.save(session: sessionKey, anchor: tracker.firstVisible, following: follow.state.following)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                JumpToLatest(follow: follow) { animated in
+                    follow.state.followAgain()
+                    publish()
+                    Self.note("jump")
+                    withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+                }
             }
         }
-        .onChange(of: feed.turns.last?.id) { _, _ in
-            // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last id.
-            if feed.isRunning { follow.followAgain(); position.scrollTo(edge: .bottom) }
-        }
-        .onAppear {
-            // The initial ScrollPosition carries the saved turn; scrolling to it again once the lazy rows exist
-            // makes the restore exact.
-            if let restore { position.scrollTo(id: restore, anchor: .top) }
-        }
-        .onDisappear {
-            model.scrollMemory.save(session: sessionKey, firstVisible: position.viewID(type: UUID.self),
-                                    following: follow.following)
-        }
-        .overlay(alignment: .bottomTrailing) { JumpToLatest(follow: $follow, position: $position) }
-        .modifier(FirstVisibleProbe(position: $position))
+    }
+
+    private static let bottomID = "chat.bottom"
+
+    private func publish() { follow.publish() }
+}
+
+/// ScrollFollow in a reference (see ChatScroll.follow): `state` is not observed; `showsJump` is, by the Jump button.
+@MainActor @Observable final class FollowBox {
+    @ObservationIgnored var state: ScrollFollow
+    private(set) var showsJump = false
+    init(_ state: ScrollFollow) { self.state = state }
+
+    /// Copies the Jump button's visibility from `state`, only when it changes.
+    func publish() {
+        if state.showsJumpToLatest != showsJump { showsJump = state.showsJumpToLatest }
     }
 }
 
-/// Scrolls to the bottom when the last answer's text grows while it runs. Its own view: it alone depends on the text.
-private struct LastAnswerFollower: View {
-    let model: MessageModel
-    let follow: () -> Void
+/// The turns' frames in the scroll content and the viewport, for the reading position (ChatScrollMemory).
+/// A reference held in @State and never observed: rows write into it as the lazy list lays them out.
+@MainActor final class TurnTracker {
+    nonisolated static let space = "chat.content"
+    private var turns = VisibleTurns()
+    private var top = 0.0
+    private var height = 0.0
 
-    var body: some View {
-        Color.clear.onChange(of: model.message.text) {
-            if model.message.isRunning { follow() }
+    var firstVisible: ChatScrollAnchor? { turns.first(top: top, viewportHeight: height) }
+
+    func viewport(top: Double, height: Double) {
+        self.top = top
+        self.height = height
+        report()
+    }
+
+    private var pending: (turn: UUID, until: ContinuousClock.Instant, then: () -> Void)?
+
+    func set(_ id: UUID, frame: CGRect) {
+        turns.set(id, minY: frame.minY, maxY: frame.maxY)
+        if let p = pending, p.turn == id {
+            pending = nil
+            // Only right after the restore scrolled to the turn: never later, under a reader who has moved on.
+            if ContinuousClock.now < p.until { p.then() }
         }
+        report()
+    }
+
+    /// Runs `then` once, when the turn first reports a frame within the next second.
+    func whenLaidOut(_ id: UUID, then: @escaping () -> Void) { pending = (id, .now + .seconds(1), then) }
+
+    func remove(_ id: UUID) { turns.remove(id) }
+
+    private func report() {
+        #if DEBUG
+        guard PerfProbe.enabled else { return }
+        let first = firstVisible
+        PerfProbe.firstVisibleTurn = first?.turn
+        PerfProbe.firstVisibleInset = first?.inset
+        #endif
     }
 }
 
-/// Its own view, so the scroll geometry it reads (every scroll step) re-renders only the button.
+/// "Jump to latest": shown while the reader is above the bottom and not following.
 private struct JumpToLatest: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Binding var follow: ScrollFollow
-    @Binding var position: ScrollPosition
+    let follow: FollowBox
+    let jump: (Animation?) -> Void
 
     var body: some View {
-        Button {
-            follow.followAgain()
-            // Reduce Motion: the jump is instant.
-            withAnimation(reduceMotion ? nil : Design.Motion.standard) { position.scrollTo(edge: .bottom) }
-        } label: {
-            Label("Jump to latest", systemImage: "arrow.down")
+        // Only in the hierarchy while shown: absent, its ⌘↓ does not fire, so the composer keeps ⌘↓ (move to end),
+        // and it is out of the focus order and the accessibility tree.
+        if follow.showsJump {
+            Button {
+                // Reduce Motion: the jump is instant.
+                jump(reduceMotion ? nil : Design.Motion.standard)
+            } label: {
+                Label("Jump to latest", systemImage: "arrow.down")
+            }
+            .buttonStyle(.glass)
+            .controlSize(.small)
+            .keyboardShortcut(.downArrow, modifiers: .command)
+            .help("Jump to the latest message (⌘↓)")
+            .accessibilityLabel("Jump to latest message")
+            .padding(.trailing, Design.Space.l)
+            .padding(.bottom, Design.Space.m)
         }
-        .buttonStyle(.glass)
-        .controlSize(.small)
-        .keyboardShortcut(.downArrow, modifiers: .command)
-        .help("Jump to the latest message (⌘↓)")
-        .accessibilityLabel("Jump to latest message")
-        .padding(.trailing, Design.Space.l)
-        .padding(.bottom, Design.Space.m)
-        // Hidden and disabled at the bottom: a disabled button's ⌘↓ does not fire, so the composer keeps ⌘↓
-        // (move to end), and the button leaves the focus order.
-        .opacity(follow.showsJumpToLatest ? 1 : 0)
-        .disabled(!follow.showsJumpToLatest)
-        .accessibilityHidden(!follow.showsJumpToLatest)
     }
 }
 
@@ -146,6 +233,8 @@ private struct TurnList: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let feed: ChatFeed
     let readOnly: Bool
+    let tracker: TurnTracker
+    let restore: ChatScrollAnchor?
 
     var body: some View {
         #if DEBUG
@@ -157,6 +246,14 @@ private struct TurnList: View {
                 let latest = turn.id == turns.last?.id
                 TurnView(turn: turn, feed: feed, readOnly: readOnly, isLatest: latest)
                     .id(turn.id)
+                    // The row's frame in the content (it changes with layout, not with scrolling).
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TurnTracker.space)) } action: { f in
+                        tracker.set(turn.id, frame: f)
+                    }
+                    .onDisappear { tracker.remove(turn.id) }
+                    .overlay(alignment: .top) {
+                        if let restore, restore.turn == turn.id { RestoreMarker(inset: restore.inset) }
+                    }
                     .modifier(EntranceTransition(enabled: latest))
             }
         }
@@ -165,26 +262,29 @@ private struct TurnList: View {
         // at the front and keeps the last id, and a chat switch is a new view (ChatView's .id), so neither
         // animates. Older rows use .identity; under Reduce Motion EntranceTransition is opacity only.
         .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: turns.last?.id)
-        .scrollTargetLayout()
         .padding(.horizontal, Design.Space.l)
         .padding(.top, Design.Space.m)
         .padding(.bottom, Design.Space.l)
     }
 }
 
-private struct ScrollMetrics: Equatable { let offset: Double; let distance: Double }
-
-/// DEBUG: reports the first visible turn to the perf harness (`position` driver). A no-op in release.
-private struct FirstVisibleProbe: ViewModifier {
-    @Binding var position: ScrollPosition
-    func body(content: Content) -> some View {
-        #if DEBUG
-        content.onChange(of: position.viewID(type: UUID.self), initial: true) { _, id in PerfProbe.firstVisibleTurn = id }
-        #else
-        content
-        #endif
+/// An invisible point `inset` below the top of the turn being restored: scrolling it to the top restores the exact
+/// reading position.
+private struct RestoreMarker: View {
+    static let id = "chat.restore"
+    let inset: Double
+    var body: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: inset)
+            Color.clear.frame(height: 1).id(Self.id)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
+
+private struct ScrollMetrics: Equatable { let offset: Double; let top: Double; let height: Double; let distance: Double }
 
 struct TurnView: View {
     let turn: TurnRef
