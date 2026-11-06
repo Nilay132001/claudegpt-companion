@@ -30,7 +30,7 @@ struct QuestionBubble: View {
 }
 
 /// GPT's answer: plain full-width text, no label row (D4). A compact actions row sits directly under it: always
-/// shown for the latest answer, on hover for older ones (it keeps its height, so hovering never moves the text).
+/// shown for the latest answer, on hover for older ones, as a zero-height overlay, so hovering never moves the text).
 /// It observes only its own message model and its own Read Aloud state (M9 §5.5).
 struct AnswerView: View {
     @Environment(AppModel.self) private var app
@@ -40,13 +40,16 @@ struct AnswerView: View {
     var isLatest = false
     /// Set by the TurnView that owns the hover tracking.
     var rowHovered = false
+    /// The pointer is on the overlaid actions row itself (it sits just outside the turn's own bounds).
+    @State private var overlayHovered = false
+    private static let overlayRowHeight: CGFloat = 22
 
     var body: some View {
         let message = model.message
         #if DEBUG
         let _ = PerfProbe.count(message.isRunning ? "body.AnswerView.running" : "body.AnswerView.settled")
         #endif
-        // Once per body: the view and the accessibility label share it. Normally the model carries it (rendered by
+        // Once per body. Normally the model carries it (rendered by
         // the coalesced update or the background prewarm); otherwise render now, with the feed's root (closed chunks
         // come from the cache).
         let rendered = model.rendered ?? render(message)
@@ -59,14 +62,28 @@ struct AnswerView: View {
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
             statusRow(message)
-            if !message.isRunning && !message.text.isEmpty {
+            if isLatest && !message.isRunning && !message.text.isEmpty {
                 actionsRow(message, phase: speech.phase).padding(.top, -Design.Space.s + 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Older answers: a zero-height overlay just below the last block, so nothing reserves space under the text
+        // (the gap to the next turn is the plain turn gap) and revealing it never moves a line.
+        .overlay(alignment: .bottomLeading) {
+            if !isLatest && !message.isRunning && !message.text.isEmpty {
+                let shown = rowHovered || overlayHovered || speech.phase != .idle
+                actionsRow(message, phase: speech.phase)
+                    .opacity(shown ? 1 : 0)
+                    .allowsHitTesting(shown)
+                    .accessibilityHidden(!shown)
+                    .onHover { overlayHovered = $0 }
+                    .offset(y: Self.overlayRowHeight - 2)
+            }
+        }
         // No contextMenu here: right-click on selected text keeps the system menu (Copy, Look Up, Share).
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityText(message, rendered))
+        // A container, not a combined element: each block keeps its own label and headings stay in the rotor.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityLabel(message))
         .accessibilityAction(named: "Copy") { Design.copy(CopyFormat.markdown(message)) }
         .accessibilityAction(named: "Copy as plain text") { Design.copy(CopyFormat.plain(message)) }
         .accessibilityAction(named: speech.phase != .idle ? "Pause or resume reading" : "Read aloud") {
@@ -90,10 +107,10 @@ struct AnswerView: View {
         #endif
     }
 
-    private func accessibilityText(_ message: ChatMessage, _ rendered: RenderedAnswer) -> String {
+    private func accessibilityLabel(_ message: ChatMessage) -> String {
         if message.isRunning && message.text.isEmpty { return "GPT is thinking" }
         if case .failed(let why) = message.status { return "GPT's reply failed: \(why)" }
-        return "GPT answered: \(rendered.plainText)"
+        return "GPT answer"
     }
 
     private static func icon(_ phase: SpeechPhase) -> String {
@@ -152,9 +169,7 @@ struct AnswerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(.callout)
         .foregroundStyle(.secondary)
-        .frame(height: 22)
-        // Shown for the latest answer, on hover for older ones; opacity keeps them for keyboard and VoiceOver.
-        .opacity(isLatest || rowHovered || phase != .idle ? 1 : 0)
+        .frame(height: Self.overlayRowHeight)
         .animation(Design.Motion.quick, value: rowHovered)
     }
 
