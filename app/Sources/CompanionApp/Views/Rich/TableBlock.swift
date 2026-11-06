@@ -281,21 +281,28 @@ private struct CopyPill: ViewModifier {
         content
             .onHover { hover = $0 }
             .overlay(alignment: .topTrailing) {
-                Menu {
-                    items
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                } primaryAction: {
-                    Design.copy(table.markdown)
+                // Hover swaps the real Menu in; otherwise a plain Button of the same fixed size (a Menu per table
+                // measurably costs scroll time). Keyboard focus lands on the Button, whose action copies Markdown;
+                // the tab-separated copy is in the context menu and the accessibility actions.
+                Group {
+                    if hover {
+                        Menu {
+                            items
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        } primaryAction: {
+                            Design.copy(table.markdown)
+                        }
+                        .menuStyle(.button)
+                        .menuIndicator(.hidden)
+                    } else {
+                        Button { Design.copy(table.markdown) } label: { Image(systemName: "doc.on.doc") }
+                            .focused($focused)
+                    }
                 }
-                .menuStyle(.button)
                 .buttonStyle(.borderless)
-                .menuIndicator(.hidden)
                 .controlSize(.small)
-                .fixedSize()
-                .focused($focused)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
+                .frame(width: 22, height: 18)
                 .background(.regularMaterial, in: Capsule())
                 // Straddles the top edge, so it never covers the header's last cell (no space reserved in it).
                 .padding(.trailing, 6)
