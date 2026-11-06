@@ -16,11 +16,12 @@ struct SidebarView: View {
                     StatusLine()
                     if let past = model.pastChat { PastChatBar(past: past) }
                 }
-                .background(.bar)
+                // One surface (D1): the header sits on the window background, fading into the chat below it.
+                .background { EdgeBacking(fadeEdge: .bottom) }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if model.gate == .ready && model.pastChat == nil {
-                    InputBar()
+                    InputBar().background { EdgeBacking(fadeEdge: .top) }
                 }
             }
             // The header's first row shares the titlebar with the traffic lights.
@@ -124,22 +125,30 @@ struct PastChatBar: View {
         HStack(spacing: Design.Space.s) {
             Image(systemName: "clock").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Past chat · read-only").font(.callout.weight(.medium))
+                Text("Past chat · read-only").font(.callout.weight(.medium)).lineLimit(1)
                 Text(verbatim: Date(timeIntervalSince1970: past.summary.lastAt / 1000).shortStamp)
                     .font(.caption).foregroundStyle(.secondary)
             }
             .lineLimit(1)
+            .layoutPriority(1)
             Spacer(minLength: Design.Space.s)
-            Button("Back to Current Chat") { model.closePastChat() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Return to this session's current chat")
+            // Narrow panels get the short label rather than truncating the row's text (D3).
+            ViewThatFits(in: .horizontal) {
+                backButton("Back to Current Chat")
+                backButton("Back")
+            }
         }
-        .padding(.horizontal, Design.Space.m)
-        .padding(.vertical, Design.Space.s)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: Design.Radius.status))
-        .padding(.horizontal, Design.Space.m)
+        .padding(.horizontal, Design.Space.m + Design.Space.xs)
         .padding(.bottom, Design.Space.s)
         .accessibilityElement(children: .contain)
+    }
+
+    private func backButton(_ title: String) -> some View {
+        Button(title) { model.closePastChat() }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .fixedSize()
+            .help("Return to this session's current chat")
+            .accessibilityLabel("Back to current chat")
     }
 }

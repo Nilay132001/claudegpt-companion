@@ -60,6 +60,36 @@ import Testing
         #expect(ContextSummary.line(record(mode: .off, items: 0, bytes: 0)) == "No session context · Off")
         #expect(ContextSummary.line(record(mode: .ask, items: 0, bytes: 0)) == "Context: question only")
     }
+
+    /// The quiet line under the question bubble (M8 desktop-style D5); the size stays in line() for the tooltip.
+    @Test func shortLines() {
+        #expect(ContextSummary.short(record(mode: .ask, items: 7, bytes: 3174)) == "7 context items sent")
+        #expect(ContextSummary.short(record(mode: .automatic, items: 1, bytes: 412)) == "1 context item sent")
+        #expect(ContextSummary.short(record(mode: .off, items: 0, bytes: 0)) == "Question only · Context off")
+        #expect(ContextSummary.short(record(mode: .ask, items: 0, bytes: 0)) == "Question only")
+    }
+}
+
+@Suite struct PathDisplayTests {
+    @Test func fileNameAndParent() {
+        let p = PathDisplay.split("/Volumes/Work/acme/packages/worker/src/ledgerMatcher.ts")
+        #expect(p?.name == "ledgerMatcher.ts")
+        #expect(p?.parent == "/Volumes/Work/acme/packages/worker/src")
+        #expect(PathDisplay.split("/tokenize.ts")?.parent == "/")
+        #expect(PathDisplay.split("tokenize.ts")?.parent == nil)
+        #expect(PathDisplay.split("src/a.ts")?.parent == "src")
+    }
+
+    @Test func notAPath() {
+        #expect(PathDisplay.split("") == nil)
+        #expect(PathDisplay.split("two\nlines/a.ts") == nil)
+        #expect(PathDisplay.split("/Volumes/Work/")?.name == "Work")
+    }
+
+    @Test func folderChangeTarget() {
+        #expect(PathDisplay.folderTarget("/a/b → /a/b/c") == "/a/b/c")
+        #expect(PathDisplay.folderTarget("/a/b") == "/a/b")
+    }
 }
 
 @Suite struct HistorySectionsTests {

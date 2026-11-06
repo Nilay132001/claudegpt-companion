@@ -1,27 +1,24 @@
 import CompanionCore
 import SwiftUI
 
-/// Header (spec "Layout" 1): a titlebar row with the History / New chat / More controls in one glass group, the
-/// session button, and the repository + context row.
+/// Header (spec "Layout" 1): identity only. A titlebar row with plain History / New chat / More buttons beside the
+/// traffic lights, then the session title (it opens the session picker) and one secondary line (what the panel
+/// follows). The repository and the context mode live in the composer's control row (M8 desktop-style D2).
 struct HeaderView: View {
     @Environment(AppModel.self) private var model
     @State private var showPicker = false
     @State private var showHistory = Self.demoOpen("history")
-    @State private var showSees = Self.demoOpen("whatGPTSees")
-    @State private var width: CGFloat = 360
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Design.Space.s) {
+        VStack(alignment: .leading, spacing: Design.Space.xs) {
             titlebarRow
             sessionButton
-            if model.selectedSessionId != nil && ready { contextRow }
         }
         .padding(.horizontal, Design.Space.m)
         .padding(.bottom, Design.Space.s + 2)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 
-    private static func demoOpen(_ scene: String) -> Bool {
+    static func demoOpen(_ scene: String) -> Bool {
         #if DEBUG
         DemoFlags.is_(scene)
         #else
@@ -34,22 +31,16 @@ struct HeaderView: View {
     // MARK: Row 1 — beside the traffic lights
 
     private var titlebarRow: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 2) {
             Color.clear.frame(height: 32).contentShape(Rectangle()).gesture(WindowDragGesture())
-            GlassEffectContainer {
-                HStack(spacing: 2) {
-                    IconButton(symbol: "clock.arrow.circlepath", label: "History", help: "Past chats") { showHistory.toggle() }
-                        .popover(isPresented: $showHistory, arrowEdge: .bottom) { HistoryView(close: { showHistory = false }) }
-                        .disabled(!ready)
-                    IconButton(symbol: "square.and.pencil", label: "New chat", help: "New chat (⌘K)") { Task { await model.newChat() } }
-                        .disabled(!ready || model.isAnswering)
-                    MoreMenu()
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .panelGlass(in: Capsule(), interactive: true)
-            }
+            IconButton(symbol: "clock.arrow.circlepath", label: "History", help: "Past chats") { showHistory.toggle() }
+                .popover(isPresented: $showHistory, arrowEdge: .bottom) { HistoryView(close: { showHistory = false }) }
+                .disabled(!ready)
+            IconButton(symbol: "square.and.pencil", label: "New chat", help: "New chat (⌘K)") { Task { await model.newChat() } }
+                .disabled(!ready || model.isAnswering)
+            MoreMenu()
         }
+        .foregroundStyle(.secondary)
         .frame(height: 32)
         .padding(.top, 1)
     }
@@ -70,6 +61,7 @@ struct HeaderView: View {
                         Image(systemName: "chevron.down")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
+                            .layoutPriority(1)
                     }
                     if model.selectedSessionId != nil {
                         Text(verbatim: model.followSummary)
@@ -84,7 +76,7 @@ struct HeaderView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Choose session")
+        .help(model.selectedSession.map { "\($0.title)\nChoose session" } ?? "Choose session")
         .accessibilityLabel("Session: \(model.selectedSession?.title ?? "none"), \(statusText). \(model.followSummary)")
         .accessibilityHint("Choose session")
         .popover(isPresented: $showPicker, arrowEdge: .bottom) { PickerView(close: { showPicker = false }) }
@@ -107,146 +99,6 @@ struct HeaderView: View {
         case .recent?: "recent"
         default: "inactive"
         }
-    }
-
-    // MARK: Row 3 — repository and context
-
-    private var contextRow: some View {
-        HStack(spacing: Design.Space.s) {
-            // The branch shows when there is room; it is always in the tooltip and the accessibility label.
-            RepoChip(showBranch: width >= 420)
-            Spacer(minLength: Design.Space.xs)
-            ContextModeMenu(compact: width < 320)
-            IconButton(symbol: "eye", label: "What GPT can see", help: "What GPT can see") { showSees.toggle() }
-                .foregroundStyle(.secondary)
-                .popover(isPresented: $showSees, arrowEdge: .bottom) { WhatGPTSeesView() }
-        }
-    }
-}
-
-struct RepoChip: View {
-    @Environment(AppModel.self) private var model
-    var showBranch = true
-
-    var body: some View {
-        HStack(spacing: 5) {
-            switch model.currentWorktree {
-            case .resolved(let root, let branch, _)?:
-                Image(systemName: "folder.fill").foregroundStyle(.tint).imageScale(.small)
-                Text(verbatim: URL(fileURLWithPath: root).lastPathComponent).foregroundStyle(.primary)
-                    .lineLimit(1).truncationMode(.middle)
-                if showBranch {
-                    Text(verbatim: "·").foregroundStyle(.tertiary)
-                    Text(verbatim: branch ?? "detached HEAD").foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                }
-                Image(systemName: "lock.fill").font(.caption2).foregroundStyle(.secondary)
-                    .help("Read-only: GPT can read this repository but can never change it.")
-            case .unavailable?:
-                Image(systemName: "folder.badge.questionmark").foregroundStyle(.orange).imageScale(.small)
-                Text("Repository unavailable").foregroundStyle(.secondary)
-            case nil:
-                ProgressView().controlSize(.mini)
-                Text("Finding the repository…").foregroundStyle(.secondary)
-            }
-        }
-        .font(.caption)
-        .help(model.repoHelp.isEmpty ? "The repository of this Claude session" : model.repoSummary + "\n" + model.repoHelp)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Repository: \(model.repoSummary), read-only")
-    }
-}
-
-extension SharingMode {
-    var shortTitle: String {
-        switch self {
-        case .off: "Off"
-        case .ask: "Ask"
-        case .automatic: "Automatic"
-        }
-    }
-
-    /// The header menu's label: "Context: Ask before sending".
-    var label: String {
-        switch self {
-        case .off: "Context: Off"
-        case .ask: "Context: Ask before sending"
-        case .automatic: "Context: Automatic"
-        }
-    }
-
-    var menuTitle: String {
-        switch self {
-        case .off: "Off"
-        case .ask: "Ask before sending"
-        case .automatic: "Automatic"
-        }
-    }
-
-    /// The label when the panel is narrower than about 320 pt.
-    var compactLabel: String {
-        switch self {
-        case .off: "Context: Off"
-        case .ask: "Context: Ask"
-        case .automatic: "Context: Auto"
-        }
-    }
-
-    /// One line on what the mode sends (owner journey review).
-    var detail: String {
-        switch self {
-        case .off: "Only your question; no Claude session context."
-        case .ask: "Recent Claude context, shown to you before each send."
-        case .automatic: "New Claude context, redacted, sent without a preview."
-        }
-    }
-
-    /// The composer's hint row.
-    var hint: String {
-        switch self {
-        case .off: "Off · only your question and the repo"
-        case .ask: "Ask · you'll check before it's sent"
-        case .automatic: "Automatic · new context, redacted"
-        }
-    }
-}
-
-struct ContextModeMenu: View {
-    @Environment(AppModel.self) private var model
-    var compact = false
-    @State private var confirmAutomatic = false
-
-    static let help = """
-    What GPT gets from the Claude session with each question:
-    Off: only your question, no session context.
-    Ask before sending: recent context (redacted, up to 12 KB); you check it and can remove items first.
-    Automatic: the new part of the session (redacted, up to 12 KB), sent without a preview.
-    """
-
-    var body: some View {
-        let current = model.privacy?.sharingMode
-        Menu {
-            // A toggle per mode: the current one gets the menu checkmark; the second Text is the item's subtitle.
-            ForEach(SharingMode.allCases, id: \.self) { mode in
-                Toggle(isOn: Binding(get: { mode == current }, set: { _ in
-                    guard mode != current else { return }
-                    if mode == .automatic { confirmAutomatic = true } else { Task { await model.setSharingMode(mode) } }
-                })) {
-                    Text(mode.menuTitle)
-                    Text(mode.detail)
-                }
-            }
-        } label: {
-            Text(verbatim: current.map { compact ? $0.compactLabel : $0.label } ?? "Context: …")
-        }
-        .menuStyle(.button)
-        .buttonStyle(.borderless)
-        .menuIndicator(.visible)
-        .controlSize(.small)
-        .fixedSize()
-        .help(Self.help)
-        .accessibilityLabel("Context: \(current?.title ?? "unknown")")
-        .automaticModeConfirmation(isPresented: $confirmAutomatic)
     }
 }
 

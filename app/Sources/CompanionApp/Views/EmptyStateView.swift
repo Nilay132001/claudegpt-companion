@@ -47,18 +47,18 @@ struct EmptyStateView: View {
                         .font(.callout)
                         .popover(isPresented: $showSees, arrowEdge: .bottom) { WhatGPTSeesView() }
                 }
-                VStack(spacing: Design.Space.s) {
+                VStack(spacing: 2) {
                     ForEach(shown) { s in
                         Button { run(s) } label: {
                             Label {
-                                Text(s.title).frame(maxWidth: .infinity, alignment: .leading)
+                                Text(s.title)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             } icon: {
                                 Image(systemName: s.symbol).foregroundStyle(.tint)
                             }
-                            .padding(.vertical, 3)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
+                        .buttonStyle(SuggestionButtonStyle())
                         .disabled(s.question == nil ? !model.canExplain : !model.canAskSuggestion)
                     }
                 }
@@ -80,6 +80,31 @@ struct EmptyStateView: View {
     private func run(_ s: Suggestion) {
         Task {
             if let q = s.question { await model.ask(q) } else { await model.explainLastMessage() }
+        }
+    }
+}
+
+/// A suggestion on the canvas (D1): no box at rest, a soft fill on hover and press.
+private struct SuggestionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        SuggestionRow(configuration: configuration)
+    }
+
+    private struct SuggestionRow: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var enabled
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .font(.callout)
+                .padding(.horizontal, Design.Space.m)
+                .padding(.vertical, Design.Space.s + 1)
+                .background(Color.primary.opacity(configuration.isPressed ? 0.09 : hovering ? 0.05 : 0),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(Rectangle())
+                .opacity(enabled ? 1 : 0.45)
+                .onHover { hovering = $0 }
+                .animation(Design.Motion.quick, value: hovering)
         }
     }
 }

@@ -5,13 +5,24 @@ import Foundation
 
 /// DEBUG-only (ruling R6): COMPANION_DEMO=<scene> runs the real views on synthetic data. Nothing leaves the process.
 /// Scenes: empty, chat, context, raw, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status.
+/// COMPANION_DEMO_WIDTH=<pt> sets the panel width; COMPANION_DEMO_LONG=1 uses long synthetic titles, repo, branch and
+/// paths (the real-world lengths that overlapped in the first M8 build).
 enum DemoFlags {
     static let scene: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO"]
     static func is_(_ s: String) -> Bool { scene == s }
+    static let long = ProcessInfo.processInfo.environment["COMPANION_DEMO_LONG"] == "1"
+    static let width: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO_WIDTH"]
 }
 
 @MainActor final class DemoDaemon: DaemonAPI {
-    static let root = "/Volumes/Work/acme-widgets"
+    static let root = DemoFlags.long ? "/Volumes/Work/acme-payments-reconciliation-service" : "/Volumes/Work/acme-widgets"
+    static let title = DemoFlags.long
+        ? "Investigate flaky integration tests in the payments reconciliation worker after the Node upgrade"
+        : "Refactor widget parser"
+    static let branch = DemoFlags.long ? "claude/fix-flaky-reconciliation-tests-7f3a2c" : "fix/parser"
+    static let relativeFile = DemoFlags.long ? "packages/worker/src/reconcile/ledgerMatcher.ts" : "src/parser/tokenize.ts"
+    static let editedFile = root + "/" + relativeFile
+    static let movedTo = DemoFlags.long ? root + "/packages/worker" : root + "/packages/csv"
     let scene: String
     let events: AsyncStream<DaemonEvent>
     let sink: AsyncStream<DaemonEvent>.Continuation
@@ -64,8 +75,8 @@ enum DemoFlags {
         let selected = scene == "noSession" ? "null" : #""s1""#
         let moved = scene == "status" ? #","focusMovedTo":"s2""# : ""
         return """
-        {"sessions":[{"sessionId":"s1","cliSessionId":"c1","title":"Refactor widget parser","status":"busy","isArchived":false,
-        "lastFocusedAt":1,"lastActivityAt":1,"recordCwd":"\(Self.root)","recordBranch":"fix/parser","resolvedRoot":"\(Self.root)","source":"desktop"},
+        {"sessions":[{"sessionId":"s1","cliSessionId":"c1","title":\(Self.quote(Self.title)),"status":"busy","isArchived":false,
+        "lastFocusedAt":1,"lastActivityAt":1,"recordCwd":"\(Self.root)","recordBranch":"\(Self.branch)","resolvedRoot":"\(Self.root)","source":"desktop"},
         {"sessionId":"s2","cliSessionId":"c2","title":"Add CSV export","status":"idle","isArchived":false,
         "lastFocusedAt":1,"lastActivityAt":1,"recordCwd":"\(Self.root)","recordBranch":"main","resolvedRoot":"\(Self.root)","source":"desktop"}],
         "selection":{"sessionId":\(selected),"via":"\(scene == "noSession" ? "none" : "focus")","focusedSessionId":"s1","focusLabel":"Claude focus","pinnedMissing":false\(moved)},
@@ -86,7 +97,7 @@ enum DemoFlags {
     }
     func sessionsSync(_ sessionId: String) async throws -> SyncStatus { SyncStatus(state: "live", stats: nil, lastPollAt: 1) }
     func sessionsWorktree(_ sessionId: String) async throws -> WorktreeResolution? {
-        Self.j(#"{"kind":"resolved","root":"\#(Self.root)","branch":"fix/parser","isLinkedWorktree":false}"#)
+        Self.j(#"{"kind":"resolved","root":"\#(Self.root)","branch":"\#(Self.branch)","isLinkedWorktree":false}"#)
     }
     func privacyGet() async throws -> PrivacyState {
         Self.j(#"{"sharingMode":"\#(mode)","approvals":[{"root":"\#(Self.root)","commonDir":"\#(Self.root)/.git","includeWorktrees":true,"approvedAt":1}],"redactionNotice":"Secrets that look like keys or tokens are masked (best effort)."}"#)
@@ -103,10 +114,10 @@ enum DemoFlags {
         ("user", "Claude user message", "The widget parser drops the last token when the input ends without a newline. Can you fix it?", 0),
         ("assistant", "Claude reply", "Found it: `tokenize()` only flushes the buffer on a newline. I'll move the flush after the loop so the last token is kept, then run the parser tests.", 0),
         ("failure", "Failure", "Tests failed in `npm test -- parser` (exit 1): 1 failing: tokenize keeps the last token\nexpected [ 'a', 'b' ] to deeply equal [ 'a', 'b', '' ]\n  at test/parser.test.ts:31:18", 0),
-        ("file_edit", "Claude edited a file", "/Volumes/Work/acme-widgets/src/parser/tokenize.ts", 0),
+        ("file_edit", "Claude edited a file", editedFile, 0),
         ("command", "$ npm test -- parser", "exit 0\n✓ 42 tests passed (parser)\n✓ 3 snapshots", 0),
         ("subagent", "Subagent result", "Checked the CSV exporter: it calls tokenize() on each cell, so the fix also stops it dropping the last cell of a row without a trailing newline. I also saw NPM_TOKEN=•••••• in the test env file.", 1),
-        ("folder", "Claude changed folder", "/Volumes/Work/acme-widgets → /Volumes/Work/acme-widgets/packages/csv", 0),
+        ("folder", "Claude changed folder", root + " → " + movedTo, 0),
     ]
 
     static let omittedNote = "2 item(s) left out to stay under 12 KB (kept your messages and Claude's replies first; left out: 2 tool)."
@@ -117,7 +128,7 @@ enum DemoFlags {
         }.joined(separator: ",")
         return Self.j("""
         {"prepareId":"p\(turn)","sessionId":"s1","mode":"\(mode)","needsConfirm":\(mode == "ask"),
-        "repo":{"state":"bound","root":"\(Self.root)","branch":"fix/parser"},"sessionTitle":"Refactor widget parser",
+        "repo":{"state":"bound","root":"\(Self.root)","branch":"\(Self.branch)"},"sessionTitle":\(Self.quote(Self.title)),
         "preview":{"items":[\(list)],"notes":[\(Self.quote(Self.omittedNote))],"omitted":2,"bytes":1184}}
         """)
     }
@@ -137,7 +148,7 @@ enum DemoFlags {
 
     Claude is fixing a bug in the widget parser: input that ends without a newline loses its last token.
 
-    - It traced the bug to `tokenize()` in src/parser/tokenize.ts:42.
+    - It traced the bug to `tokenize()` in \(relativeFile):42.
     - It moved the buffer flush after the loop.
     - The parser tests pass (42 of 42).
 
@@ -198,8 +209,8 @@ enum DemoFlags {
 
     /// The same shape as companiond's composeTurnText block.
     static func block(_ items: ArraySlice<(String, String, String, Int)>, omitted: Int = 0) -> String {
-        var lines = [#"<untrusted_data source="claude-session">"#, "Claude session: Refactor widget parser",
-                     "Repository: \(root) (branch fix/parser). Read it with the read-only repository tools."]
+        var lines = [#"<untrusted_data source="claude-session">"#, "Claude session: \(title)",
+                     "Repository: \(root) (branch \(branch)). Read it with the read-only repository tools."]
         if omitted > 0 { lines.append("Note: " + omittedNote) }
         for it in items { lines += ["[\(it.1)]", it.2] }
         lines.append("</untrusted_data>")
@@ -214,10 +225,10 @@ enum DemoFlags {
         guard !cleared, ["chat", "context", "raw", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
         let now = Date().timeIntervalSince1970 * 1000
         let all = Self.items[...]
-        let t1 = TurnRecord(turnId: "h1", sessionId: "s1", threadId: "th1", sessionTitle: "Refactor widget parser", mode: .ask,
+        let t1 = TurnRecord(turnId: "h1", sessionId: "s1", threadId: "th1", sessionTitle: Self.title, mode: .ask,
                             question: "What is Claude working on right now?", contextBlock: Self.block(all, omitted: 2),
                             items: Self.turnItems(all), omitted: 2, answer: Self.answer1, sentAt: now - 26 * 60_000, completedAt: now - 25 * 60_000)
-        let t2 = TurnRecord(turnId: "h2", sessionId: "s1", threadId: "th1", sessionTitle: "Refactor widget parser", mode: .ask,
+        let t2 = TurnRecord(turnId: "h2", sessionId: "s1", threadId: "th1", sessionTitle: Self.title, mode: .ask,
                             question: "Why does the widget parser drop the last token, and is Claude's fix right?",
                             contextBlock: Self.block(Self.items.prefix(3)), items: Self.turnItems(Self.items.prefix(3)),
                             answer: Self.answer2, sentAt: now - 4 * 60_000, completedAt: now - 3 * 60_000)
@@ -229,9 +240,9 @@ enum DemoFlags {
         let now = Date().timeIntervalSince1970 * 1000
         let h = 3_600_000.0
         let chats = cleared ? [] : [
-            ChatSummary(sessionId: "s1", threadId: "th1", sessionTitle: "Refactor widget parser",
+            ChatSummary(sessionId: "s1", threadId: "th1", sessionTitle: Self.title,
                         firstQuestion: "What is Claude working on right now?", turns: 2, startedAt: now - 0.5 * h, lastAt: now - 0.07 * h),
-            ChatSummary(sessionId: "s1", threadId: "th0", sessionTitle: "Refactor widget parser",
+            ChatSummary(sessionId: "s1", threadId: "th0", sessionTitle: Self.title,
                         firstQuestion: "Is the tokenizer's Unicode handling safe?", turns: 4, startedAt: now - 3 * h, lastAt: now - 2 * h),
             ChatSummary(sessionId: "s2", threadId: "th7", sessionTitle: "Add CSV export",
                         firstQuestion: "Review the CSV writer for quoting bugs", turns: 3, startedAt: now - 28 * h, lastAt: now - 27 * h),
@@ -247,7 +258,7 @@ enum DemoFlags {
         if threadId == "th1" { return HistoryTurns(threadId: "th1", turns: storedTurns) }
         let now = Date().timeIntervalSince1970 * 1000
         return HistoryTurns(threadId: threadId, turns: [
-            TurnRecord(turnId: "o1", sessionId: "s1", threadId: threadId, sessionTitle: "Refactor widget parser", mode: .off,
+            TurnRecord(turnId: "o1", sessionId: "s1", threadId: threadId, sessionTitle: Self.title, mode: .off,
                        question: "Is the tokenizer's Unicode handling safe?",
                        answer: "Mostly. It iterates `Character`s, so grapheme clusters stay whole. One gap: `\\r\\n` is a single Character in Swift but two code units in TypeScript, so CRLF input splits differently.",
                        sentAt: now - 3 * 3_600_000),
@@ -257,7 +268,13 @@ enum DemoFlags {
     func historySetEnabled(_ enabled: Bool) async throws -> Bool { enabled }
     func chatNewChat(sessionId: String) async throws { cleared = true }
 
-    func settingsGet(_ key: String) async throws -> String? { key == "ui.autoPlay" ? "false" : nil }
+    func settingsGet(_ key: String) async throws -> String? {
+        switch key {
+        case "ui.autoPlay": "false"
+        case "ui.window.width": DemoFlags.width
+        default: nil
+        }
+    }
     func settingsSet(_ key: String, _ value: String) async throws {}
     func jiraStatus() async throws -> JiraStatus { JiraStatus(configured: false, site: nil, email: nil) }
     func jiraConfigure(_ c: JiraCredentials) async throws -> JiraStatus { try await jiraStatus() }
@@ -314,7 +331,7 @@ enum DemoFlags {
     }
 
     /// The popover's frame is Liquid Glass, rendered out of process: cacheDisplay captures it as black corners and
-    /// a rainbow rim. Draw a material stand-in card (like `panelGlass` does in demo shots), then only the
+    /// a rainbow rim. Draw a window-background stand-in card, then only the
     /// SwiftUI content on top of it.
     private static func drawPopover(_ w: NSWindow, at origin: CGPoint) {
         guard let root = w.contentView, let content = hostingView(in: root) ?? Optional(root) else { return }

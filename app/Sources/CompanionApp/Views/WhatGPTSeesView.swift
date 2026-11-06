@@ -40,8 +40,9 @@ struct WhatGPTSeesView: View {
     private var repoApproved: Bool { model.currentRoot != nil }
 
     private var repoLine: String {
-        if let root = model.currentRoot {
-            return "\(URL(fileURLWithPath: root).lastPathComponent): GPT can list, read and search files with read-only tools. It never writes, and secret files (.env, keys) stay hidden."
+        if case .resolved(let root, let branch, _)? = model.currentWorktree {
+            // The branch lives here, not in the composer row (M8 desktop-style D3).
+            return "\(URL(fileURLWithPath: root).lastPathComponent) on \(branch ?? "a detached HEAD"): GPT can list, read and search files with read-only tools. It never writes, and secret files (.env, keys) stay hidden."
         }
         return "No repository tools: this repository isn't approved or available."
     }

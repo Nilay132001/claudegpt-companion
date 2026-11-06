@@ -13,11 +13,31 @@ enum Design {
     }
 
     enum Radius {
-        static let chip: CGFloat = 7
-        static let status: CGFloat = 8
-        static let bubble: CGFloat = 14
-        static let composer: CGFloat = 18
+        static let bubble: CGFloat = 16
+        static let composer: CGFloat = 16
+        static let code: CGFloat = 8
     }
+
+    enum Fill {
+        /// The question bubble: a soft neutral fill that reads in light and dark.
+        static let bubble = Color.primary.opacity(0.07)
+        /// The composer field, opaque: white on the light window, a faint lift on the dark one.
+        static let composer = Color(nsColor: NSColor(name: nil) { appearance in
+            guard appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua else { return .white }
+            var lifted = NSColor.white
+            appearance.performAsCurrentDrawingAppearance {
+                lifted = NSColor.windowBackgroundColor.usingColorSpace(.deviceRGB)?.blended(withFraction: 0.06, of: .white) ?? .white
+            }
+            return lifted
+        })
+        /// Hairlines: composer and code block borders, the context list rule.
+        static let hairline = Color.primary.opacity(0.12)
+    }
+
+    /// Answer prose: a little airier than the system default.
+    static let bodyLineSpacing: CGFloat = 3
+    /// Space between turns.
+    static let turnGap: CGFloat = 18
 
     enum Motion {
         static let quick = Animation.snappy(duration: 0.12)
@@ -30,8 +50,8 @@ enum Design {
         static func standard(reduceMotion: Bool) -> Animation { reduceMotion ? .linear(duration: 0.12) : standard }
     }
 
-    /// The panel's reading width for the question bubble.
-    static let bubbleMaxFraction: CGFloat = 0.85
+    /// The question bubble's maximum share of the column width.
+    static let bubbleMaxFraction: CGFloat = 0.8
 
     static func copy(_ text: String) {
         NSPasteboard.general.clearContents()
@@ -93,21 +113,42 @@ extension Date {
     }
 }
 
-extension View {
-    /// Liquid Glass for the navigation layer only (R9): the header controls and the floating composer.
-    /// DEBUG demo screenshots cannot capture glass (it renders out of process), so a demo shot draws a material
-    /// stand-in with the same shape; the running app always uses glassEffect.
-    @ViewBuilder func panelGlass<S: InsettableShape>(in shape: S, interactive: Bool = false) -> some View {
-        #if DEBUG
-        if DemoFlags.scene != nil && ProcessInfo.processInfo.environment["COMPANION_DEMO_SHOT"] != nil {
-            self.background(.regularMaterial, in: shape)
-                .overlay(shape.strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
-        } else {
-            glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+/// Behind the header and the composer: the window background, fading out over 16 pt into the chat, so text
+/// scrolling under them never shows around the composer or ends in a hard cut mid-glyph. It never takes clicks.
+struct EdgeBacking: View {
+    /// The edge facing the chat: .bottom for the header, .top for the composer.
+    let fadeEdge: VerticalEdge
+    static let fade: CGFloat = 16
+
+    var body: some View {
+        let bg = Color(nsColor: .windowBackgroundColor)
+        let gradient = LinearGradient(colors: [bg.opacity(0), bg], startPoint: fadeEdge == .top ? .top : .bottom,
+                                      endPoint: fadeEdge == .top ? .bottom : .top)
+        VStack(spacing: 0) {
+            if fadeEdge == .top { gradient.frame(height: Self.fade) }
+            bg
+            if fadeEdge == .bottom { gradient.frame(height: Self.fade) }
         }
-        #else
-        glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
-        #endif
+        .padding(fadeEdge == .top ? .top : .bottom, -Self.fade)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Places one child on the trailing edge, at most `fraction` of the offered width (the question bubble).
+struct TrailingFraction: Layout {
+    var fraction: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let width = proposal.width ?? .infinity
+        let size = child.sizeThatFits(ProposedViewSize(width: width.isFinite ? width * fraction : nil, height: nil))
+        return CGSize(width: width.isFinite ? width : size.width, height: size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let child = subviews.first else { return }
+        let size = child.sizeThatFits(ProposedViewSize(width: bounds.width * fraction, height: nil))
+        child.place(at: CGPoint(x: bounds.maxX - size.width, y: bounds.minY), proposal: ProposedViewSize(size))
     }
 }

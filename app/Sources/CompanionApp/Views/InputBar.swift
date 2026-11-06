@@ -2,11 +2,14 @@ import AppKit
 import CompanionCore
 import SwiftUI
 
-/// The floating glass composer. Return sends, ⇧Return / ⌥Return insert a newline, ⌘Return sends.
+/// The composer (M8 desktop-style D7): one rounded field with a hairline border and a soft shadow on the window
+/// background; the question on top, the control row below. Return sends, ⇧Return / ⌥Return insert a newline,
+/// ⌘Return sends.
 struct InputBar: View {
     @Environment(AppModel.self) private var model
     @Environment(DictationController.self) private var dictation
     @FocusState private var focused: Bool
+    @State private var showSees = false
 
     var body: some View {
         @Bindable var model = model
@@ -31,35 +34,31 @@ struct InputBar: View {
                     return .handled
                 }
                 .accessibilityLabel("Question for GPT")
-            HStack(spacing: Design.Space.s) {
-                contextHint
-                Spacer(minLength: Design.Space.xs)
-                if model.privacy?.sharingMode != .off && !model.currentMessages.isEmpty { explainButton } // ruling 20
-                micButton
-                sendButton
+            // Controls first get what the fixed buttons leave (layoutPriority), so they shrink, never overlap.
+            HStack(spacing: Design.Space.xs) {
+                ComposerControls(showSees: $showSees)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 2) {
+                    if model.privacy?.sharingMode != .off && !model.currentMessages.isEmpty { explainButton } // ruling 20
+                    micButton
+                    sendButton
+                }
+                .fixedSize()
             }
+            .padding(.leading, -Design.Space.xs) // the borderless menus carry their own inset
         }
-        .padding(.horizontal, Design.Space.m + 2)
+        .padding(.horizontal, Design.Space.m)
         .padding(.top, Design.Space.m)
-        .padding(.bottom, Design.Space.s + 2)
-        .panelGlass(in: RoundedRectangle(cornerRadius: Design.Radius.composer, style: .continuous))
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
+        .padding(.bottom, Design.Space.s)
+        .background(Design.Fill.composer, in: RoundedRectangle(cornerRadius: Design.Radius.composer, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Design.Radius.composer, style: .continuous).strokeBorder(Design.Fill.hairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
+        .padding(.horizontal, Design.Space.m)
+        .padding(.bottom, Design.Space.m)
         .padding(.top, Design.Space.xs)
         .onAppear { focused = true }
-    }
-
-    private var contextHint: some View {
-        let mode = model.privacy?.sharingMode ?? .ask
-        return Label {
-            Text(verbatim: mode.hint).lineLimit(1).truncationMode(.tail)
-        } icon: {
-            Image(systemName: mode == .off ? "eye.slash" : mode == .ask ? "checklist" : "bolt.horizontal")
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .help("Context: \(mode.title). \(mode.detail)")
-        .accessibilityLabel("Context: \(mode.title). \(mode.detail)")
     }
 
     /// Kept reachable after the first turn (the empty state's suggestion is gone by then).

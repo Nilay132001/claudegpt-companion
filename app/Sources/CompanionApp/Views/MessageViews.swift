@@ -1,20 +1,20 @@
 import CompanionCore
 import SwiftUI
 
-/// The user's question: trailing, quiet accent fill, selectable.
+/// The user's question: a soft neutral bubble on the trailing side, at most 80 % of the column, selectable.
 struct QuestionBubble: View {
     let message: ChatMessage
 
     var body: some View {
-        HStack {
-            Spacer(minLength: Design.Space.xl + 16)
+        TrailingFraction(fraction: Design.bubbleMaxFraction) {
             Text(verbatim: message.text)
                 .font(.body)
+                .lineSpacing(2)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, Design.Space.m)
-                .padding(.vertical, Design.Space.s + 1)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: Design.Radius.bubble, style: .continuous))
+                .padding(.horizontal, Design.Space.m + 2)
+                .padding(.vertical, Design.Space.s + 2)
+                .background(Design.Fill.bubble, in: RoundedRectangle(cornerRadius: Design.Radius.bubble, style: .continuous))
                 .contextMenu {
                     Button("Copy") { Design.copy(message.text) }
                 }
@@ -25,17 +25,18 @@ struct QuestionBubble: View {
     }
 }
 
-/// GPT's answer: full-width document text, a small label row, actions on hover.
+/// GPT's answer: plain full-width text, no label row (D4). A compact actions row sits directly under it: always
+/// shown for the latest answer, on hover for older ones (it keeps its height, so hovering never moves the text).
 struct AnswerView: View {
     @Environment(AppModel.self) private var model
     @Environment(ReadAloudController.self) private var readAloud
     let message: ChatMessage
     let readOnly: Bool
+    var isLatest = false
     @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Design.Space.s) {
-            labelRow
             if message.text.isEmpty && message.isRunning {
                 if let a = message.activity { ActivityRow(text: a) } else { TypingIndicator() }
             } else if !message.text.isEmpty {
@@ -43,6 +44,9 @@ struct AnswerView: View {
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
             statusRow
+            if !message.isRunning && !message.text.isEmpty {
+                actionsRow.padding(.top, -Design.Space.s + 2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -73,24 +77,6 @@ struct AnswerView: View {
         readAloud.isActive(message.id) ? readAloud.isSpeaking(message.id) : nil
     }
 
-    private var labelRow: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "sparkle")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tint)
-            Text("GPT").font(.caption.weight(.semibold))
-            if let at = message.sentAt {
-                Text(verbatim: at.shortStamp).font(.caption).foregroundStyle(.tertiary)
-            }
-            Spacer(minLength: 0)
-            if let on = speaking {
-                SpeakingBadge(paused: !on)
-            }
-            // Actions share the label row, so they take no height of their own.
-            if !message.isRunning && !message.text.isEmpty { actions }
-        }
-    }
-
     @ViewBuilder private var statusRow: some View {
         switch message.status {
         case .streaming where !message.text.isEmpty && message.activity == nil:
@@ -98,18 +84,19 @@ struct AnswerView: View {
         case .interrupted:
             Label("Stopped", systemImage: "stop.circle").font(.caption).foregroundStyle(.secondary)
         case .failed(let why):
+            // Borderless on the canvas (D1): icon, the reason, and the retry.
             HStack(alignment: .firstTextBaseline, spacing: Design.Space.s) {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(verbatim: why).font(.callout).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.retry != nil && !readOnly {
                     Button("Send Again") { Task { await model.sendAgain(message) } }
                         .controlSize(.small)
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.borderless)
+                        .fixedSize()
                 }
             }
-            .padding(Design.Space.s + 2)
-            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: Design.Radius.status))
         default:
             EmptyView()
         }
@@ -127,17 +114,19 @@ struct AnswerView: View {
         }
     }
 
-    private var actions: some View {
+    /// Copy ▾, Read aloud (and Stop while reading), then the time: one line, at most 22 pt tall.
+    private var actionsRow: some View {
         HStack(spacing: 2) {
             Menu {
                 copyItems
             } label: {
-                Label("Copy", systemImage: "doc.on.doc")
+                Image(systemName: "doc.on.doc")
             } primaryAction: {
                 Design.copy(CopyFormat.markdown(message))
             }
             .menuStyle(.button)
             .buttonStyle(.borderless)
+            .menuIndicator(.visible)
             .controlSize(.small)
             .fixedSize()
             .help("Copy (click), or choose Markdown or plain text")
@@ -149,11 +138,24 @@ struct AnswerView: View {
             if readAloud.isActive(message.id) {
                 IconButton(symbol: "stop.fill", label: "Stop reading") { readAloud.stop() }
             }
+            if let on = speaking {
+                SpeakingBadge(paused: !on).padding(.leading, Design.Space.xs)
+            }
+            if let at = message.sentAt {
+                Text(verbatim: at.shortStamp)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .padding(.leading, Design.Space.xs)
+                    .accessibilityLabel("Answered \(at.shortStamp)")
+            }
+            Spacer(minLength: 0)
         }
         .font(.callout)
         .foregroundStyle(.secondary)
-        // Visible on hover; always reachable by keyboard and VoiceOver (opacity keeps them in both).
-        .opacity(hovering || speaking != nil ? 1 : 0)
+        .frame(height: 22)
+        // Shown for the latest answer, on hover for older ones; opacity keeps them for keyboard and VoiceOver.
+        .opacity(isLatest || hovering || speaking != nil ? 1 : 0)
         .animation(Design.Motion.quick, value: hovering)
     }
 }

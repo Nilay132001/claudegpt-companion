@@ -17,7 +17,9 @@ struct CodeBlockView: View {
                 Text(verbatim: title ?? language?.lowercased() ?? "code")
                     .font(title == nil ? .caption.monospaced() : .caption.weight(.medium))
                     .foregroundStyle(.secondary)
-                Spacer()
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: Design.Space.s)
                 Button {
                     Design.copy(code)
                     copied.flash()
@@ -27,13 +29,15 @@ struct CodeBlockView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
+                .fixedSize()
                 .foregroundStyle(copied.on ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
                 .help(copyHelp)
                 .accessibilityLabel(copied.on ? "Copied" : copyHelp)
             }
-            .padding(.horizontal, Design.Space.m)
-            .padding(.vertical, 6)
-            Divider().opacity(0.6)
+            .padding(.leading, Design.Space.m)
+            .padding(.trailing, Design.Space.s)
+            .padding(.vertical, 4)
+            Rectangle().fill(Design.Fill.hairline).frame(height: 0.5)
             Text(Self.highlighted(code, language: language))
                 .font(.system(.callout, design: .monospaced))
                 .lineSpacing(2)
@@ -42,8 +46,9 @@ struct CodeBlockView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Design.Space.m)
         }
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+        // The one deliberate box inside answers (D6): hairline border, faint fill.
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: Design.Radius.code, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Design.Radius.code, style: .continuous).strokeBorder(Design.Fill.hairline, lineWidth: 0.5))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title ?? "Code block\(language.map { ", \($0)" } ?? "")")
     }

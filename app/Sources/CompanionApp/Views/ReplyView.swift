@@ -9,13 +9,13 @@ struct ReplyView: View {
     let root: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Design.Space.m) {
+        VStack(alignment: .leading, spacing: Design.Space.m - 2) {
             ForEach(Array(Self.segments(markdown, root: root).enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .prose(let text):
                     Text(text)
                         .font(.body)
-                        .lineSpacing(2)
+                        .lineSpacing(Design.bodyLineSpacing)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)

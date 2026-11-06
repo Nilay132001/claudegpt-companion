@@ -42,9 +42,10 @@ struct ChatView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: Design.Space.l + 4) {
-                    ForEach(Turn.pair(messages)) { turn in
-                        TurnView(turn: turn, readOnly: readOnly)
+                let turns = Turn.pair(messages)
+                VStack(alignment: .leading, spacing: Design.turnGap) {
+                    ForEach(turns) { turn in
+                        TurnView(turn: turn, readOnly: readOnly, isLatest: turn.id == turns.last?.id)
                             .id(turn.id)
                             .modifier(EntranceTransition())
                     }
@@ -55,6 +56,8 @@ struct ChatView: View {
                 Color.clear.frame(height: 1).id("bottom")
             }
             .scrollEdgeEffectStyle(.hard, for: .top)
+            // Text scrolling under the composer fades out instead of showing around the field.
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
             .defaultScrollAnchor(Self.initialAnchor)
             .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: messages.count)
             .onChange(of: messages.last?.text) {
@@ -69,16 +72,18 @@ struct TurnView: View {
     @Environment(AppModel.self) private var model
     let turn: Turn
     let readOnly: Bool
+    var isLatest = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Design.Space.s + 2) {
-            if let q = turn.question { QuestionBubble(message: q) }
-            if let a = turn.answer {
-                if let t = a.turnId, let record = model.records[t] {
+        VStack(alignment: .leading, spacing: Design.Space.m) {
+            // The question and its "context sent" line read as one unit.
+            VStack(alignment: .trailing, spacing: Design.Space.xs + 2) {
+                if let q = turn.question { QuestionBubble(message: q) }
+                if let t = turn.answer?.turnId, let record = model.records[t] {
                     ContextSentView(record: record)
                 }
-                AnswerView(message: a, readOnly: readOnly)
             }
+            if let a = turn.answer { AnswerView(message: a, readOnly: readOnly, isLatest: isLatest) }
         }
     }
 }

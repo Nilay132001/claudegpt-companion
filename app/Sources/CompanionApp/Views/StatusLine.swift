@@ -3,7 +3,7 @@ import SwiftUI
 
 private struct ApprovalTarget: Identifiable { let root: String; var id: String { root } }
 
-/// One compact row for everything that needs attention (replaces the v0.7.0 banner stack). The highest-priority
+/// One compact, borderless row for everything that needs attention (replaces the v0.7.0 banner stack). The highest-priority
 /// notice shows first; "1/3" pages through the rest. Clicking the text shows it in full.
 struct StatusLine: View {
     @Environment(AppModel.self) private var model
@@ -71,11 +71,10 @@ struct StatusLine: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.leading, Design.Space.s + 2)
-        .padding(.trailing, Design.Space.xs)
-        .frame(minHeight: 30)
+        // Borderless on the window background (D8): the tinted icon carries the tone.
+        .padding(.leading, Design.Space.xs)
+        .frame(minHeight: 26)
         .padding(.vertical, expanded ? Design.Space.xs : 0)
-        .background(tint(item.tone).opacity(item.tone == .info ? 0.06 : 0.1), in: RoundedRectangle(cornerRadius: Design.Radius.status))
         .accessibilityElement(children: .contain)
     }
 

@@ -230,6 +230,35 @@ public enum ContextSummary {
         let n = r.items.count
         return "Context sent · \(n) item\(n == 1 ? "" : "s") · \(size(r.contextBlock.utf8.count))"
     }
+
+    /// The quiet line under the question bubble: "7 context items sent". The size is in `line` (tooltip).
+    public static func short(_ r: TurnRecord) -> String {
+        if r.mode == .off { return "Question only · Context off" }
+        if r.items.isEmpty { return "Question only" }
+        let n = r.items.count
+        return "\(n) context item\(n == 1 ? "" : "s") sent"
+    }
+}
+
+/// A path shown on one line as file name (primary) + parent folder (secondary, middle-truncated).
+public enum PathDisplay {
+    /// nil when `text` is not a single-line path.
+    public static func split(_ text: String) -> (name: String, parent: String?)? {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, !t.contains("\n") else { return nil }
+        var parts = t.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        while parts.count > 1, parts.last == "" { parts.removeLast() }
+        guard let name = parts.last, !name.isEmpty else { return nil }
+        let rest = parts.dropLast()
+        if rest.isEmpty { return (name, nil) }
+        let parent = rest.joined(separator: "/")
+        return (name, parent.isEmpty ? "/" : parent)
+    }
+
+    /// "from → to" (Claude changed folder) shows the folder it moved to.
+    public static func folderTarget(_ text: String) -> String {
+        text.components(separatedBy: " → ").last ?? text
+    }
 }
 
 // MARK: History list (M8)

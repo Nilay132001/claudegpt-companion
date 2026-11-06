@@ -52,7 +52,10 @@ import SwiftUI
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.window.retryFollowIfNeeded() }
         })
+        var initial = model.settings
         #if DEBUG
+        // COMPANION_DEMO_WIDTH: size the panel before the first layout, so the chat lays out once at that width.
+        if let w = DemoFlags.width.flatMap(Double.init) { initial.panelWidth = w }
         switch ProcessInfo.processInfo.environment["COMPANION_DEMO_APPEARANCE"] {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -60,7 +63,7 @@ import SwiftUI
         }
         DemoShot.scheduleIfAsked()
         #endif
-        apply(model.settings, byUser: false)
+        apply(initial, byUser: false)
         window.show()
         Task {
             await model.start()
