@@ -28,6 +28,13 @@ enum PerfFlags {
     static let step = CGFloat(Double(env["COMPANION_PERF_STEP"] ?? "") ?? 20)
     static let settle = Double(env["COMPANION_PERF_SETTLE"] ?? "") ?? 2
     static let out: String? = env["COMPANION_PERF_OUT"]
+    /// COMPANION_PERF_SCROLLERS=system: keep the Mac's scroller style (legacy with a mouse connected) instead of
+    /// forcing overlay scrollers.
+    static let systemScrollers = env["COMPANION_PERF_SCROLLERS"] == "system"
+    /// COMPANION_PERF_INPUT=wheel: the scroll driver, the position driver's move to the middle and its reader trip
+    /// scroll with synthesized mouse-wheel events (discrete, no phases) over the chat, as a mouse does, instead of
+    /// moving the clip view.
+    static let wheelInput = env["COMPANION_PERF_INPUT"] == "wheel"
 
     static var turns: Int? {
         switch DemoFlags.scene {
@@ -137,7 +144,7 @@ enum PerfFlags {
         // over the drivers' clip-view moves on its next update (a jump to the middle came back to the bottom), so
         // results depended on whether a mouse was connected. Process-local (argument domain), nothing persisted.
         // (keepPanelAwayFromPointer handles the other case of the same race.)
-        if PerfFlags.mode != nil {
+        if PerfFlags.mode != nil && !PerfFlags.systemScrollers {
             var args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
             args["AppleShowScrollBars"] = "WhenScrolling"
             UserDefaults.standard.setVolatileDomain(args, forName: UserDefaults.argumentDomain)
@@ -326,8 +333,11 @@ enum PerfFlags {
             if PerfProbe.programmaticScrolls != lastProg { lastProg = PerfProbe.programmaticScrolls; lastProgFrame = frame }
             let docH = sv.documentView?.frame.height ?? 0
             let legacyAbove = max(0, docH - clip.bounds.height) - y > ScrollFollow.nearBottom
-            let moved = clip.bounds.origin.y - y
-            if abs(moved) > 1 { // someone else scrolled
+            // With wheel input the driver's last event is applied on the next frame: what it asked for is its own.
+            let asked = PerfFlags.wheelInput ? self.wheelPending : 0
+            self.learnWheel(moved: clip.bounds.origin.y - y)
+            let moved = clip.bounds.origin.y - y - asked
+            if abs(moved) > max(1, 0.25 * abs(asked) + 2) { // someone else scrolled
                 yanks += 1
                 if legacyAbove { legacy += 1 }
                 var kind = "correction"
@@ -344,18 +354,26 @@ enum PerfFlags {
                 y = clip.bounds.origin.y
             }
             lastDocH = docH
+            if PerfFlags.wheelInput { y = clip.bounds.origin.y } // the last event has been applied: start from there
             let maxY = max(0, docH - clip.bounds.height)
             y += dir * PerfFlags.step
             if y <= 0 { y = 0; dir = 1; passes += 1 }
             if y >= maxY { y = maxY; dir = -1; passes += 1 }
-            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
-            sv.reflectScrolledClipView(clip)
+            if PerfFlags.wheelInput {
+                let want = y - clip.bounds.origin.y
+                y = clip.bounds.origin.y           // applied next frame; checked against wheelPending then
+                self.chatWheel(sv, by: want)
+            } else {
+                clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+                sv.reflectScrolledClipView(clip)
+            }
             driverDistance = maxY - y
             steps += 1
             extra?()
         }
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil
+        if PerfFlags.wheelInput { summary["wheelInput"] = wheelStats() }
         summary["scroll"] = ["steps": steps, "stepPt": Double(PerfFlags.step), "passes": passes, "yanksByOthers": yanks,
                              "yanksWhileReadingLegacy": legacy, "yanksWhileReading": reading, "pullbacks": pullbacks,
                              "offsetCorrections": corrections, "events": events]
@@ -388,8 +406,21 @@ enum PerfFlags {
         guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
         let clip = sv.contentView
         let mid = max(0, ((sv.documentView?.frame.height ?? 0) - clip.bounds.height) / 2)
-        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: mid))
-        sv.reflectScrolledClipView(clip)
+        if PerfFlags.wheelInput {
+            // As a mouse user would: wheel there (large discrete steps, several per frame).
+            var tries = 0
+            while abs(clip.bounds.origin.y - mid) > 150 && tries < 400 {
+                let y0 = clip.bounds.origin.y
+                chatWheel(sv, by: mid - y0)
+                await nextFrame()
+                learnWheel(moved: clip.bounds.origin.y - y0)
+                tries += 1
+            }
+            summary["wheelToMiddle"] = ["frames": tries, "missPt": Double(clip.bounds.origin.y - mid)]
+        } else {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: mid))
+            sv.reflectScrolledClipView(clip)
+        }
         for _ in 0..<30 { await nextFrame() }
         func sample() -> [String: Any] {
             ["turn": PerfProbe.firstVisibleTurn?.uuidString ?? "nil", "inset": PerfProbe.firstVisibleInset ?? -1,
@@ -440,27 +471,43 @@ enum PerfFlags {
         await nextFrame()
         while PerfProbe.firstVisibleTurn != turn0 && waited < 120 { await nextFrame(); waited += 1 }
         let progBefore = PerfProbe.programmaticScrolls
-        var y = clip.bounds.origin.y, pulls = 0
+        // Opening and closing the past chat replaced the chat's view: use the scroll view shown now.
+        guard let rsv = chatScrollView() else { summary["error"] = "no scroll view after the past chat"; return }
+        let rclip = rsv.contentView
+        var y = rclip.bounds.origin.y, pulls = 0
+        var readerMoves: [Double] = []
         for _ in 0..<15 {
-            y += 20
-            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
-            sv.reflectScrolledClipView(clip)
-            await nextFrame()
-            if abs(clip.bounds.origin.y - y) > 1 { pulls += 1; y = clip.bounds.origin.y } // moved under the reader
+            if PerfFlags.wheelInput {
+                let y0 = rclip.bounds.origin.y
+                chatWheel(rsv, by: 20)
+                await nextFrame()
+                let moved = rclip.bounds.origin.y - y0
+                readerMoves.append(Double(moved))
+                learnWheel(moved: moved)
+                if abs(moved - 20 * (wheelScale > 0 ? 1 : 1)) > 12 { pulls += 1 } // not (about) the reader's 20 pt
+                y = rclip.bounds.origin.y
+            } else {
+                y += 20
+                rclip.scroll(to: NSPoint(x: rclip.bounds.origin.x, y: y))
+                rsv.reflectScrolledClipView(rclip)
+                await nextFrame()
+                if abs(rclip.bounds.origin.y - y) > 1 { pulls += 1; y = rclip.bounds.origin.y } // moved under the reader
+            }
         }
-        let yAfterReader = clip.bounds.origin.y
+        let yAfterReader = rclip.bounds.origin.y
         for _ in 0..<60 { await nextFrame() }
         let readerScroll: [String: Any] = [
             "framesToLand": waited, "restoreEnds": PerfProbe.counts.filter { $0.key.hasPrefix("restore.end") }, "appScrollsDuringAndAfter": PerfProbe.programmaticScrolls - progBefore,
-            "movedAfterReaderStopped": Double(clip.bounds.origin.y - yAfterReader),
-            "pullsWhileScrolling": pulls]
+            "movedAfterReaderStopped": Double(rclip.bounds.origin.y - yAfterReader),
+            "pullsWhileScrolling": pulls, "readerMoves": readerMoves]
         // perf-stream: s1 is still streaming throughout; coming back must not land at the bottom.
-        let docH = sv.documentView?.frame.height ?? 0
+        let docH = rsv.documentView?.frame.height ?? 0
+        if PerfFlags.wheelInput { summary["wheelInput"] = wheelStats() }
         summary["position"] = ["before": before, "afterSwitch": afterSwitch, "afterRapid0": afterRapid0,
                                "afterRapid1": afterRapid1, "afterPast": afterPast,
                                "same": sameSwitch, "sameRapid0": sameRapid0, "sameRapid1": sameRapid1,
                                "samePast": samePast, "turnKnown": turn0 != nil, "readerScroll": readerScroll,
-                               "distanceFromBottomAtEnd": Double(docH - clip.bounds.height - clip.bounds.origin.y),
+                               "distanceFromBottomAtEnd": Double(docH - rclip.bounds.height - rclip.bounds.origin.y),
                                "streaming": model.currentFeed?.isRunning ?? false]
     }
 
@@ -484,8 +531,10 @@ enum PerfFlags {
 
     /// One synthesized wheel event at `p` (window coordinates), delivered through the window like the system would.
     /// `phase`: nil = mouse wheel (no phases, line-like), else the CGScrollPhase of a trackpad gesture.
-    private func sendWheel(_ win: NSWindow, at p: NSPoint, dy: Int32, dx: Int32 = 0, phase: Int64? = nil) -> [String: Any] {
-        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return ["error": "no cgevent"] }
+    private func sendWheel(_ win: NSWindow, at p: NSPoint, dy: Int32, dx: Int32 = 0, phase: Int64? = nil,
+                           lines: Bool = false) -> [String: Any] {
+        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: lines ? .line : .pixel, wheelCount: 2, wheel1: dy,
+                               wheel2: dx, wheel3: 0) else { return ["error": "no cgevent"] }
         let screen = win.convertPoint(toScreen: p)
         let primaryH = NSScreen.screens.first?.frame.height ?? 0
         cg.location = CGPoint(x: screen.x, y: primaryH - screen.y)
@@ -500,6 +549,69 @@ enum PerfFlags {
         hit.scrollWheel(with: ev)
         return ["win": ev.windowNumber, "loc": "\(Int(ev.locationInWindow.x)),\(Int(ev.locationInWindow.y))",
                 "dy": Double(ev.scrollingDeltaY), "phase": Int(ev.phase.rawValue)]
+    }
+
+    // MARK: Mouse-wheel input for the scroll and position drivers
+
+    private var wheelScale: CGFloat = 10    // chat points moved per wheel line (notch), learned from the events
+    private var wheelEvents = 0, wheelNoMove = 0
+    private var wheelPoint: NSPoint?
+
+    /// A point over the chat's text (not a code or table scroller), in window coordinates.
+    private func chatPoint(_ sv: NSScrollView, _ win: NSWindow) -> NSPoint? {
+        if let p = wheelPoint, let h = Self.hit(win, p), h.isDescendant(of: sv) { return p }
+        let r = sv.convert(sv.bounds, to: nil)
+        let scrollers = overflowScrollers(in: sv).map { $0.convert($0.bounds, to: nil) }
+        for k in stride(from: 0, to: Int(r.height) / 2 - 40, by: 12) {
+            for sign in [CGFloat(1), -1] {
+                let c = NSPoint(x: r.midX, y: r.midY + sign * CGFloat(k))
+                if scrollers.contains(where: { $0.insetBy(dx: -4, dy: -4).contains(c) }) { continue }
+                if let h = Self.hit(win, c), h.isDescendant(of: sv) { wheelPoint = c; return c }
+            }
+        }
+        return nil
+    }
+
+    /// Scrolls the chat by about `dy` points (positive: toward the bottom) with one discrete mouse-wheel event of
+    /// whole lines (notches), as a mouse wheel sends; returns how far it moved right away.
+    @discardableResult
+    private func chatWheel(_ sv: NSScrollView, by dy: CGFloat) -> CGFloat {
+        guard let win = panel, abs(dy) >= 0.5, let p = chatPoint(sv, win) else { return 0 }
+        let y0 = sv.contentView.bounds.origin.y
+        // Negative wheel1 scrolls the content up (the chat offset grows).
+        var px = Int32(max(-3000, min(3000, (-dy / wheelScale).rounded())))
+        if px == 0 { px = dy > 0 ? -1 : 1 }
+        _ = sendWheel(win, at: p, dy: px, lines: true)
+        wheelEvents += 1
+        let moved = sv.contentView.bounds.origin.y - y0
+        if abs(moved) > 0.5 {
+            wheelScale = max(0.05, min(200, abs(moved / CGFloat(px))))
+            wheelPending = 0
+        } else {
+            wheelNoMove += 1                       // applied on the next frame
+            wheelPending = -CGFloat(px) * wheelScale
+            wheelPendingPx = px
+        }
+        return moved
+    }
+
+    /// What the last wheel event should move the chat by once applied (points; 0 when it moved at once).
+    private var wheelPending: CGFloat = 0
+    private var wheelPendingPx: Int32 = 0
+
+    /// Called once the pending event has been applied: refines points per wheel pixel from what really moved.
+    private func learnWheel(moved: CGFloat) {
+        guard PerfFlags.wheelInput, wheelPendingPx != 0 else { return }
+        let r = abs(moved / CGFloat(wheelPendingPx))
+        // Only a move in the asked direction and of a plausible size (not a correction or a yank) teaches the scale.
+        if (moved > 0) == (wheelPendingPx < 0), r > 0.05, r < 200, abs(abs(moved) - abs(wheelPending)) < 0.5 * abs(wheelPending) + 40 {
+            wheelScale = r
+        }
+        wheelPendingPx = 0
+    }
+
+    private func wheelStats() -> [String: Any] {
+        ["events": wheelEvents, "noImmediateMove": wheelNoMove, "ptPerLine": Double(wheelScale)]
     }
 
     /// Whether vertical wheel and trackpad scrolling over a non-wrapping code block still scrolls the chat.
