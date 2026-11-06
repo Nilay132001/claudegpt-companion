@@ -155,6 +155,30 @@ import Foundation
         return parts.joined(separator: "\n\n")
     }
 
+    /// A table of 2 to 6 columns and 3 to 8 rows (scene perf-table), alignments varied.
+    static func wideTable(_ r: inout Rng) -> String {
+        let heads = ["Name", "Count", "Status", "Owner", "Notes", "Latency"]
+        let n = r.int(2...6)
+        let aligns = (0..<n).map { _ in r.pick(["---", "---:", ":---:"]) }
+        var rows = ["| " + heads.prefix(n).joined(separator: " | ") + " |", "| " + aligns.joined(separator: " | ") + " |"]
+        for _ in 0..<r.int(3...8) {
+            rows.append("| " + (0..<n).map { c in c == 1 ? "\(r.int(1...9999))" : r.pick(["ok", "late", "src/csv/write.ts", sentence(&r)]) }
+                .joined(separator: " | ") + " |")
+        }
+        return rows.joined(separator: "\n")
+    }
+
+    /// Table-heavy answer (scene perf-table): every answer has one to three tables.
+    static func tableAnswer(_ r: inout Rng) -> String {
+        var parts: [String] = [paragraph(&r, sentences: 2...3)]
+        for _ in 0..<r.int(1...3) {
+            parts.append("## " + sentence(&r).dropLast().split(separator: " ").prefix(5).joined(separator: " "))
+            parts.append(wideTable(&r))
+        }
+        parts.append("Next: " + sentence(&r, ref: true))
+        return parts.joined(separator: "\n\n")
+    }
+
     /// One answer: ~2–7 KB of Markdown, the kinds of blocks GPT uses here.
     static func answer(_ r: inout Rng, size: Int = 1) -> String {
         var parts: [String] = [paragraph(&r, sentences: 2...4)]
@@ -190,7 +214,7 @@ import Foundation
             let at = now - Double(count - i) * 120_000
             return TurnRecord(turnId: "\(sessionId)-t\(i)", sessionId: sessionId, threadId: "th-\(sessionId)", sessionTitle: title,
                               mode: .ask, question: question(&r), contextBlock: block, items: items, omitted: 0,
-                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : answer(&r), sentAt: at, completedAt: at + 60_000)
+                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : DemoFlags.is_("perf-table") ? tableAnswer(&r) : answer(&r), sentAt: at, completedAt: at + 60_000)
         }
     }
 

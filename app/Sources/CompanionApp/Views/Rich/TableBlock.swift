@@ -1,4 +1,5 @@
 import CompanionCore
+import AppKit
 import SwiftUI
 
 /// A Markdown table that adapts to the answer column (M9 §6, P8): a plain grid when it fits, the same grid in a
@@ -16,7 +17,9 @@ struct TableBlock: View {
     let table: TableModel
     static let cellCap = CGFloat(TableLayout.cellCap)
 
-    @State private var choice: TableLayoutChoice = .grid
+    /// Starts as `.scroll`: before the first measurement it lays out at the cells' natural widths (capped at 220 pt),
+    /// so the first frame is never a wide table squeezed into a narrow column and wrapped to a huge height.
+    @State private var choice: TableLayoutChoice = .scroll
     @State private var ideal: [Double]?
     @State private var measuredWidth: CGFloat = 0
     @State private var fadeEdge = false
@@ -36,12 +39,7 @@ struct TableBlock: View {
             .clipShape(shape)
             .frame(maxWidth: .infinity, alignment: .leading)
             .chatTextSelection()
-            // Rows, not cells, with the header names: "Package: parser, Seconds: 4.2".
-            .accessibilityChildren {
-                VStack {
-                    ForEach(Array(Self.spoken(table).enumerated()), id: \.offset) { _, line in Text(line) }
-                }
-            }
+            .modifier(RowReading(table: table))
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
             guard abs(w - measuredWidth) > 1 else { return }
@@ -60,7 +58,7 @@ struct TableBlock: View {
     }
 
     /// One line per body row: every column as "Header: value".
-    private static func spoken(_ t: TableModel) -> [String] {
+    fileprivate static func spoken(_ t: TableModel) -> [String] {
         let p = t.plainRows()
         return p.dropFirst().map { r in (0..<r.count).map { "\(p[0][$0]): \(r[$0])" }.joined(separator: ", ") }
     }
@@ -105,7 +103,8 @@ struct TableBlock: View {
 
     /// The grid sideways, header first, with the code blocks' 12 pt trailing fade while there is more.
     private func scroller(size: CGFloat, shape: RoundedRectangle) -> some View {
-        ScrollView(.horizontal) { grid(size: size).overlay(border(shape)) }
+        // At least the column wide, so a table that fits looks the same as in the plain grid.
+        ScrollView(.horizontal) { grid(size: size).frame(minWidth: measuredWidth, alignment: .leading).overlay(border(shape)) }
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentSize.width > g.containerSize.width + 1 && g.visibleRect.maxX < g.contentSize.width - 1
@@ -180,6 +179,24 @@ struct TableBlock: View {
         case .leading: (.leading, .topLeading, .leading)
         case .center: (.center, .top, .center)
         case .trailing: (.trailing, .topTrailing, .trailing)
+        }
+    }
+}
+
+/// VoiceOver reads a table by rows, with the header names ("Package: parser, Seconds: 4.2"), not cell by cell.
+/// The row elements are only built while VoiceOver is running: they cost memory and layout time on every table
+/// of a long chat, and nobody else reads them.
+private struct RowReading: ViewModifier {
+    let table: TableModel
+    func body(content: Content) -> some View {
+        if NSWorkspace.shared.isVoiceOverEnabled {
+            content.accessibilityChildren {
+                VStack {
+                    ForEach(Array(TableBlock.spoken(table).enumerated()), id: \.offset) { _, line in Text(line) }
+                }
+            }
+        } else {
+            content
         }
     }
 }
