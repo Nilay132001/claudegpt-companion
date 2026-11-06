@@ -63,6 +63,13 @@ enum RichContent {
         npm test -- --runInBand --coverage --coverageReporters=text-summary --testPathPattern='src/(parser|csv)/.*\\.test\\.ts$'
         ```
         """),
+        ("Why is the payload one line", """
+        A minified line is wrapped whatever the setting says:
+
+        ```json
+        {"rows":[\(String(repeating: "{\"id\":1,\"ok\":true},", count: 110))]}
+        ```
+        """),
         ("Show the whole matcher", """
         The matcher in full (long, so only the start shows until you expand it):
 
@@ -118,6 +125,7 @@ enum RichContent {
         ```
         a plain block with no language: short
         ```
+
         """),
     ]
 }

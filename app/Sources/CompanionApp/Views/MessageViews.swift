@@ -1,5 +1,6 @@
 import CompanionCore
 import AppKit
+import Combine
 import SwiftUI
 
 /// The user's question: a soft neutral bubble on the trailing side, at most 80 % of the column, selectable.
@@ -81,11 +82,9 @@ struct AnswerView: View {
                     .allowsHitTesting(shown)
                     .accessibilityHidden(!shown)
                     .onHover { overlayHovered = $0 }
-                    .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-                        if overlayHovered { menuOpen = true }
-                    }
-                    .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
-                        menuOpen = false
+                    // Only the answer whose row the pointer is on (or whose menu is open) listens for menus.
+                    .onReceive(menuEvents(active: overlayHovered || menuOpen)) { began in
+                        if began { if overlayHovered { menuOpen = true } } else { menuOpen = false }
                     }
                     // The in-layout row of the latest answer sits 2 pt below the last block (8 pt stack gap minus the
                     // 6 pt pull-up); the overlay's bottom edge is the last block's, so its row starts at +height+2.
@@ -109,6 +108,15 @@ struct AnswerView: View {
                 Button("Send again") { Task { await app.sendAgain(message) } }
             }
         }
+    }
+
+    /// true when a menu begins tracking, false when it ends; silent while `active` is false.
+    private func menuEvents(active: Bool) -> AnyPublisher<Bool, Never> {
+        guard active else { return Empty().eraseToAnyPublisher() }
+        let nc = NotificationCenter.default
+        return nc.publisher(for: NSMenu.didBeginTrackingNotification).map { _ in true }
+            .merge(with: nc.publisher(for: NSMenu.didEndTrackingNotification).map { _ in false })
+            .eraseToAnyPublisher()
     }
 
     private func render(_ message: ChatMessage) -> RenderedAnswer {

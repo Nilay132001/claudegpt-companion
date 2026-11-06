@@ -16,24 +16,34 @@ struct CodeBlock: View {
     var copyHelp = "Copy code"
     @State private var copied = CopiedFlag()
     @State private var expanded = false
-    /// The code and the text its colours were computed for, so a stale result is never shown for new text.
-    @State private var highlighted: (text: String, styled: AttributedString)?
+    /// Bumped when a highlight lands in the cache, so the body reads it.
+    @State private var highlightTick = 0
     /// Content overflows the card and is not scrolled to its end: the trailing edge fades.
     @State private var fadeEdge = false
 
     private static let fade: CGFloat = 12
 
+    /// Highlighted code by (language, text): a re-realized block, or Show all, never re-highlights or flashes plain.
+    @MainActor private static var highlightCache = BoundedCache<HighlightCacheKey, AttributedString>(capacity: 48)
+    private struct HighlightCacheKey: Hashable { let language: String?; let text: String }
+
     var body: some View {
         #if DEBUG
         let _ = PerfProbe.count("body.CodeBlock")
         #endif
-        let wrap = app.settings.codeWrap
+        // A block with a very long line always wraps: giant single-line text renders blank or clipped.
+        let forced = model.hasVeryLongLine
+        let wrap = app.settings.codeWrap || forced
         let preview = (model.isOpen || expanded) ? nil : model.preview()
         let shown = preview?.text ?? model.text
         VStack(alignment: .leading, spacing: 0) {
-            header(wrap: wrap)
+            header(wrap: wrap, forced: forced)
             Rectangle().fill(Design.Fill.hairline(contrast)).frame(height: Design.Fill.hairlineWidth(contrast))
-            if wrap { codeText(shown).frame(maxWidth: .infinity, alignment: .leading).padding(Design.Space.m) } else { scroller(shown) }
+            if wrap { codeText(shown).frame(maxWidth: .infinity, alignment: .leading).padding(codeInsets) } else { scroller(shown) }
+            if forced {
+                Text("Wrapped: very long lines").font(.caption).foregroundStyle(.tertiary)
+                    .padding(.horizontal, Design.Space.m).padding(.bottom, 6)
+            }
             if let preview {
                 Rectangle().fill(Design.Fill.hairline(contrast)).frame(height: Design.Fill.hairlineWidth(contrast))
                 Button {
@@ -56,28 +66,46 @@ struct CodeBlock: View {
         .overlay(RoundedRectangle(cornerRadius: Design.Radius.code, style: .continuous).strokeBorder(Design.Fill.hairline(contrast), lineWidth: Design.Fill.hairlineWidth(contrast)))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title ?? "Code block\(model.language.map { ", \($0)" } ?? "")")
-        .task(id: shown) {
+        // Keyed on the open state too: a stream closing the fence changes it without changing the text.
+        .task(id: HighlightKey(text: shown, isOpen: model.isOpen)) {
             guard !model.isOpen else { return }
-            highlighted = (shown, Self.highlighted(shown, language: model.language))
+            let key = HighlightCacheKey(language: model.language, text: shown)
+            if Self.highlightCache.value(for: key) != nil { return }
+            Self.highlightCache.insert(Self.highlighted(shown, language: model.language), for: key)
+            highlightTick += 1
         }
     }
 
     // MARK: Pieces
 
-    private func header(wrap: Bool) -> some View {
+    /// The header already has its own padding: a small top inset reads as one unit with the first line.
+    private var codeInsets: EdgeInsets {
+        EdgeInsets(top: 7, leading: Design.Space.m, bottom: 6, trailing: Design.Space.m)
+    }
+
+    private func header(wrap: Bool, forced: Bool) -> some View {
         HStack(spacing: Design.Space.s) {
             Text(verbatim: title ?? model.language?.lowercased() ?? "code")
                 .font(title == nil ? .caption.monospaced() : .caption.weight(.medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .layoutPriority(1)
             Spacer(minLength: Design.Space.s)
             if let ref = model.reference { fileChip(ref) }
-            IconButton(symbol: "arrow.turn.down.left", label: wrap ? "Turn off line wrap" : "Wrap long lines") {
-                app.setSetting(\.codeWrap, !wrap)
+            Toggle(isOn: Binding(get: { wrap }, set: { app.setSetting(\.codeWrap, $0) })) {
+                Text("Wrap").font(.caption)
             }
-            .font(.caption)
+            .toggleStyle(.button)
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .fixedSize()
+            .layoutPriority(1)
             .foregroundStyle(wrap ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            .disabled(forced)
+            .help(forced ? "This block has very long lines, so it wraps" : wrap ? "Turn off line wrap" : "Wrap long lines")
+            .accessibilityLabel("Wrap long lines")
+            .accessibilityAddTraits(wrap ? .isSelected : [])
             Button {
                 Design.copy(model.text)
                 copied.flash()
@@ -88,6 +116,7 @@ struct CodeBlock: View {
             .buttonStyle(.borderless)
             .font(.caption)
             .fixedSize()
+            .layoutPriority(1)
             .foregroundStyle(copied.on ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
             .help(copyHelp)
             .accessibilityLabel(copied.on ? "Copied" : copyHelp)
@@ -99,7 +128,7 @@ struct CodeBlock: View {
 
     /// `path:line` from the info string: opens through the same companion-open check as a link.
     private func fileChip(_ ref: FileReference) -> some View {
-        let name = Self.relative(ref.path, root: root)
+        let name = FileDisplay.relative(ref.path, root: root)
         return Button {
             openURL(EditorLink.companionURL(ref))
         } label: {
@@ -119,7 +148,8 @@ struct CodeBlock: View {
     /// The code as one selectable Text: coloured once it is closed and highlighted, plain while it streams.
     private func codeText(_ shown: String) -> some View {
         let font = Font.system(size: Design.Typography.code * Design.Typography.scale(typeSize), design: .monospaced)
-        let styled = (model.isOpen ? nil : highlighted).flatMap { $0.text == shown ? $0.styled : nil }
+        _ = highlightTick
+        let styled = model.isOpen ? nil : Self.highlightCache.value(for: HighlightCacheKey(language: model.language, text: shown))
         return Group {
             if let styled { Text(styled) } else { Text(verbatim: shown) }
         }
@@ -134,7 +164,7 @@ struct CodeBlock: View {
         ScrollView(.horizontal) {
             codeText(shown)
                 .fixedSize(horizontal: true, vertical: true)
-                .padding(Design.Space.m)
+                .padding(codeInsets)
         }
         .scrollIndicators(.automatic)
         .contentMargins(0, for: .scrollContent)
@@ -159,15 +189,6 @@ struct CodeBlock: View {
     }
 
     // MARK: Helpers
-
-    /// Shown in the chip: relative to the root when inside it, otherwise the file name.
-    static func relative(_ path: String, root: String?) -> String {
-        if let root, !root.isEmpty {
-            let prefix = root.hasSuffix("/") ? root : root + "/"
-            if path.hasPrefix(prefix) { return String(path.dropFirst(prefix.count)) }
-        }
-        return (path as NSString).lastPathComponent
-    }
 
     static func color(_ t: CodeToken) -> Color? {
         switch t {
