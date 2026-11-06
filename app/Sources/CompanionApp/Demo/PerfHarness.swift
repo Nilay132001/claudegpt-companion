@@ -12,7 +12,8 @@ import os
 ///   scroll  — scrolls the chat's NSScrollView between top and bottom in fixed steps at display rate
 ///   stream  — holds still at the bottom while perf-stream's answer streams
 ///   switch  — switches between the two demo sessions repeatedly
-///   resize  — steps the panel width between 300 and 600 pt at display rate
+///   resize  — steps the panel width between 300 and 600 pt at display rate, inside the live-resize notifications
+///             AppKit posts while the user drags the panel's edge
 ///   idle    — does nothing (memory baseline)
 ///   position — scrolls to the middle, switches to the other session and back; the first visible turn must match
 ///   readaloud — the scroll driver, toggling Read Aloud on the latest answer every 30 frames (a silent synthesizer)
@@ -378,6 +379,8 @@ enum PerfFlags {
         var widths: [Double] = []
         var w: CGFloat = 600, dir: CGFloat = -1
         let end = DispatchTime.now().uptimeNanoseconds + UInt64(PerfFlags.seconds * 1e9)
+        // As when the user drags the panel's edge: AppKit posts these around a live resize.
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: p)
         onTick = { _ in
             w += dir * 10
             if w <= 300 { w = 300; dir = 1 }
@@ -392,6 +395,7 @@ enum PerfFlags {
         }
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: p)
         summary["resize"] = ["steps": widths.count, "setFrameMs": Self.stats(widths)]
     }
 

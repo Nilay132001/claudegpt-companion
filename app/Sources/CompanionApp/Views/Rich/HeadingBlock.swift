@@ -10,7 +10,7 @@ struct HeadingBlock: View {
         Text(text)
             .font(.system(size: Design.Typography.heading(level) * Design.Typography.scale(typeSize), weight: .semibold))
             .lineSpacing(2)
-            .textSelection(.enabled)
+            .chatTextSelection()
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityAddTraits(.isHeader)

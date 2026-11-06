@@ -9,7 +9,7 @@ struct ProseBlock: View {
         Text(text)
             .font(.system(size: Design.Typography.answerBody * Design.Typography.scale(typeSize)))
             .lineSpacing(Design.Typography.answerLineSpacing)
-            .textSelection(.enabled)
+            .chatTextSelection()
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }

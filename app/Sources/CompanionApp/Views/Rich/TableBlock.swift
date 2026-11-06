@@ -40,7 +40,7 @@ struct TableBlock: View {
                 Text(c < row.count ? row[c] : AttributedString())
                     .font(.system(size: size, weight: header ? .semibold : .regular))
                     .multilineTextAlignment(a.text)
-                    .textSelection(.enabled)
+                    .chatTextSelection()
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)

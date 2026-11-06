@@ -14,7 +14,7 @@ struct QuestionBubble: View {
             Text(verbatim: message.text)
                 .font(.body)
                 .lineSpacing(2)
-                .textSelection(.enabled)
+                .chatTextSelection()
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, Design.Space.m + 2)
                 .padding(.vertical, Design.Space.s + 2)
@@ -114,7 +114,7 @@ struct AnswerView: View {
             // Borderless on the canvas (D1): icon, the reason, and the retry.
             HStack(alignment: .firstTextBaseline, spacing: Design.Space.s) {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                Text(verbatim: why).font(.callout).textSelection(.enabled)
+                Text(verbatim: why).font(.callout).chatTextSelection()
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.retry != nil && !readOnly {

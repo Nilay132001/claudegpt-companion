@@ -13,6 +13,7 @@ import SwiftUI
     private var following = false
     private var registered: HotkeySpec?
     private var resizeObserver: NSObjectProtocol?
+    private var resizeStartObserver: NSObjectProtocol?
     private var closeObserver: NSObjectProtocol?
     /// Called when the panel is hidden (hotkey) or closed: nothing keeps listening behind a hidden panel (spec §7.8).
     var onHide: (@MainActor () -> Void)?
@@ -29,9 +30,13 @@ import SwiftUI
         hosting.sizingOptions = []
         let p = SidePanel(content: hosting)
         panel = p
+        resizeStartObserver = NotificationCenter.default.addObserver(forName: NSWindow.willStartLiveResizeNotification, object: p, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.status.liveResizing = true }
+        }
         resizeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: p, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let p = self.panel else { return }
+                self.status.liveResizing = false
                 self.width = p.frame.width
                 onWidthChange(p.frame.width)
             }

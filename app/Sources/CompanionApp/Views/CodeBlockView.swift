@@ -45,7 +45,7 @@ struct CodeBlockView: View {
             Text(Self.highlighted(code, language: language))
                 .font(.system(.callout, design: .monospaced))
                 .lineSpacing(2)
-                .textSelection(.enabled)
+                .chatTextSelection()
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Design.Space.m)

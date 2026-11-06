@@ -9,7 +9,7 @@ struct MathBlock: View {
         Text(verbatim: text)
             .font(.system(size: Design.Typography.code * Design.Typography.scale(typeSize), design: .monospaced))
             .lineSpacing(Design.Typography.codeLineSpacing)
-            .textSelection(.enabled)
+            .chatTextSelection()
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)

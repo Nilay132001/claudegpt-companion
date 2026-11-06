@@ -93,6 +93,23 @@ enum Design {
 
 /// New messages fade in and rise 6 pt (opacity only under Reduce Motion). Disabled rows (every turn but the
 /// newest) get no transition, so a lazy row scrolled into view never animates in.
+/// Selectable chat text, except while the panel is being live-resized (WindowStatus.liveResizing): then the text
+/// has no selection overlay to update on every frame. A selection made before the drag is cleared by it.
+struct ChatTextSelection: ViewModifier {
+    @Environment(WindowStatus.self) private var window: WindowStatus?
+    func body(content: Content) -> some View {
+        if window?.liveResizing == true {
+            content.textSelection(.disabled)
+        } else {
+            content.textSelection(.enabled)
+        }
+    }
+}
+
+extension View {
+    func chatTextSelection() -> some View { modifier(ChatTextSelection()) }
+}
+
 struct EntranceTransition: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let enabled: Bool

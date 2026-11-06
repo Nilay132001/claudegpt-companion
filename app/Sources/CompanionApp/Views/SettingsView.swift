@@ -9,6 +9,10 @@ import SwiftUI
     var accessibilityTrusted = false
     var followNote: String?
     var hotkeyError: String?
+    /// The user is dragging the panel's edge (AppKit live resize). Answer text is not selectable meanwhile
+    /// (ChatTextSelection): every selectable Text keeps a selection overlay view that AppKit updated on each resize
+    /// frame, which made every resize frame late.
+    var liveResizing = false
 }
 
 struct SettingsView: View {
