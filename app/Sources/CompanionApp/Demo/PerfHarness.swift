@@ -19,7 +19,8 @@ import os
 ///              closes a past chat; the first visible turn must match each time (perf-stream: while s1 streams)
 ///   wheel   — synthesizes scroll-wheel events (mouse-like and trackpad-like) over a non-wrapping code block and over
 ///             prose, delivered through the window, and reports how far the chat moved for each
-///   readaloud — the scroll driver, toggling Read Aloud on the latest answer every 30 frames (a silent synthesizer)
+///   readaloud — the scroll driver, toggling Read Aloud on the latest answer every 30 frames (a silent synthesizer),
+///               inside a live scroll (COMPANION_PERF_LIVESCROLL)
 /// COMPANION_PERF_SECONDS (default 10), COMPANION_PERF_STEP (pt per frame, default 20), COMPANION_PERF_SETTLE (s, 2).
 enum PerfFlags {
     static let env = ProcessInfo.processInfo.environment
@@ -35,6 +36,12 @@ enum PerfFlags {
     /// scroll with synthesized mouse-wheel events (discrete, no phases) over the chat, as a mouse does, instead of
     /// moving the clip view.
     static let wheelInput = env["COMPANION_PERF_INPUT"] == "wheel"
+    /// COMPANION_PERF_LIVESCROLL=on|off: the clip-moving scroll driver wraps its run in a live scroll (willStart, one
+    /// didLiveScroll per step, didEnd), as AppKit does for a user's scroll. Without one, SwiftUI's scroll view never
+    /// adopts the driver's offset and writes its stale one (where the run started) back whenever a row outside the
+    /// laid-out range changes: the readaloud run's three +3068 pt "corrections". Default on for readaloud only, so
+    /// the other scenarios stay comparable with earlier runs.
+    static let liveScroll = env["COMPANION_PERF_LIVESCROLL"].map { $0 == "on" } ?? (mode == "readaloud")
 
     static var turns: Int? {
         switch DemoFlags.scene {
@@ -327,6 +334,9 @@ enum PerfFlags {
         var driverDistance: CGFloat = 0
         var lastDocH = sv.documentView?.frame.height ?? 0
         summary["scrollStartY"] = Double(y)
+        let live = PerfFlags.liveScroll && !PerfFlags.wheelInput
+        summary["liveScroll"] = live
+        if live { NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: sv) }
         let end = DispatchTime.now().uptimeNanoseconds + UInt64(PerfFlags.seconds * 1e9)
         onTick = { _ in
             frame += 1
@@ -366,6 +376,7 @@ enum PerfFlags {
             } else {
                 clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
                 sv.reflectScrolledClipView(clip)
+                if live { NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: sv) }
             }
             driverDistance = maxY - y
             steps += 1
@@ -373,6 +384,7 @@ enum PerfFlags {
         }
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil
+        if live { NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: sv) }
         if PerfFlags.wheelInput { summary["wheelInput"] = wheelStats() }
         summary["scroll"] = ["steps": steps, "stepPt": Double(PerfFlags.step), "passes": passes, "yanksByOthers": yanks,
                              "yanksWhileReadingLegacy": legacy, "yanksWhileReading": reading, "pullbacks": pullbacks,
