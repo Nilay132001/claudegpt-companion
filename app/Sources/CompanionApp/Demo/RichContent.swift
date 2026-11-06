@@ -49,6 +49,12 @@ enum RichContent {
          "series":[{"name":"share","points":[{"label":"parser","value":62},{"label":"csv","value":28},{"label":"cli","value":10}]}],
          "source":"Synthetic demo numbers"}
         ```
+
+        ```companion-chart
+        {"version":1,"type":"metric","title":"Extremes","units":"requests per min",
+         "series":[{"name":"run","points":[{"label":"lowest balance on the ledger account","value":-999999999999.99},{"label":"peak","value":42}]}],
+         "source":"Synthetic demo numbers"}
+        ```
         """)
 
     static let turns: [(question: String, answer: String)] = [
