@@ -28,7 +28,6 @@ struct Turn: Identifiable {
 /// The chat: one column of turns on the window background, newest at the bottom.
 struct ChatView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let messages: [ChatMessage]
     let readOnly: Bool
 
@@ -46,11 +45,12 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 let turns = Turn.pair(messages)
-                VStack(alignment: .leading, spacing: Design.turnGap) {
+                LazyVStack(alignment: .leading, spacing: Design.turnGap) {
                     ForEach(turns) { turn in
-                        TurnView(turn: turn, readOnly: readOnly, isLatest: turn.id == turns.last?.id)
+                        let latest = turn.id == turns.last?.id
+                        TurnView(turn: turn, readOnly: readOnly, isLatest: latest)
                             .id(turn.id)
-                            .modifier(EntranceTransition())
+                            .modifier(EntranceTransition(enabled: latest))
                     }
                 }
                 .padding(.horizontal, Design.Space.l)
@@ -62,7 +62,7 @@ struct ChatView: View {
             // Text scrolling under the composer fades out instead of showing around the field.
             .scrollEdgeEffectStyle(.soft, for: .bottom)
             .defaultScrollAnchor(Self.initialAnchor)
-            .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: messages.count)
+            // No .animation(value: messages.count) here: it animated the whole scroll view (spec §5.8).
             .onChange(of: messages.last?.text) {
                 if messages.last?.isRunning == true { proxy.scrollTo("bottom", anchor: .bottom) }
             }
@@ -76,6 +76,8 @@ struct TurnView: View {
     let turn: Turn
     let readOnly: Bool
     var isLatest = false
+    /// One hover tracker per row: the answer's actions row shows while the pointer is anywhere on the turn.
+    @State private var hovering = false
 
     var body: some View {
         #if DEBUG
@@ -89,7 +91,9 @@ struct TurnView: View {
                     ContextSentView(record: record)
                 }
             }
-            if let a = turn.answer { AnswerView(message: a, readOnly: readOnly, isLatest: isLatest) }
+            if let a = turn.answer { AnswerView(message: a, readOnly: readOnly, isLatest: isLatest, rowHovered: hovering) }
         }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }

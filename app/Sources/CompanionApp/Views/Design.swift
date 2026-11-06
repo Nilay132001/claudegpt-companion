@@ -59,11 +59,18 @@ enum Design {
     }
 }
 
-/// New messages fade in and rise 6 pt (opacity only under Reduce Motion).
+/// New messages fade in and rise 6 pt (opacity only under Reduce Motion). Disabled rows (every turn but the
+/// newest) get no transition, so a lazy row scrolled into view never animates in.
 struct EntranceTransition: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let enabled: Bool
+    init(enabled: Bool = true) { self.enabled = enabled }
     func body(content: Content) -> some View {
-        content.transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 6)))
+        if enabled {
+            content.transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 6)))
+        } else {
+            content.transition(.identity)
+        }
     }
 }
 

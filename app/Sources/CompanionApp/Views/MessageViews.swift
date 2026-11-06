@@ -36,7 +36,8 @@ struct AnswerView: View {
     let message: ChatMessage
     let readOnly: Bool
     var isLatest = false
-    @State private var hovering = false
+    /// Set by the TurnView that owns the hover tracking.
+    var rowHovered = false
 
     var body: some View {
         #if DEBUG
@@ -55,8 +56,6 @@ struct AnswerView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
         // No contextMenu here: right-click on selected text keeps the system menu (Copy, Look Up, Share).
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
@@ -137,8 +136,8 @@ struct AnswerView: View {
         .foregroundStyle(.secondary)
         .frame(height: 22)
         // Shown for the latest answer, on hover for older ones; opacity keeps them for keyboard and VoiceOver.
-        .opacity(isLatest || hovering || speaking != nil ? 1 : 0)
-        .animation(Design.Motion.quick, value: hovering)
+        .opacity(isLatest || rowHovered || speaking != nil ? 1 : 0)
+        .animation(Design.Motion.quick, value: rowHovered)
     }
 
     private func actions(time: Bool, badgeText: Bool) -> some View {

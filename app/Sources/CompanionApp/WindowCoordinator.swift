@@ -23,7 +23,11 @@ import SwiftUI
     }
 
     func install(rootView: some View, onWidthChange: @escaping @MainActor (CGFloat) -> Void) {
-        let p = SidePanel(content: NSHostingView(rootView: rootView))
+        let hosting = NSHostingView(rootView: rootView)
+        // The panel's min/max size comes from SidePanel.contentMinSize/contentMaxSize. With the default options the
+        // hosting view re-measured the whole chat on every update to derive them (21% of streaming main-thread time).
+        hosting.sizingOptions = []
+        let p = SidePanel(content: hosting)
         panel = p
         resizeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: p, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
