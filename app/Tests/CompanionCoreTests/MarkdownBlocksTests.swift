@@ -283,3 +283,24 @@ func describe(_ b: AnswerBlock) -> String {
         #expect(m.preview()?.hiddenLines == 21)
     }
 }
+
+@Suite struct BoundedCostTests {
+    @Test func evictsByTotalCostAndSkipsOversizedEntries() {
+        var c = BoundedCache<String, Int>(capacity: 10, maxCost: 100)
+        c.insert(1, for: "a", cost: 60)
+        c.insert(2, for: "b", cost: 60)         // total 120 > 100: a goes
+        #expect(c.value(for: "a") == nil && c.value(for: "b") == 2)
+        #expect(c.totalCost == 60)
+        c.insert(3, for: "big", cost: 101)      // too big to keep
+        #expect(c.value(for: "big") == nil && c.value(for: "b") == 2)
+        c.insert(4, for: "b", cost: 10)         // replacing updates the cost
+        #expect(c.totalCost == 10)
+    }
+
+    @Test func veryLongFlagFollowsTextChanges() {
+        var m = CodeModel(language: nil, text: "short", isOpen: true, lineCount: 1, reference: nil)
+        #expect(!m.hasVeryLongLine)
+        m.text = String(repeating: "a", count: CodeModel.veryLongLine + 1)
+        #expect(m.hasVeryLongLine)
+    }
+}

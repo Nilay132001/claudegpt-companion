@@ -45,34 +45,49 @@ public struct HighlightKey: Hashable, Sendable {
     public init(text: String, isOpen: Bool) { self.text = text; self.isOpen = isOpen }
 }
 
-/// A small count-capped LRU for computed values (highlighted code).
+/// A small LRU for computed values (highlighted code), capped by entry count and by total cost.
 public struct BoundedCache<Key: Hashable, Value> {
-    private var values: [Key: Value] = [:]
+    private var values: [Key: (value: Value, cost: Int)] = [:]
     private var order: [Key] = []
+    public private(set) var totalCost = 0
     public let capacity: Int
-    public init(capacity: Int) { self.capacity = max(1, capacity) }
+    public let maxCost: Int
+    public init(capacity: Int, maxCost: Int = .max) { self.capacity = max(1, capacity); self.maxCost = maxCost }
     public var count: Int { values.count }
 
     public mutating func value(for key: Key) -> Value? {
         guard let v = values[key] else { return nil }
         if let i = order.lastIndex(of: key) { order.remove(at: i); order.append(key) }
-        return v
+        return v.value
     }
 
-    public mutating func insert(_ value: Value, for key: Key) {
-        if values.updateValue(value, forKey: key) != nil, let i = order.lastIndex(of: key) { order.remove(at: i) }
+    /// A single entry above `maxCost` is not stored.
+    public mutating func insert(_ value: Value, for key: Key, cost: Int = 1) {
+        if let old = values.removeValue(forKey: key) {
+            totalCost -= old.cost
+            if let i = order.lastIndex(of: key) { order.remove(at: i) }
+        }
+        guard cost <= maxCost else { return }
+        values[key] = (value, cost)
+        totalCost += cost
         order.append(key)
-        while order.count > capacity { values[order.removeFirst()] = nil }
+        while order.count > capacity || totalCost > maxCost {
+            let k = order.removeFirst()
+            if let gone = values.removeValue(forKey: k) { totalCost -= gone.cost }
+        }
     }
 }
 
 public struct CodeModel: Equatable, Sendable {
     public var language: String?
-    public var text: String
+    public var text: String { didSet { hasVeryLongLine = Self.scanVeryLong(text) } }
     public var isOpen: Bool
     public var lineCount: Int
     public var reference: FileReference?
+    /// Computed once per text, not per render.
+    public private(set) var hasVeryLongLine: Bool
     public init(language: String?, text: String, isOpen: Bool, lineCount: Int, reference: FileReference?) {
+        self.hasVeryLongLine = Self.scanVeryLong(text)
         self.language = language; self.text = text; self.isOpen = isOpen; self.lineCount = lineCount; self.reference = reference
     }
 
@@ -95,10 +110,10 @@ public struct CodeModel: Equatable, Sendable {
     /// renders blank or clipped, so such a block wraps whatever the Wrap setting says.
     public static let veryLongLine = 2000
 
-    public var hasVeryLongLine: Bool {
+    private static func scanVeryLong(_ text: String) -> Bool {
         var run = 0
         for u in text.utf16 {
-            if u == 10 { run = 0 } else { run += 1; if run > Self.veryLongLine { return true } }
+            if u == 10 { run = 0 } else { run += 1; if run > veryLongLine { return true } }
         }
         return false
     }
