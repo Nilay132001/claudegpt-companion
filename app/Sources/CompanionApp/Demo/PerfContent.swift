@@ -126,6 +126,35 @@ import Foundation
         return "```\(lang)\n\(body)\n```"
     }
 
+    /// A block of more than 40 lines (the "Show all" preview case).
+    static func longCode(_ r: inout Rng) -> String {
+        let (lang, body) = r.pick([("swift", swiftCode), ("ts", tsCode)])
+        return "```\(lang)\n" + (0..<3).map { _ in body }.joined(separator: "\n\n") + "\n```"
+    }
+
+    /// A block with lines of 180+ characters (the sideways-scroll case).
+    static func wideCode(_ r: inout Rng) -> String {
+        let line = "const result = await client.request({ method: \"POST\", path: \"/v2/ledger/reconcile\", headers: { \"x-request-id\": requestId, \"content-type\": \"application/json\" }, body: JSON.stringify({ entries, window: 72 }) });"
+        return "```ts \(r.pick(files)):\(r.int(3...300))\nasync function run() {\n  \(line)\n  return result.status;\n}\n  \(line)\n```"
+    }
+
+    /// Code-heavy answer (scene perf-code): every answer has one to three code blocks, a quarter over 40 lines,
+    /// a quarter with long lines.
+    static func codeAnswer(_ r: inout Rng) -> String {
+        var parts: [String] = [paragraph(&r, sentences: 2...3)]
+        for _ in 0..<r.int(1...3) {
+            parts.append("## " + sentence(&r).dropLast().split(separator: " ").prefix(5).joined(separator: " "))
+            parts.append(paragraph(&r, sentences: 2...4))
+            switch r.next() % 4 {
+            case 0: parts.append(longCode(&r))
+            case 1: parts.append(wideCode(&r))
+            default: parts.append(code(&r))
+            }
+        }
+        parts.append("Next: " + sentence(&r, ref: true))
+        return parts.joined(separator: "\n\n")
+    }
+
     /// One answer: ~2–7 KB of Markdown, the kinds of blocks GPT uses here.
     static func answer(_ r: inout Rng, size: Int = 1) -> String {
         var parts: [String] = [paragraph(&r, sentences: 2...4)]
@@ -161,7 +190,7 @@ import Foundation
             let at = now - Double(count - i) * 120_000
             return TurnRecord(turnId: "\(sessionId)-t\(i)", sessionId: sessionId, threadId: "th-\(sessionId)", sessionTitle: title,
                               mode: .ask, question: question(&r), contextBlock: block, items: items, omitted: 0,
-                              answer: answer(&r), sentAt: at, completedAt: at + 60_000)
+                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : answer(&r), sentAt: at, completedAt: at + 60_000)
         }
     }
 

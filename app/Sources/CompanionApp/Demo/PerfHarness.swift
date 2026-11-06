@@ -17,6 +17,8 @@ import os
 ///   idle    — does nothing (memory baseline)
 ///   position — scrolls to the middle, switches to the other session and back (slowly, then rapidly), opens and
 ///              closes a past chat; the first visible turn must match each time (perf-stream: while s1 streams)
+///   wheel   — synthesizes scroll-wheel events (mouse-like and trackpad-like) over a non-wrapping code block and over
+///             prose, delivered through the window, and reports how far the chat moved for each
 ///   readaloud — the scroll driver, toggling Read Aloud on the latest answer every 30 frames (a silent synthesizer)
 /// COMPANION_PERF_SECONDS (default 10), COMPANION_PERF_STEP (pt per frame, default 20), COMPANION_PERF_SETTLE (s, 2).
 enum PerfFlags {
@@ -31,7 +33,7 @@ enum PerfFlags {
         switch DemoFlags.scene {
         case "perf-short": 10
         case "perf-medium": 50
-        case "perf-long", "perf-stream": 200
+        case "perf-long", "perf-stream", "perf-code": 200
         default: nil
         }
     }
@@ -77,6 +79,13 @@ enum PerfFlags {
         nanos[key, default: 0] += DispatchTime.now().uptimeNanoseconds - t0
         signposter.endInterval(name, state)
         return result
+    }
+
+    /// Adds work timed elsewhere (a background task), counted once.
+    static func record(_ name: String, nanos n: UInt64) {
+        guard enabled else { return }
+        counts[name, default: 0] += 1
+        nanos[name, default: 0] += n
     }
 
     static func snapshot() -> (counts: [String: Int], nanos: [String: UInt64]) { (counts, nanos) }
@@ -156,6 +165,7 @@ enum PerfFlags {
             case "switch": await self.switchSessions(model)
             case "resize": await self.resize()
             case "position": await self.position(model)
+            case "wheel": await self.wheel()
             default: try? await Task.sleep(for: .seconds(PerfFlags.seconds)) // stream, idle
             }
             self.measuring = false
@@ -416,6 +426,154 @@ enum PerfFlags {
                                "samePast": samePast, "turnKnown": turn0 != nil, "readerScroll": readerScroll,
                                "distanceFromBottomAtEnd": Double(docH - clip.bounds.height - clip.bounds.origin.y),
                                "streaming": model.currentFeed?.isRunning ?? false]
+    }
+
+    /// The view under a window point, as NSWindow.sendEvent finds it: hitTest takes the point in the superview's
+    /// coordinates (the contentView is flipped, so converting into its own space would mirror y).
+    private static func hit(_ win: NSWindow, _ p: NSPoint) -> NSView? {
+        guard let frameView = win.contentView?.superview else { return nil }
+        return frameView.hitTest(frameView.convert(p, from: nil))
+    }
+
+    /// Every horizontally overflowing NSScrollView inside the chat (the non-wrapping code blocks, wide tables).
+    private func overflowScrollers(in chat: NSScrollView) -> [NSScrollView] {
+        var out: [NSScrollView] = []
+        func walk(_ v: NSView) {
+            if let s = v as? NSScrollView, s !== chat, let d = s.documentView, d.frame.width > s.contentView.bounds.width + 1 { out.append(s) }
+            v.subviews.forEach(walk)
+        }
+        if let d = chat.documentView { walk(d) }
+        return out
+    }
+
+    /// One synthesized wheel event at `p` (window coordinates), delivered through the window like the system would.
+    /// `phase`: nil = mouse wheel (no phases, line-like), else the CGScrollPhase of a trackpad gesture.
+    private func sendWheel(_ win: NSWindow, at p: NSPoint, dy: Int32, dx: Int32 = 0, phase: Int64? = nil) -> [String: Any] {
+        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return ["error": "no cgevent"] }
+        let screen = win.convertPoint(toScreen: p)
+        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        cg.location = CGPoint(x: screen.x, y: primaryH - screen.y)
+        cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: phase == nil ? 0 : 1)
+        if let phase { cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase) }
+        cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(win.windowNumber))
+        cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(win.windowNumber))
+        guard let ev = NSEvent(cgEvent: cg) else { return ["error": "no nsevent"] }
+        // NSEvent(cgEvent:) cannot carry a window or a window location, so do what NSWindow.sendEvent does for a
+        // scroll event: hit-test at the pointer, then hand the event to that view (it forwards up its responder chain).
+        guard let hit = Self.hit(win, p) else { return ["error": "no hit view"] }
+        hit.scrollWheel(with: ev)
+        return ["win": ev.windowNumber, "loc": "\(Int(ev.locationInWindow.x)),\(Int(ev.locationInWindow.y))",
+                "dy": Double(ev.scrollingDeltaY), "phase": Int(ev.phase.rawValue)]
+    }
+
+    /// Whether vertical wheel and trackpad scrolling over a non-wrapping code block still scrolls the chat.
+    private func wheel() async {
+        guard let sv = chatScrollView(), let win = panel else { summary["error"] = "no scroll view"; return }
+        let clip = sv.contentView
+        // Find a viewport position where a code scroller is fully visible.
+        var y = max(0, (sv.documentView?.frame.height ?? 0) / 2 - clip.bounds.height / 2)
+        var target: NSScrollView?
+        for _ in 0..<60 {
+            clip.scroll(to: NSPoint(x: 0, y: y)); sv.reflectScrolledClipView(clip)
+            for _ in 0..<4 { await nextFrame() }
+            let vis = clip.documentVisibleRect
+            target = overflowScrollers(in: sv).first { s in
+                let f = s.convert(s.bounds, to: sv.documentView)
+                return f.minY > vis.minY + 40 && f.maxY < vis.maxY - 40 && f.height > 40
+            }
+            if target != nil { break }
+            y += clip.bounds.height * 0.6
+        }
+        guard let code = target, let doc = sv.documentView else { summary["error"] = "no code scroller found"; return }
+        let startY = clip.bounds.origin.y
+        summary["wheelStartY"] = Double(startY)
+        let cf = code.convert(code.bounds, to: nil)
+        // A point inside the code scroller whose hit view really is inside it (selection overlays can sit above).
+        var codePoint = NSPoint(x: cf.midX, y: cf.midY)
+        var insideHits = 0, samples = 0
+        do {
+            var found: NSPoint?
+            for fy in stride(from: 0.2, through: 0.8, by: 0.15) { for fx in stride(from: 0.15, through: 0.85, by: 0.15) {
+                let c = NSPoint(x: cf.minX + cf.width * fx, y: cf.minY + cf.height * fy)
+                samples += 1
+                if let h = Self.hit(win, c), h.isDescendant(of: code) { insideHits += 1; if found == nil { found = c } }
+            } }
+            if let found { codePoint = found }
+        }
+        summary["wheelCodeSamples"] = "\(insideHits)/\(samples) inside the code scroller"
+        // A prose point: in the viewport, at the code's x, not inside any overflowing scroller.
+        let scrollers = overflowScrollers(in: sv).map { $0.convert($0.bounds, to: nil) }
+        let vis = clip.convert(clip.bounds, to: nil)
+        // A prose point: inside the chat's viewport (a hit view that is a descendant of the chat's document), at the
+        // code's x, not inside any overflowing scroller; searched outward from the middle of the viewport.
+        var prosePoint: NSPoint?
+        do {
+            for k in stride(from: 0, to: Int(vis.height) / 2 - 30, by: 8) {
+                for sign in [CGFloat(1), -1] {
+                    let c = NSPoint(x: cf.midX, y: vis.midY + sign * CGFloat(k))
+                    if scrollers.contains(where: { $0.insetBy(dx: -4, dy: -4).contains(c) }) { continue }
+                    if let h = Self.hit(win, c), h.isDescendant(of: doc), prosePoint == nil { prosePoint = c }
+                }
+                if prosePoint != nil { break }
+            }
+        }
+        guard let prosePoint else { summary["error"] = "no prose point"; return }
+        func hitName(_ p: NSPoint) -> String {
+            var names: [String] = []
+            var v = Self.hit(win, p)
+            while let x = v, names.count < 4 { names.append(String(describing: type(of: x)).prefix(40).description); v = x.superview }
+            return names.joined(separator: " < ")
+        }
+        summary["wheelCodeHit"] = hitName(codePoint)
+        if let h = Self.hit(win, codePoint) {
+            summary["wheelHitInsideCodeScroller"] = h.isDescendant(of: code)
+            summary["wheelCodeFrame"] = "\(code.convert(code.bounds, to: nil))"
+            summary["wheelHitFrame"] = "\(h.convert(h.bounds, to: nil))"
+            var chain: [String] = []
+            var v: NSView? = h
+            while let x = v, chain.count < 12 { chain.append(String(describing: type(of: x)).prefix(30).description + (x === code ? "*" : "")); v = x.superview }
+            summary["wheelHitChain"] = chain
+        }
+        summary["wheelProseHit"] = hitName(prosePoint)
+        summary["wheelCodeDoc"] = "\(Int(code.documentView?.frame.width ?? 0)) in \(Int(code.contentView.bounds.width))"
+        var results: [String: Any] = [:]
+        func reset() async {
+            clip.scroll(to: NSPoint(x: 0, y: startY)); sv.reflectScrolledClipView(clip)
+            code.contentView.scroll(to: .zero); code.reflectScrolledClipView(code.contentView)
+            for _ in 0..<5 { await nextFrame() }
+        }
+        func moved() -> Double { Double(clip.bounds.origin.y - startY) }
+        func runGesture(_ name: String, at p: NSPoint, dy: Int32, dx: Int32, trackpad: Bool, count: Int) async {
+            await reset()
+            var info: [String: Any] = [:]
+            if trackpad {
+                info["first"] = sendWheel(win, at: p, dy: dy, dx: dx, phase: 1)
+                await nextFrame()
+                for _ in 0..<count { _ = sendWheel(win, at: p, dy: dy, dx: dx, phase: 2); await nextFrame() }
+                _ = sendWheel(win, at: p, dy: 0, dx: 0, phase: 4)
+            } else {
+                for i in 0..<count {
+                    let r = sendWheel(win, at: p, dy: dy, dx: dx)
+                    if i == 0 { info["first"] = r }
+                    await nextFrame()
+                }
+            }
+            for _ in 0..<4 { await nextFrame() }
+            info["chatMovedPt"] = moved()
+            info["codeScrollX"] = Double(code.contentView.bounds.origin.x)
+            results[name] = info
+        }
+        // Negative wheel1 scrolls the content up (the chat offset grows).
+        await runGesture("mouse-prose", at: prosePoint, dy: -40, dx: 0, trackpad: false, count: 10)
+        await runGesture("mouse-code", at: codePoint, dy: -40, dx: 0, trackpad: false, count: 10)
+        await runGesture("trackpad-prose", at: prosePoint, dy: -20, dx: 0, trackpad: true, count: 20)
+        await runGesture("trackpad-code", at: codePoint, dy: -20, dx: 0, trackpad: true, count: 20)
+        await runGesture("trackpad-prose-diag", at: prosePoint, dy: -20, dx: 3, trackpad: true, count: 20)
+        await runGesture("trackpad-code-diag", at: codePoint, dy: -20, dx: 3, trackpad: true, count: 20)
+        await runGesture("mouse-code-horizontal", at: codePoint, dy: 0, dx: -40, trackpad: false, count: 10)
+        await runGesture("trackpad-code-horizontal", at: codePoint, dy: 0, dx: -20, trackpad: true, count: 20)
+        summary["wheel"] = results
+        _ = doc
     }
 
     private func resize() async {

@@ -1,4 +1,5 @@
 import CompanionCore
+import Foundation
 import SwiftUI
 
 /// A code card: language (or title), the file chip, Wrap, Copy, and the code. By default (R1) a long line scrolls
@@ -75,7 +76,16 @@ struct CodeBlock: View {
                 let key = HighlightCacheKey(language: language, text: text)
                 if Self.highlightCache.value(for: key) == nil {
                     // Off the main actor; the task is cancelled when the key changes, so a stale result is dropped.
-                    let styled = await Task.detached(priority: .userInitiated) { Self.highlight(text, language: language) }.value
+                    let (styled, nanos) = await Task.detached(priority: .userInitiated) { () -> (AttributedString, UInt64) in
+                        let t0 = DispatchTime.now().uptimeNanoseconds
+                        let out = Self.highlight(text, language: language)
+                        return (out, DispatchTime.now().uptimeNanoseconds - t0)
+                    }.value
+                    #if DEBUG
+                    PerfProbe.record("parse.highlight", nanos: nanos)
+                    #else
+                    _ = nanos
+                    #endif
                     if Task.isCancelled { return }
                     Self.highlightCache.insert(styled, for: key, cost: text.utf16.count)
                 }
@@ -211,14 +221,6 @@ struct CodeBlock: View {
     }
 
     /// The code with token colours, built piece by piece (tokens are ordered and never overlap).
-    static func highlighted(_ code: String, language: String?) -> AttributedString {
-        #if DEBUG
-        PerfProbe.measure("parse.highlight") { highlight(code, language: language) }
-        #else
-        highlight(code, language: language)
-        #endif
-    }
-
     nonisolated private static func highlight(_ code: String, language: String?) -> AttributedString {
         var out = AttributedString()
         var at = code.startIndex
