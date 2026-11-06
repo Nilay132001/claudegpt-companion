@@ -291,8 +291,10 @@ private struct CopyPill: ViewModifier {
             .overlay(alignment: .topTrailing) {
                 // The pill sticks out above the table, outside the table's hover region, so it has its own: one
                 // hover on a container around a catcher and the pill, so moving between them never drops it.
-                ZStack {
-                    Color.clear.frame(width: 28, height: 18).contentShape(Rectangle())
+                // The catcher is only the 9 pt above the table's top edge, so it never covers a cell (the pill's lower
+                // half is over the header, but takes hits only while shown).
+                ZStack(alignment: .top) {
+                    Color.clear.frame(width: 28, height: 9).contentShape(Rectangle())
                     pill(show: show)
                 }
                 .onHover { pillHover = $0 }
