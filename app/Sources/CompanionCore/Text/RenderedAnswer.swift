@@ -155,11 +155,12 @@ public enum TableLayout {
 
     public static func decide(idealWidths: [Double], available: Double, previous: TableLayoutState?) -> TableLayoutState {
         // Tier 0: under 300, 1: 300..<380, 2: 380 and up; leaving the previous tier needs `hysteresis` more.
+        // Step one tier at a time, so every edge crossed needs its own margin (a jump from 380+ to 295 passes 380).
         var tier = thresholds.filter { available >= $0 }.count
-        if let p = previous, p.tier != tier {
-            let edge = thresholds[min(p.tier, tier)]
-            let inside = p.tier < tier ? available < edge + hysteresis : available >= edge - hysteresis
-            if inside { tier = p.tier }
+        if let p = previous {
+            tier = p.tier
+            while tier < thresholds.count, available >= thresholds[tier] + hysteresis { tier += 1 }
+            while tier > 0, available < thresholds[tier - 1] - hysteresis { tier -= 1 }
         }
         let slack = previous?.choice == .grid ? hysteresis : (previous == nil ? 0 : -hysteresis)
         let fits = idealWidths.map { min($0, cellCap) }.reduce(0, +) <= available + slack
@@ -250,13 +251,33 @@ extension TableModel {
         public var detailColumns: [Int]
     }
 
-    public func stackedRow(_ index: Int) -> StackedRow {
-        let p = plainRows()[index + 1]
-        let first = p.first ?? ""
-        let titled = !first.trimmingCharacters(in: .whitespaces).isEmpty && !Self.isNumeric(first)
-        let detail = (titled ? 1 : 0)..<columnCount
-        return StackedRow(titleColumn: titled ? 0 : nil, number: index + 1,
-                          detailColumns: detail.filter { !p[$0].trimmingCharacters(in: .whitespaces).isEmpty })
+    public func stackedRow(_ index: Int) -> StackedRow { stackedRows[index] }
+
+    /// The plan for every body row; the plain text is built once.
+    public var stackedRows: [StackedRow] {
+        plainRows().dropFirst().enumerated().map { index, p in
+            let first = p.first ?? ""
+            let titled = !first.trimmingCharacters(in: .whitespaces).isEmpty && !Self.isNumeric(first)
+            let detail = (titled ? 1 : 0)..<columnCount
+            return StackedRow(titleColumn: titled ? 0 : nil, number: index + 1,
+                              detailColumns: detail.filter { !p[$0].trimmingCharacters(in: .whitespaces).isEmpty })
+        }
+    }
+}
+
+/// The estimated column widths of one table, recomputed when the table's content or the type-size scale changes
+/// (a streaming answer keeps the same view while its table grows).
+public final class TableWidthEstimate {
+    private var table: TableModel?
+    private var scale: Double = -1
+    private var widths: [Double] = []
+    public init() {}
+    public func widths(for t: TableModel, scale s: Double) -> [Double] {
+        if s != scale || table != t {
+            scale = s; table = t
+            widths = t.estimatedColumnWidths(charWidth: 7.2 * s)
+        }
+        return widths
     }
 }
 

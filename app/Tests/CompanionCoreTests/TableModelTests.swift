@@ -109,4 +109,24 @@ import Testing
         #expect(m.stackedRow(2) == .init(titleColumn: nil, number: 3, detailColumns: [0, 1, 2]))
         #expect(m.stackedRow(3) == .init(titleColumn: nil, number: 4, detailColumns: [0]))
     }
+
+    @Test func twoTierJumpsNeedEveryMargin() {
+        let w = [40.0, 40, 40]
+        let wide = TableLayout.decide(idealWidths: w, available: 500, previous: nil)
+        #expect(wide.tier == 2)
+        #expect(TableLayout.decide(idealWidths: w, available: 295, previous: wide).tier == 1)   // 380 crossed, 300 not by 8
+        #expect(TableLayout.decide(idealWidths: w, available: 291, previous: wide).tier == 0)
+        let narrow = TableLayout.decide(idealWidths: w, available: 100, previous: nil)
+        #expect(TableLayout.decide(idealWidths: w, available: 385, previous: narrow).tier == 1)
+        #expect(TableLayout.decide(idealWidths: w, available: 390, previous: narrow).tier == 2)
+    }
+
+    @Test func widthEstimateFollowsAGrowingTable() {
+        let est = TableWidthEstimate()
+        let a = table("| a |\n|---|\n| x |")
+        let b = table("| a |\n|---|\n| a much longer cell |")
+        let wa = est.widths(for: a, scale: 1)
+        #expect(est.widths(for: b, scale: 1)[0] > wa[0])
+        #expect(est.widths(for: b, scale: 2)[0] > est.widths(for: b, scale: 1)[0])
+    }
 }
