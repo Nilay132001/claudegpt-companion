@@ -203,4 +203,27 @@ func describe(_ b: AnswerBlock) -> String {
         #expect(c.language == nil)
         #expect(c.reference == FileReference(path: "/r/src/a.ts", line: 12))
     }
+
+    @Test func absurdNestingIsBoundedBeforeParsing() {
+        var list = ""
+        for i in 0..<1000 { list += String(repeating: "  ", count: i) + "- item\n" }
+        let inputs = [String(repeating: "> ", count: 5000) + "deep text", list + "- bottom",
+                      String(repeating: "- ", count: 5000) + "inline deep"]
+        for md in inputs {
+            let start = ContinuousClock.now
+            let blocks = ReplyMarkdown.blocks(md, root: nil)
+            let took = ContinuousClock.now - start
+            #expect(took < .milliseconds(400), "\(took) for \(md.prefix(6))")
+            let text = ReplyMarkdown.plainText(blocks)
+            #expect(text.contains("deep text") || text.contains("bottom") || text.contains("inline deep"))
+        }
+    }
+
+    @Test func normalNestingIsUnchangedByTheGuard() {
+        let md = "> a\n> > b\n\n1. x\n   - y\n     - z\n10) w"
+        #expect(ReplyMarkdown.bound("   - y") == "   - y")
+        #expect(ReplyMarkdown.bound("> > b") == "> > b")
+        #expect(ReplyMarkdown.bound("10) w") == "10) w")
+        #expect(d(md) == ["q[p:a q[p:b]]", "ol[1. p:x ul[◦ p:y ul[▪ p:z]]]", "ol[10. p:w]"], "\(d(md))")
+    }
 }

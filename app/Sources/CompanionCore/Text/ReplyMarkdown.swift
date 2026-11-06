@@ -124,10 +124,11 @@ extension ReplyMarkdown {
         // "\r\n" is one Character in Swift, so it never matches "\n": normalise CRLF and lone CR first.
         let markdown = markdown.utf8.contains(13)
             ? markdown.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n") : markdown
-        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = line.drop { $0 == " " || $0 == "\t" }
+        for rawLine in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = fence == nil && mathClose == nil ? Substring(bound(String(rawLine))) : rawLine   // code is verbatim
+            let trimmed = skipping(line, quotes: false)
             // A fence inside a quote starts after its `>` markers.
-            let body = trimmed.drop { $0 == ">" || $0 == " " || $0 == "\t" }
+            let body = skipping(line, quotes: true)
             if let f = fence {
                 lines.append(line)
                 if body.hasPrefix(f), body.drop(while: { $0 == f.first }).allSatisfy(\.isWhitespace) { fence = nil }
@@ -139,7 +140,7 @@ extension ReplyMarkdown {
                 continue
             }
             if trimmed.isEmpty { sawBlank = true; lines.append(line); continue }
-            let indented = trimmed.count != line.count
+            let indented = trimmed.startIndex != line.startIndex
             let listItem = !indented && line.firstMatch(of: /^([-*+]|\d{1,9}[.)])(\s|$)/) != nil
             if sawBlank && !indented && !(inList && listItem) { flush() }
             sawBlank = false
@@ -204,6 +205,60 @@ extension ReplyMarkdown {
         return out
     }
 
+    /// `s` without its leading spaces and tabs (and `>` markers); walks UTF-8 bytes, which is far cheaper than Characters.
+    static func skipping(_ s: Substring, quotes: Bool) -> Substring {
+        var i = s.utf8.startIndex
+        while i < s.utf8.endIndex {
+            let b = s.utf8[i]
+            guard b == 32 || b == 9 || (quotes && b == 62) else { break }
+            i = s.utf8.index(after: i)
+        }
+        return s[i...]
+    }
+
+    /// Linear guard before Foundation parses a line: at most `BlockBuilder.maxNesting` leading `>` markers and
+    /// list markers, and no more than 64 characters of indentation in one run, so the structure Foundation sees
+    /// is bounded (it is superlinear on deep nesting). Content text is preserved.
+    static func bound(_ line: String) -> String {
+        let u = Array(line.utf8)
+        guard let f = u.first, f == 32 || f == 9 || f == 62 || f == 45 || f == 42 || f == 43 || (48...57).contains(f) else { return line }
+        func isWS(_ b: UInt8) -> Bool { b == 32 || b == 9 }
+        func isDigit(_ b: UInt8) -> Bool { (48...57).contains(b) }
+        var out: [UInt8] = []
+        out.reserveCapacity(min(u.count, 256))
+        var i = 0
+        var quotes = 0, marks = 0
+        while i < u.count {
+            var j = i
+            while j < u.count, isWS(u[j]) { j += 1 }
+            let ws = u[i..<min(j, i + 64)]
+            guard j < u.count else { out += ws; break }
+            let c = u[j]
+            if c == 62 {
+                quotes += 1
+                if quotes <= BlockBuilder.maxNesting { out += ws; out.append(c) }
+                i = j + 1
+                continue
+            }
+            var end = j
+            if c == 45 || c == 42 || c == 43 { end = j + 1 }
+            else if isDigit(c) {
+                while end < u.count, isDigit(u[end]), end - j < 9 { end += 1 }
+                if end < u.count, u[end] == 46 || u[end] == 41 { end += 1 } else { end = j }
+            }
+            if end > j, end == u.count || isWS(u[end]) {
+                marks += 1
+                if marks <= BlockBuilder.maxNesting { out += ws; out += u[j..<end] }
+                i = end
+                continue
+            }
+            out += ws
+            out += u[j...]
+            break
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
     /// Math blocks become a `math` fence; fences are copied as they are; inline `$x$` becomes a code span on lines
     /// without a backtick ("$5 and $10" is not math).
     static func preprocess(_ text: String) -> String {
@@ -231,6 +286,7 @@ extension ReplyMarkdown {
                 out += [indent + "```math", indent + String(m.1).trimmingCharacters(in: .whitespaces), indent + "```"]
                 continue
             }
+            let raw = bound(raw)
             out.append(raw.contains("$") && !raw.contains("`")
                 ? raw.replacingOccurrences(of: #"(?<![\\$\w])\$(?=\S)([^$\n]+?)(?<=\S)\$(?![\w$])"#, with: "`$1`",
                                            options: .regularExpression)
