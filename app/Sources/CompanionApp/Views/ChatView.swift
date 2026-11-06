@@ -50,7 +50,7 @@ private struct ChatScroll: View {
     private static var initialAnchor: UnitPoint {
         #if DEBUG
         if DemoFlags.is_("context") || DemoFlags.is_("raw") { return .top }
-        if DemoFlags.is_("rich-tables") { return .top }
+        if DemoFlags.is_("rich-tables") || DemoFlags.is_("rich-charts") { return .top }
         if DemoFlags.is_("rich") { return DemoFlags.anchor == "bottom" ? .bottom : .top }
         #endif
         return .bottom

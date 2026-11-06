@@ -258,6 +258,7 @@ enum DemoFlags {
     var storedTurns: [TurnRecord] {
         if scene == "rich" { return cleared ? [] : richTurns }
         if scene == "rich-tables" { return cleared ? [] : [richTurn(RichContent.tableTurn, i: 0, of: 1)] }
+        if scene == "rich-charts" { return cleared ? [] : [richTurn(RichContent.chartTurn, i: 0, of: 1)] }
         guard !cleared, ["chat", "context", "raw", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
         let now = Date().timeIntervalSince1970 * 1000
         let all = Self.items[...]

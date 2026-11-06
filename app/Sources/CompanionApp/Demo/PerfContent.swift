@@ -179,6 +179,31 @@ import Foundation
         return parts.joined(separator: "\n\n")
     }
 
+    /// A valid `companion-chart` block (bar, line, pie or metric) with synthetic values (scene perf-chart).
+    static func chart(_ r: inout Rng) -> String {
+        let kind = r.pick(["bar", "line", "pie", "metric"])
+        let labels = ["parser", "csv", "cli", "worker", "api", "ui", "docs", "infra"]
+        let n = kind == "metric" ? r.int(2...4) : r.int(3...8)
+        let seriesCount = kind == "bar" || kind == "line" ? r.int(1...2) : 1
+        let series = (0..<seriesCount).map { s in
+            let points = labels.prefix(n).map { #"{"label":"\#($0)","value":\#(Double(r.int(1...900)) / 10)}"# }
+            return #"{"name":"run \#(s + 1)","points":[\#(points.joined(separator: ","))]}"#
+        }
+        return "```companion-chart\n" + #"{"version":1,"type":"\#(kind)","title":"Runtime by package","units":"s","series":[\#(series.joined(separator: ","))],"source":"Synthetic perf data"}"# + "\n```"
+    }
+
+    /// Chart-heavy answer (scene perf-chart): every answer has one or two charts, one in eight an invalid one.
+    static func chartAnswer(_ r: inout Rng) -> String {
+        var parts: [String] = [paragraph(&r, sentences: 2...3)]
+        for _ in 0..<r.int(1...2) {
+            parts.append("## " + sentence(&r).dropLast().split(separator: " ").prefix(5).joined(separator: " "))
+            parts.append(r.next() % 8 == 0 ? "```companion-chart\n{\"version\":2}\n```" : chart(&r))
+            parts.append(paragraph(&r, sentences: 1...3))
+        }
+        parts.append("Next: " + sentence(&r, ref: true))
+        return parts.joined(separator: "\n\n")
+    }
+
     /// One answer: ~2–7 KB of Markdown, the kinds of blocks GPT uses here.
     static func answer(_ r: inout Rng, size: Int = 1) -> String {
         var parts: [String] = [paragraph(&r, sentences: 2...4)]
@@ -214,7 +239,8 @@ import Foundation
             let at = now - Double(count - i) * 120_000
             return TurnRecord(turnId: "\(sessionId)-t\(i)", sessionId: sessionId, threadId: "th-\(sessionId)", sessionTitle: title,
                               mode: .ask, question: question(&r), contextBlock: block, items: items, omitted: 0,
-                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : DemoFlags.is_("perf-table") ? tableAnswer(&r) : answer(&r), sentAt: at, completedAt: at + 60_000)
+                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : DemoFlags.is_("perf-table") ? tableAnswer(&r)
+                                  : DemoFlags.is_("perf-chart") ? chartAnswer(&r) : answer(&r), sentAt: at, completedAt: at + 60_000)
         }
     }
 

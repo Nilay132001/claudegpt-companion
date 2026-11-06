@@ -40,7 +40,7 @@ enum PerfFlags {
         switch DemoFlags.scene {
         case "perf-short": 10
         case "perf-medium": 50
-        case "perf-long", "perf-stream", "perf-code", "perf-table": 200
+        case "perf-long", "perf-stream", "perf-code", "perf-table", "perf-chart": 200
         default: nil
         }
     }

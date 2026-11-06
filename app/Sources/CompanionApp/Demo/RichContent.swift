@@ -27,6 +27,30 @@ enum RichContent {
         | src/csv/write.ts | 6 | medium | relies on empty-list behaviour of tokenize for blank rows | add a test |
         """)
 
+    /// Scene `rich-charts`: a bar chart with two series, a line chart and a pie chart.
+    static let chartTurn: (question: String, answer: String) = ("Chart the test runs", """
+        ## Runtime by package
+
+        ```companion-chart
+        {"version":1,"type":"bar","title":"Runtime, main vs branch","units":"s","x":{"label":"Package"},"y":{"label":"Seconds"},
+         "series":[{"name":"main","points":[{"label":"parser","value":4.2},{"label":"csv","value":1.9},{"label":"cli","value":0.7}]},
+                   {"name":"branch","points":[{"label":"parser","value":3.9},{"label":"csv","value":2.0},{"label":"cli","value":0.7}]}],
+         "source":"Synthetic demo numbers"}
+        ```
+
+        ```companion-chart
+        {"version":1,"type":"line","title":"Suite time over the last runs","units":"s",
+         "series":[{"name":"suite","points":[{"label":"Mon","value":7.9},{"label":"Tue","value":7.4},{"label":"Wed","value":6.8},{"label":"Thu","value":6.9},{"label":"Fri","value":6.1}]}],
+         "source":"Synthetic demo numbers"}
+        ```
+
+        ```companion-chart
+        {"version":1,"type":"pie","title":"Where the time goes","units":"%",
+         "series":[{"name":"share","points":[{"label":"parser","value":62},{"label":"csv","value":28},{"label":"cli","value":10}]}],
+         "source":"Synthetic demo numbers"}
+        ```
+        """)
+
     static let turns: [(question: String, answer: String)] = [
         ("Summarise the parser change", """
         # Parser change review
@@ -150,6 +174,24 @@ enum RichContent {
 
         ```
         a plain block with no language: short
+        ```
+        """),
+        ("Chart it", """
+        The slowest package is the parser:
+
+        ```companion-chart
+        {"version":1,"type":"bar","title":"Test runtime by package","units":"s",
+         "x":{"label":"Package"},"y":{"label":"Seconds"},
+         "series":[{"name":"main","points":[{"label":"parser","value":4.2},{"label":"csv","value":1.9}]}],
+         "source":"Read from the npm test output in the session context"}
+        ```
+
+        ```companion-chart
+        {"version":1,"type":"metric","title":"This run","series":[{"name":"run","points":[{"label":"tests","value":67},{"label":"seconds","value":6.8},{"label":"failures","value":0}]}],"source":"Synthetic demo numbers"}
+        ```
+
+        ```companion-chart
+        {"version":1,"type":"bar","title":"Broken","series":[{"name":"main","points":[{"label":"parser","value":"4.2"}]}],"source":"Synthetic demo numbers"}
         ```
         """),
     ]
