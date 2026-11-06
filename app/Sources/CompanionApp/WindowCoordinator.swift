@@ -42,7 +42,10 @@ import SwiftUI
             }
         }
         closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.onHide?() }
+            MainActor.assumeIsolated {
+                self?.status.liveResizing = false // never left on if a didEndLiveResize was missed
+                self?.onHide?()
+            }
         }
         let claude = ClaudeWindowFollower.windowListBounds()
         if let screen = claude.flatMap(Self.screen(containing:)) ?? NSScreen.main {
@@ -58,6 +61,7 @@ import SwiftUI
     func toggle() {
         guard let p = panel else { return }
         if p.isVisible && p.isKeyWindow {
+            status.liveResizing = false
             p.orderOut(nil)
             onHide?()
         } else {
