@@ -54,6 +54,13 @@ final class EndBox: Sendable {
         #expect(ReadAloudController.avRate(multiplier: 0) == ReadAloudController.avRate(multiplier: 0.5))
     }
 
+    @Test func aCachedRenderIsSpokenInsteadOfReRendering() {
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s, voices: { [] })
+        c.toggle(id: UUID(), markdown: "Ignored.", rendered: ReplyMarkdown.render("| a | b |\n|---|---|\n| 1 | 2 |", root: nil))
+        #expect(s.lastSegments.map(\.text) == ["A table with 1 row.", "1: 2."])
+    }
+
     @Test func playPauseResumeStop() {
         let s = FakeSynth()
         let c = ReadAloudController(synth: s)

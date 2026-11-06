@@ -67,15 +67,18 @@ public final class ReadAloudController {
         return VoiceRanking.best(all, for: VoiceRanking.currentLanguageCode)?.identifier
     }
 
-    public func play(id: UUID, markdown: String) {
+    /// `rendered`: the answer's cached render when the caller has it (else the Markdown is rendered here).
+    public func play(id: UUID, markdown: String, rendered: RenderedAnswer? = nil) {
         if playback != .idle { synth.stop(atWordBoundary: false) }
         token += 1
         set(.playing(id))
-        synth.speak(SpeechText.segments(fromMarkdown: markdown, readCode: readCode),
+        let segments = rendered.map { SpeechText.segments(for: $0, readCode: readCode) }
+            ?? SpeechText.segments(fromMarkdown: markdown, readCode: readCode)
+        synth.speak(segments,
                     rate: Self.avRate(multiplier: rateMultiplier), voiceIdentifier: resolvedVoice(), token: token)
     }
 
-    public func toggle(id: UUID, markdown: String) {
+    public func toggle(id: UUID, markdown: String, rendered: RenderedAnswer? = nil) {
         switch playback {
         case .playing(id):
             synth.pause()
@@ -84,7 +87,7 @@ public final class ReadAloudController {
             synth.resume()
             set(.playing(id))
         default:
-            play(id: id, markdown: markdown)
+            play(id: id, markdown: markdown, rendered: rendered)
         }
     }
 
