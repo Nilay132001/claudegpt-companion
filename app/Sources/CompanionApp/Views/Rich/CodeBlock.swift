@@ -24,7 +24,7 @@ struct CodeBlock: View {
     private static let fade: CGFloat = 12
 
     /// Highlighted code by (language, text): a re-realized block, or Show all, never re-highlights or flashes plain.
-    @MainActor private static var highlightCache = BoundedCache<HighlightCacheKey, AttributedString>(capacity: 48)
+    @MainActor private static var highlightCache = BoundedCache<HighlightCacheKey, AttributedString>(capacity: 48, maxCost: 2_000_000)
     private struct HighlightCacheKey: Hashable { let language: String?; let text: String }
 
     var body: some View {
@@ -69,10 +69,19 @@ struct CodeBlock: View {
         // Keyed on the open state too: a stream closing the fence changes it without changing the text.
         .task(id: HighlightKey(text: shown, isOpen: model.isOpen)) {
             guard !model.isOpen else { return }
-            let key = HighlightCacheKey(language: model.language, text: shown)
-            if Self.highlightCache.value(for: key) != nil { return }
-            Self.highlightCache.insert(Self.highlighted(shown, language: model.language), for: key)
-            highlightTick += 1
+            // The shown text first, then (a previewed block) the full text, so Show all is instant.
+            let language = model.language
+            for text in shown == model.text ? [shown] : [shown, model.text] {
+                let key = HighlightCacheKey(language: language, text: text)
+                if Self.highlightCache.value(for: key) == nil {
+                    // Off the main actor; the task is cancelled when the key changes, so a stale result is dropped.
+                    let styled = await Task.detached(priority: .userInitiated) { Self.highlight(text, language: language) }.value
+                    if Task.isCancelled { return }
+                    Self.highlightCache.insert(styled, for: key, cost: text.utf16.count)
+                }
+                // Always: another block with the same text may have filled the cache while this one was plain.
+                highlightTick += 1
+            }
         }
     }
 
@@ -102,10 +111,10 @@ struct CodeBlock: View {
             .fixedSize()
             .layoutPriority(1)
             .foregroundStyle(wrap ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            .background(wrap ? Color.accentColor.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             .disabled(forced)
             .help(forced ? "This block has very long lines, so it wraps" : wrap ? "Turn off line wrap" : "Wrap long lines")
             .accessibilityLabel("Wrap long lines")
-            .accessibilityAddTraits(wrap ? .isSelected : [])
             Button {
                 Design.copy(model.text)
                 copied.flash()
@@ -190,7 +199,7 @@ struct CodeBlock: View {
 
     // MARK: Helpers
 
-    static func color(_ t: CodeToken) -> Color? {
+    nonisolated static func color(_ t: CodeToken) -> Color? {
         switch t {
         case .keyword: Color(nsColor: .systemPink)
         case .string: Color(nsColor: .systemRed)
@@ -210,7 +219,7 @@ struct CodeBlock: View {
         #endif
     }
 
-    private static func highlight(_ code: String, language: String?) -> AttributedString {
+    nonisolated private static func highlight(_ code: String, language: String?) -> AttributedString {
         var out = AttributedString()
         var at = code.startIndex
         for t in CodeHighlighter.tokens(code, language: language) where t.range.lowerBound >= at {

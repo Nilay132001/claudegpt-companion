@@ -125,7 +125,6 @@ enum RichContent {
         ```
         a plain block with no language: short
         ```
-
         """),
     ]
 }
