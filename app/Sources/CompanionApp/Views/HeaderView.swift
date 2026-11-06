@@ -122,9 +122,9 @@ struct MoreMenu: View {
             }
             Divider()
             Button("Copy Conversation") { Design.copy(model.conversationMarkdown(includeContext: false)) }
-                .disabled(model.currentMessages.isEmpty && model.pastChat == nil)
+                .disabled((model.currentFeed?.isEmpty ?? true) && model.pastChat == nil)
             Button("Copy Conversation with Context") { Design.copy(model.conversationMarkdown(includeContext: true)) }
-                .disabled(model.currentMessages.isEmpty && model.pastChat == nil)
+                .disabled((model.currentFeed?.isEmpty ?? true) && model.pastChat == nil)
             Divider()
             Button("Settings…") { openSettings() }
         } label: {

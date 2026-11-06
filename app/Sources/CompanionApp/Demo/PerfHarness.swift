@@ -15,6 +15,7 @@ import os
 ///   resize  — steps the panel width between 300 and 600 pt at display rate
 ///   idle    — does nothing (memory baseline)
 ///   position — scrolls to the middle, switches to the other session and back; the first visible turn must match
+///   readaloud — the scroll driver, toggling Read Aloud on the latest answer every 30 frames (a silent synthesizer)
 /// COMPANION_PERF_SECONDS (default 10), COMPANION_PERF_STEP (pt per frame, default 20), COMPANION_PERF_SETTLE (s, 2).
 enum PerfFlags {
     static let env = ProcessInfo.processInfo.environment
@@ -85,6 +86,15 @@ enum PerfFlags {
     }
 }
 
+/// The `readaloud` driver's synthesizer: nothing is spoken during measurement, and playback never ends by itself.
+@MainActor final class SilentSynth: SpeechSynthesizing {
+    var onEnd: ((Int) -> Void)?
+    func speak(_ segments: [SpeechSegment], rate: Float, voiceIdentifier: String?, token: Int) {}
+    func pause() {}
+    func resume() {}
+    func stop(atWordBoundary: Bool) {}
+}
+
 @MainActor final class PerfDriver: NSObject {
     static let shared = PerfDriver()
     /// perf-stream's answer waits for this, so it streams inside the measured window.
@@ -103,7 +113,7 @@ enum PerfFlags {
         summary["footprintLaunchMB"] = PerfProbe.footprintMB()
     }
 
-    func run(model: AppModel) {
+    func run(model: AppModel, readAloud: ReadAloudController) {
         guard let mode = PerfFlags.mode else { return }
         summary["scene"] = DemoFlags.scene ?? ""
         summary["driver"] = mode
@@ -128,6 +138,7 @@ enum PerfFlags {
             let t0 = DispatchTime.now()
             switch mode {
             case "scroll": await self.scroll()
+            case "readaloud": await self.readAloud(model, readAloud)
             case "switch": await self.switchSessions(model)
             case "resize": await self.resize()
             case "position": await self.position(model)
@@ -214,7 +225,23 @@ enum PerfFlags {
 
     // MARK: Drivers
 
-    private func scroll() async {
+    /// The scroll driver, plus a Read Aloud toggle on the latest answer every 30 frames. Only the answers whose
+    /// playback changed should re-render: `answerBodies` (settled AnswerView bodies) ≤ 2 × toggles.
+    private func readAloud(_ model: AppModel, _ readAloud: ReadAloudController) async {
+        var frames = 0, toggles = 0
+        let before = PerfProbe.counts["body.AnswerView.settled"] ?? 0
+        await scroll { [weak model] in
+            frames += 1
+            guard frames % 30 == 0, let feed = model?.currentFeed, let id = feed.turns.last?.answer,
+                  let text = feed.model(id)?.message.text else { return }
+            readAloud.toggle(id: id, markdown: text)
+            toggles += 1
+        }
+        summary["readaloud"] = ["toggles": toggles,
+                                "answerBodies": (PerfProbe.counts["body.AnswerView.settled"] ?? 0) - before]
+    }
+
+    private func scroll(_ extra: (() -> Void)? = nil) async {
         guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
         let clip = sv.contentView
         var y = clip.bounds.origin.y, dir: CGFloat = -1, yanks = 0, yanksWhileReading = 0, passes = 0, steps = 0
@@ -235,6 +262,7 @@ enum PerfFlags {
             clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
             sv.reflectScrolledClipView(clip)
             steps += 1
+            extra?()
         }
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil

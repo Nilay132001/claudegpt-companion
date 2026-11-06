@@ -36,12 +36,18 @@ public final class AppModel {
     public private(set) var repoBanners: [String: String] = [:]
     public private(set) var alerts: [SecurityAlert] = []
     public private(set) var syncError: String?
-    public internal(set) var conversations: [String: Conversation] = [:]
+    /// Every chat's messages. Not observed: views read the per-session `ChatFeed` mirror (M9 §5.5, P2). Written
+    /// only through `mutate`.
+    @ObservationIgnored private(set) var store: [String: Conversation] = [:]
+    /// Read-only view of the store.
+    public var conversations: [String: Conversation] { store }
     public private(set) var settings = UISettings()
     /// Stored turns by turnId: filled from restore and refreshed after each reply; feeds "Context sent".
     public internal(set) var records: [String: TurnRecord] = [:]
     public internal(set) var history: HistoryList?
     public internal(set) var pastChat: PastChat?
+    /// The open past chat as the views see it (nil whenever `pastChat` is nil).
+    public internal(set) var pastFeed: ChatFeed?
     /// Sessions whose stored chat is being read (the view shows a loading state instead of the empty state).
     public internal(set) var loadingChats: Set<String> = []
     public var draft = ""
@@ -83,6 +89,10 @@ public final class AppModel {
     public let renderCache: RenderCache
     /// Renders restored answers off the main thread; tests await it.
     @ObservationIgnored public internal(set) var prewarmTask: Task<Void, Never>?
+    /// Each session's view mirror, made on first use and never dropped (one small object per session shown).
+    @ObservationIgnored private(set) var feeds: [String: ChatFeed] = [:]
+    @ObservationIgnored private var throttles: [String: FrameThrottle] = [:]
+    @ObservationIgnored private var pendingFlush: [String: Task<Void, Never>] = [:]
 
     public init(connector: @escaping Connector, jiraStore: any JiraSecretStore = NoJiraStore(),
                 renderStyle: @escaping ReplyMarkdown.Styler = ReplyMarkdown.noStyle) {
@@ -218,7 +228,9 @@ public final class AppModel {
 
     private func loadDetail(_ id: String) async {
         guard let api else { return }
+        let root = root(for: id)
         do { worktrees[id] = try await api.sessionsWorktree(id) } catch {} // null clears a stale resolution
+        rootMayHaveChanged(id, from: root)
         if let s = try? await api.sessionsSync(id) { syncs[id] = s }
     }
 
@@ -270,6 +282,7 @@ public final class AppModel {
             return false
         }
         pastChat = nil // a past chat is only a view: asking always goes to the current chat
+        pastFeed = nil
         pastToken += 1
         do {
             let p = try await api.chatPrepare(sessionId: sid, question: q)
@@ -318,7 +331,7 @@ public final class AppModel {
         guard let retry = message.retry,
               let sid = conversations.first(where: { $0.value.messages.contains { $0.id == message.id } })?.key,
               let question = conversations[sid]?.question(before: message.id) else { return }
-        conversations[sid]?.discard(message.id)
+        mutate(sid, create: false) { $0.discard(message.id) }
         await send(sessionId: sid, retry, question: question)
     }
 
@@ -332,19 +345,18 @@ public final class AppModel {
                 if reloadAfterSend.remove(sid) != nil { chatLoad = Task { await self.loadCurrentChat(sessionId: sid) } }
             }
         }
-        var conv = conversations[sid] ?? Conversation()
-        let mid = conv.begin(question: question)
-        conversations[sid] = conv
+        var mid = UUID()
+        mutate(sid) { mid = $0.begin(question: question) }
         do {
             let r = try await api.chatSend(prepareId: s.prepareId, removeItemIds: s.removeItemIds, confirmed: s.confirmed)
-            conversations[sid]?.attach(mid, threadId: r.threadId, turnId: r.turnId)
+            mutate(sid, create: false) { $0.attach(mid, threadId: r.threadId, turnId: r.turnId) }
             // Known limit (low likelihood: M4b stores the thread before startTurn, so events carry a sessionId): if one
             // turn's early events arrive split between this buffer and the Conversation's, their order is not merged.
-            for e in unrouted.removeValue(forKey: r.turnId) ?? [] { conversations[sid]?.apply(e) }
+            for e in unrouted.removeValue(forKey: r.turnId) ?? [] { mutate(sid, create: false) { $0.apply(e) } }
             maybeAutoPlay(sid, turnId: r.turnId)
         } catch let e as DaemonError where DaemonErrorCode.prepareAgain.contains(e.code) {
             // Expired, stale (mode or approval changed) or a confirmation is now required: prepare again.
-            conversations[sid]?.discard(mid)
+            mutate(sid, create: false) { $0.discard(mid) }
             do {
                 let fresh = try await api.chatPrepare(sessionId: sid, question: question)
                 if fresh.needsConfirm || fresh.mode == .ask {
@@ -363,9 +375,9 @@ public final class AppModel {
                 if draft.isEmpty { draft = question }
             }
         } catch let e as DaemonError where DaemonErrorCode.retryable.contains(e.code) {
-            conversations[sid]?.fail(mid, message: Self.describe(e), retry: s)
+            mutate(sid, create: false) { $0.fail(mid, message: Self.describe(e), retry: s) }
         } catch {
-            conversations[sid]?.fail(mid, message: Self.describe(error))
+            mutate(sid, create: false) { $0.fail(mid, message: Self.describe(error)) }
         }
     }
 
@@ -382,7 +394,59 @@ public final class AppModel {
     }
 
     private func stopAllRunning(_ reason: String) {
-        for k in conversations.keys { conversations[k]?.stopRunning(reason: reason) }
+        for k in Array(store.keys) { mutate(k, create: false) { $0.stopRunning(reason: reason) } }
+    }
+
+    // MARK: Feeds (M9 §5.4, §5.5)
+
+    public func feed(for sid: String) -> ChatFeed {
+        if let f = feeds[sid] { return f }
+        let f = ChatFeed()
+        feeds[sid] = f
+        let root = root(for: sid)
+        f.sync(store[sid]?.messages ?? [], render: { self.render($0, isNew: $1, root: root) })
+        return f
+    }
+
+    public var currentFeed: ChatFeed? { selectedSessionId.map(feed(for:)) }
+
+    /// Every Conversation change goes through here. Deltas are coalesced to one feed update per frame.
+    func mutate(_ sid: String, create: Bool = true, coalesce: Bool = false, _ body: (inout Conversation) -> Void) {
+        guard create || store[sid] != nil else { return }
+        body(&store[sid, default: Conversation()])
+        if coalesce { scheduleFlush(sid) } else { flush(sid) }
+    }
+
+    private func scheduleFlush(_ sid: String) {
+        guard pendingFlush[sid] == nil else { return }
+        if let wait = throttles[sid, default: FrameThrottle()].delay(at: .now) {
+            pendingFlush[sid] = Task { [weak self] in
+                // Cancelled: a flush already ran (it carried these deltas).
+                guard (try? await Task.sleep(for: wait)) != nil else { return }
+                self?.flush(sid)
+            }
+        } else {
+            flush(sid)
+        }
+    }
+
+    func flush(_ sid: String) {
+        pendingFlush.removeValue(forKey: sid)?.cancel()
+        throttles[sid, default: FrameThrottle()].flushed(at: .now)
+        guard let f = feeds[sid] else { return }      // nobody shows it yet; feed(for:) syncs on creation
+        let root = root(for: sid)
+        f.sync(store[sid]?.messages ?? [], render: { self.render($0, isNew: $1, root: root) })
+    }
+
+    /// Flushes coalesced updates now (tests; the end of a turn).
+    public func flushPendingUpdates() { for sid in Array(pendingFlush.keys) { flush(sid) } }
+
+    func render(_ m: ChatMessage, isNew: Bool, root: String?) -> RenderedAnswer? {
+        guard m.role == .assistant, !m.text.isEmpty else { return nil }
+        // A restored answer is rendered in the background (prewarm); a changed or running one now (its closed
+        // chunks are cached, so only the open last chunk is parsed).
+        if isNew && !m.isRunning { return renderCache.cachedAnswer(for: m.text, root: root) }
+        return renderCache.answer(for: m.text, root: root, streaming: m.isRunning)
     }
 
     // MARK: Privacy, account, settings
@@ -470,7 +534,9 @@ public final class AppModel {
             syncs[t.sessionId] = SyncStatus(state: t.kind == "missing" ? "missing" : "live", stats: t.stats,
                                             lastPollAt: syncs[t.sessionId]?.lastPollAt)
         case .sessionWorktree(let w):
+            let root = root(for: w.sessionId)
             worktrees[w.sessionId] = w.resolution
+            rootMayHaveChanged(w.sessionId, from: root)
             if let c = w.change { repoBanners[w.sessionId] = c.banner }
         case .syncError(let m):
             syncError = m
@@ -504,7 +570,7 @@ public final class AppModel {
             if (unrouted[e.turnId]?.count ?? 0) < Conversation.earlyEventCap { unrouted[e.turnId, default: []].append(e) }
             return nil
         }
-        conversations[sid, default: Conversation()].apply(e)
+        mutate(sid, coalesce: { if case .delta = e { true } else { false } }()) { $0.apply(e) }
         return sid
     }
 

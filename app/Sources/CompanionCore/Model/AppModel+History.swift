@@ -23,29 +23,48 @@ extension AppModel {
                 reloadAfterSend.insert(sid)
                 return
             }
-            conversations[sid, default: Conversation()].restore(turns)
+            mutate(sid) { $0.restore(turns) }
             for t in turns { records[t.turnId] = t }
-            prewarm(turns, sessionId: sid)
+            prewarm(store[sid]?.messages ?? [], rootOf: sid) { [weak self] in self?.feeds[sid] }
         } catch {
             if generation == gen, chatTokens[sid, default: 0] == token { loadedChats.remove(sid) } // try again at the next selection or reconnect
         }
     }
 
-    /// Renders restored answers into the cache off the main thread, newest first (they show first). The cache key
-    /// includes the root, and a session's chat and worktree load concurrently: wait for the worktree read in flight,
-    /// then read the root, so the prewarmed chunks are the ones AnswerView asks for.
-    func prewarm(_ turns: [TurnRecord], sessionId sid: String?) {
-        let texts = turns.reversed().map(\.answer).filter { !$0.isEmpty }
-        guard !texts.isEmpty else { return }
+    /// Renders settled answers off the main thread, newest first (they show first), and hands each result to its
+    /// message model in batches of 8. The cache key includes the root, and a session's chat and worktree load
+    /// concurrently: wait for the worktree read in flight, then read the root, so the prewarmed chunks are the ones
+    /// the views ask for.
+    func prewarm(_ messages: [ChatMessage], rootOf sid: String?, into feed: @escaping @MainActor @Sendable () -> ChatFeed?) {
+        let items = messages.reversed()
+            .filter { $0.role == .assistant && !$0.isRunning && !$0.text.isEmpty }.map { ($0.id, $0.text) }
+        guard !items.isEmpty else { return }
         let cache = renderCache, detail = detailLoad
         prewarmTask?.cancel()
         prewarmTask = Task { [weak self] in
             await detail?.value
             guard let self, !Task.isCancelled else { return }
             let root = sid.flatMap(self.root(for:))
-            let work = Task.detached(priority: .utility) { cache.prewarm(texts, root: root) }
+            let work = Task.detached(priority: .utility) {
+                var batch: [(UUID, String, RenderedAnswer)] = []
+                for (i, (id, text)) in items.enumerated() where !Task.isCancelled {
+                    batch.append((id, text, cache.answer(for: text, root: root, streaming: false)))
+                    if batch.count == 8 || i == items.count - 1 {
+                        let done = batch
+                        batch = []
+                        await MainActor.run { for (id, text, r) in done { feed()?.setRendered(r, for: id, text: text) } }
+                    }
+                }
+            }
             await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
         }
+    }
+
+    /// A session's root changed (its worktree resolved or moved): its answers render again with the new root.
+    func rootMayHaveChanged(_ sid: String, from old: String?) {
+        guard root(for: sid) != old else { return }
+        flush(sid)
+        prewarm(store[sid]?.messages ?? [], rootOf: sid) { [weak self] in self?.feeds[sid] }
     }
 
     /// After a reply ends: the daemon now holds its context block and items. Only the newest turn is read and merged.
@@ -67,9 +86,10 @@ extension AppModel {
         do {
             try await api.chatNewChat(sessionId: sid)
             chatTokens[sid, default: 0] += 1
-            conversations[sid] = Conversation()
+            mutate(sid) { $0 = Conversation() }
             records = records.filter { $0.value.sessionId != sid }
             pastChat = nil
+            pastFeed = nil
             threadNotices[sid] = nil
         } catch {
             errorMessage = Self.describe(error)
@@ -97,9 +117,12 @@ extension AppModel {
             var c = Conversation()
             c.restore(turns)
             for t in turns { records[t.turnId] = t }
-            pastChat = PastChat(summary: summary, messages: c.messages)
             // The past chat's answers render with the current root (as AnswerView does), so prewarm with that key.
-            prewarm(turns, sessionId: selectedSessionId)
+            let feed = ChatFeed(), root = currentRoot
+            feed.sync(c.messages) { self.render($0, isNew: $1, root: root) }
+            pastChat = PastChat(summary: summary, messages: c.messages)
+            pastFeed = feed
+            prewarm(c.messages, rootOf: selectedSessionId) { [weak feed] in feed }
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -121,6 +144,7 @@ extension AppModel {
             records = records.filter { $0.value.threadId != thread || shown.contains($0.key) }
         }
         pastChat = nil
+        pastFeed = nil
     }
 
     /// nil clears every stored chat.
@@ -137,16 +161,17 @@ extension AppModel {
             return
         }
         if let t = threadId {
-            for sid in conversations.keys where !(conversations[sid]?.isRunning ?? false) {
-                let shown = conversations[sid]?.messages.contains { $0.threadId == t } ?? false
-                if shown || current[sid] == t { conversations[sid] = Conversation() }
+            for sid in Array(store.keys) where !(store[sid]?.isRunning ?? false) {
+                let shown = store[sid]?.messages.contains { $0.threadId == t } ?? false
+                if shown || current[sid] == t { mutate(sid) { $0 = Conversation() } }
             }
             records = records.filter { $0.value.threadId != t }
-            if pastChat?.summary.threadId == t { pastChat = nil }
+            if pastChat?.summary.threadId == t { pastChat = nil; pastFeed = nil }
         } else {
-            for sid in conversations.keys where !(conversations[sid]?.isRunning ?? false) { conversations[sid] = Conversation() }
+            for sid in Array(store.keys) where !(store[sid]?.isRunning ?? false) { mutate(sid) { $0 = Conversation() } }
             records = [:]
             pastChat = nil
+            pastFeed = nil
         }
         await loadHistory()
     }

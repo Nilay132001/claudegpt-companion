@@ -200,4 +200,22 @@ final class EndBox: Sendable {
         #expect(box.tokens.withLock { $0.contains(2) })
         withExtendedLifetime(adapter) {}
     }
+
+    @Test func playbackChangesTouchOnlyTheMessagesInvolved() {
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s)
+        let a = UUID(), b = UUID(), other = UUID()
+        let otherSpeech = c.speech(for: other)
+        let touched = Flag()
+        withObservationTracking { _ = otherSpeech.phase } onChange: { touched.set() }
+        c.play(id: a, markdown: "One.")
+        #expect(c.speech(for: a).phase == .playing)
+        c.toggle(id: a, markdown: "")
+        #expect(c.speech(for: a).phase == .paused)
+        c.play(id: b, markdown: "Two.")
+        #expect(c.speech(for: a).phase == .idle && c.speech(for: b).phase == .playing)
+        s.onEnd?(s.lastToken)
+        #expect(c.speech(for: b).phase == .idle)
+        #expect(!touched.on)
+    }
 }

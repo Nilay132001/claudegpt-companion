@@ -348,4 +348,37 @@ import Testing
         await m.prewarmTask?.value
         #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: m.currentRoot) != nil)
     }
+
+    @Test func theFeedMirrorsTheConversationAndDeltasAreCoalesced() async {
+        let (m, _) = await started()
+        await m.ask("q")
+        let feed = m.currentFeed!
+        #expect(feed.turns.count == 1 && feed.isRunning && m.isAnswering)
+        let answer = feed.turns[0].answer!
+        for i in 0..<50 {
+            m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: "w\(i) ")))
+        }
+        #expect(m.currentMessages.last?.text.hasPrefix("w0 w1 ") == true)    // the Conversation is immediate
+        m.flushPendingUpdates()
+        #expect(feed.model(answer)?.message.text == m.currentMessages.last?.text)
+        #expect(feed.model(answer)?.rendered?.plainText.hasPrefix("w0 w1") == true)
+        m.handle(.turnCompleted(TurnCompleted(sessionId: "s1", threadId: "t1", turnId: "u1", status: "completed", error: nil)))
+        #expect(!feed.isRunning && !m.isAnswering)
+    }
+
+    @Test func aDeltaInvalidatesOnlyItsOwnAnswer() async {
+        let (m, _) = await started()
+        await m.ask("one")
+        m.handle(.turnCompleted(TurnCompleted(sessionId: "s1", threadId: "t1", turnId: "u1", status: "completed", error: nil)))
+        await m.ask("two")
+        let feed = m.currentFeed!
+        let first = feed.model(feed.turns[0].answer!)!
+        let turns = Flag(), earlier = Flag(), sidebar = Flag()
+        withObservationTracking { _ = feed.turns } onChange: { turns.set() }
+        withObservationTracking { _ = first.message; _ = first.rendered } onChange: { earlier.set() }
+        withObservationTracking { _ = m.currentFeed?.isEmpty; _ = m.isLoadingCurrentChat; _ = m.gate } onChange: { sidebar.set() }
+        m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u2", itemId: "i1", text: "streaming")))
+        m.flushPendingUpdates()
+        #expect(!turns.on && !earlier.on && !sidebar.on)
+    }
 }

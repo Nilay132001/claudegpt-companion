@@ -4,7 +4,7 @@ import SwiftUI
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
-    let readAloud = ReadAloudController(synth: AVSpeechAdapter())
+    let readAloud: ReadAloudController
     let dictation = DictationController(engine: SpeechAnalyzerEngine(), permissions: SystemDictationPermissions())
     let windowStatus: WindowStatus
     let window: WindowCoordinator
@@ -15,6 +15,12 @@ import SwiftUI
     #endif
 
     override init() {
+        #if DEBUG
+        // The readaloud perf driver measures re-renders, not speech: nothing is spoken during measurement.
+        readAloud = ReadAloudController(synth: PerfFlags.mode == "readaloud" ? SilentSynth() : AVSpeechAdapter())
+        #else
+        readAloud = ReadAloudController(synth: AVSpeechAdapter())
+        #endif
         #if DEBUG
         if let demo = Self.demo {
             model = AppModel(connector: demo.connector, renderStyle: AnswerStyle.styler)
@@ -78,7 +84,7 @@ import SwiftUI
                     model.draft = q
                     await model.submitDraft()
                 }
-                PerfDriver.shared.run(model: model)
+                PerfDriver.shared.run(model: model, readAloud: readAloud)
             }
             #endif
         }
