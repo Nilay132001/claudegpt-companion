@@ -125,4 +125,44 @@ func describe(_ b: AnswerBlock) -> String {
         let md = "# T\n\n- a\n  - b\n- [x] c\n\n| h | v |\n|---|---|\n| x | 1 |\n\n---\n\n```\ncode\n```"
         #expect(ReplyMarkdown.plainText(md) == "T\n\n• a\n  ◦ b\n• [x] c\n\nh\tv\nx\t1\n\n—\n\ncode")
     }
+
+    @Test func blockSpacingFollowsTheTokens() {
+        let p = AnswerBlock.paragraphs("x"), h1 = AnswerBlock.heading(level: 1, text: "x"), h3 = AnswerBlock.heading(level: 3, text: "x")
+        #expect(BlockSpacing.gap(before: p, after: nil) == 0)
+        #expect(BlockSpacing.gap(before: p, after: p) == 10)
+        #expect(BlockSpacing.gap(before: h1, after: p) == 18)
+        #expect(BlockSpacing.gap(before: h3, after: p) == 12)
+        #expect(BlockSpacing.gap(before: p, after: h1) == 8)
+        #expect(BlockSpacing.gap(before: p, after: AnswerBlock.heading(level: 2, text: "x")) == 6)
+        #expect(BlockSpacing.gap(before: p, after: h3) == 4)
+    }
+
+    @Test func headingLevelsBeyondThreeUseTheH3Gaps() {
+        let p = AnswerBlock.paragraphs("x")
+        #expect(BlockSpacing.gap(before: .heading(level: 5, text: "x"), after: p) == 12)
+        #expect(BlockSpacing.gap(before: p, after: .heading(level: 6, text: "x")) == 4)
+        #expect(BlockSpacing.gap(before: .heading(level: 0, text: "x"), after: p) == 18)
+        // A heading right after a heading: the space above the new heading wins.
+        #expect(BlockSpacing.gap(before: .heading(level: 2, text: "x"), after: .heading(level: 1, text: "x")) == 16)
+    }
+
+    @Test func listMarkerColumnWidths() {
+        func item(_ m: String, _ check: ListItem.Check? = nil) -> ListItem { ListItem(marker: m, check: check, content: []) }
+        #expect(ListLayout.markerColumn(ListModel(ordered: false, items: [item("•"), item("•")])) == 14)
+        #expect(ListLayout.markerColumn(ListModel(ordered: false, items: [item("•", .done), item("•", .open)])) == 14)
+        #expect(ListLayout.markerColumn(ListModel(ordered: true, items: [item("1."), item("2.")])) == 18)
+        #expect(ListLayout.markerColumn(ListModel(ordered: true, items: (1...12).map { item("\($0).") })) == 26)
+        #expect(ListLayout.markerColumn(ListModel(ordered: true, items: [])) == 14)
+    }
+
+    @Test func textScaleFollowsTheDynamicTypeSteps() {
+        #expect(TextScale.factor(.xSmall) == 0.88)
+        #expect(TextScale.factor(.small) == 0.94)
+        #expect(TextScale.factor(.medium) == 1.0)
+        #expect(TextScale.factor(.large) == 1.0)
+        #expect(TextScale.factor(.xLarge) == 1.1)
+        #expect(TextScale.factor(.xxLarge) == 1.2)
+        #expect(TextScale.factor(.xxxLarge) == 1.3)
+        #expect(TextScale.factor(.accessibility) == 1.4)
+    }
 }

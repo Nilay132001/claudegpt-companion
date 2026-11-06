@@ -10,6 +10,7 @@ struct CodeBlockView: View {
     var title: String? = nil
     var copyHelp = "Copy code"
     @State private var copied = CopiedFlag()
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         #if DEBUG
@@ -40,7 +41,7 @@ struct CodeBlockView: View {
             .padding(.leading, Design.Space.m)
             .padding(.trailing, Design.Space.s)
             .padding(.vertical, 4)
-            Rectangle().fill(Design.Fill.hairline).frame(height: 0.5)
+            Rectangle().fill(Design.Fill.hairline(contrast)).frame(height: Design.Fill.hairlineWidth(contrast))
             Text(Self.highlighted(code, language: language))
                 .font(.system(.callout, design: .monospaced))
                 .lineSpacing(2)
@@ -51,7 +52,7 @@ struct CodeBlockView: View {
         }
         // The one deliberate box inside answers (D6): hairline border, faint fill.
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: Design.Radius.code, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Design.Radius.code, style: .continuous).strokeBorder(Design.Fill.hairline, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: Design.Radius.code, style: .continuous).strokeBorder(Design.Fill.hairline(contrast), lineWidth: Design.Fill.hairlineWidth(contrast)))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title ?? "Code block\(language.map { ", \($0)" } ?? "")")
     }

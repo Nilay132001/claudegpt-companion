@@ -4,7 +4,7 @@ import CompanionCore
 import Foundation
 
 /// DEBUG-only (ruling R6): COMPANION_DEMO=<scene> runs the real views on synthetic data. Nothing leaves the process.
-/// Scenes: empty, chat, context, raw, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status,
+/// Scenes: empty, chat, rich, context, raw, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status,
 /// and the M9 perf scenes perf-short, perf-medium, perf-long, perf-stream (PerfHarness.swift).
 /// COMPANION_DEMO_WIDTH=<pt> sets the panel width; COMPANION_DEMO_LONG=1 uses long synthetic titles, repo, branch and
 /// paths (the real-world lengths that overlapped in the first M8 build).
@@ -13,6 +13,8 @@ enum DemoFlags {
     static func is_(_ s: String) -> Bool { scene == s }
     static let long = ProcessInfo.processInfo.environment["COMPANION_DEMO_LONG"] == "1"
     static let width: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO_WIDTH"]
+    /// `rich` scene: "bottom" starts at the last answer instead of the first.
+    static let anchor: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO_ANCHOR"]
 }
 
 @MainActor final class DemoDaemon: DaemonAPI {
@@ -252,6 +254,7 @@ enum DemoFlags {
     }
 
     var storedTurns: [TurnRecord] {
+        if scene == "rich" { return cleared ? [] : richTurns }
         guard !cleared, ["chat", "context", "raw", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
         let now = Date().timeIntervalSince1970 * 1000
         let all = Self.items[...]
@@ -265,6 +268,17 @@ enum DemoFlags {
         return scene == "streaming" ? [t1] : [t1, t2]
     }
 
+
+    /// `rich` scene: every block type (RichContent), stored in session s1, no context records.
+    var richTurns: [TurnRecord] {
+        let now = Date().timeIntervalSince1970 * 1000
+        let n = Double(RichContent.turns.count)
+        return RichContent.turns.enumerated().map { i, t in
+            let at = now - (n - Double(i)) * 5 * 60_000
+            return TurnRecord(turnId: "r\(i + 1)", sessionId: "s1", threadId: "th1", sessionTitle: Self.title, mode: .off,
+                              question: t.question, answer: t.answer, sentAt: at, completedAt: at + 60_000)
+        }
+    }
 
     func historyList() async throws -> HistoryList {
         let now = Date().timeIntervalSince1970 * 1000

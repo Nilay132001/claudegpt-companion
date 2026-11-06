@@ -55,7 +55,7 @@ struct AnswerView: View {
             if message.text.isEmpty && message.isRunning {
                 if let a = message.activity { ActivityRow(text: a) } else { TypingIndicator() }
             } else if !message.text.isEmpty {
-                ReplyView(answer: rendered, root: model.root)
+                BlockStack(answer: rendered, root: model.root)
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
             statusRow(message)

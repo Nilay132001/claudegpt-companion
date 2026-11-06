@@ -1,4 +1,5 @@
 import AppKit
+import CompanionCore
 import SwiftUI
 
 /// The sidebar's visual tokens (docs/superpowers/specs/2026-11-05-m8-ui-design.md). Everything else uses system
@@ -32,10 +33,41 @@ enum Design {
         })
         /// Hairlines: composer and code block borders, the context list rule.
         static let hairline = Color.primary.opacity(0.12)
+
+        /// The hairline under Increase Contrast: the system separator colour (drawn at `hairlineWidth`).
+        static func hairline(_ contrast: ColorSchemeContrast) -> Color {
+            contrast == .increased ? Color(nsColor: .separatorColor) : hairline
+        }
+
+        static func hairlineWidth(_ contrast: ColorSchemeContrast) -> CGFloat { contrast == .increased ? 1 : 0.5 }
     }
 
-    /// Answer prose: a little airier than the system default.
-    static let bodyLineSpacing: CGFloat = 3
+    /// Answer type tokens (M9 §6). Point sizes at the default text size; multiply by `scale(_:)`.
+    enum Typography {
+        static func scale(_ size: DynamicTypeSize) -> CGFloat {
+            let step: TextScale.Step = switch size {
+            case .xSmall: .xSmall
+            case .small: .small
+            case .medium: .medium
+            case .large: .large
+            case .xLarge: .xLarge
+            case .xxLarge: .xxLarge
+            case .xxxLarge: .xxxLarge
+            default: .accessibility
+            }
+            return CGFloat(TextScale.factor(step))
+        }
+
+        static let answerBody: CGFloat = 14, answerLineSpacing: CGFloat = 4
+        /// Semibold.
+        static let h1: CGFloat = 20, h2: CGFloat = 17, h3: CGFloat = 15
+        /// Line height 18.
+        static let code: CGFloat = 12.5, codeLineSpacing: CGFloat = 5.5
+        static let tableCell: CGFloat = 13, caption: CGFloat = 11
+        static let listItemGap: CGFloat = 4, nestingIndent: CGFloat = 18, bulletColumn = CGFloat(ListLayout.bulletColumn)
+
+        static func heading(_ level: Int) -> CGFloat { level <= 1 ? h1 : level == 2 ? h2 : h3 }
+    }
     /// Space between turns.
     static let turnGap: CGFloat = 18
 

@@ -91,3 +91,41 @@ public struct RenderedAnswer: Equatable, Sendable {
     public init(blocks: [RenderedBlock], plainText: String) { self.blocks = blocks; self.plainText = plainText }
     public static let empty = RenderedAnswer(blocks: [], plainText: "")
 }
+
+/// Vertical space between answer blocks (M9 §6 typography): above a heading 18/16/12, below one 8/6/4, else 10.
+public enum BlockSpacing {
+    public static func gap(before block: AnswerBlock, after previous: AnswerBlock?) -> Double {
+        guard let previous else { return 0 }
+        if case .heading(let level, _) = block { return [18, 16, 12][min(max(level, 1), 3) - 1] }
+        if case .heading(let level, _) = previous { return [8, 6, 4][min(max(level, 1), 3) - 1] }
+        return 10
+    }
+}
+
+/// The marker column of a list (M9 §6): 14 pt for bullets and checkboxes; for numbers, 8 pt per character of the
+/// longest marker plus 2, so "9." and "10." share one trailing-aligned column.
+public enum ListLayout {
+    public static let bulletColumn: Double = 14
+
+    public static func markerColumn(_ list: ListModel) -> Double {
+        guard list.ordered, let chars = list.items.map(\.marker.count).max() else { return bulletColumn }
+        return Double(chars * 8 + 2)
+    }
+}
+
+/// How much the answer's type tokens grow with the user's text size (the app maps `DynamicTypeSize` onto these).
+public enum TextScale {
+    public enum Step: Sendable { case xSmall, small, medium, large, xLarge, xxLarge, xxxLarge, accessibility }
+
+    public static func factor(_ step: Step) -> Double {
+        switch step {
+        case .xSmall: 0.88
+        case .small: 0.94
+        case .medium, .large: 1.0
+        case .xLarge: 1.1
+        case .xxLarge: 1.2
+        case .xxxLarge: 1.3
+        case .accessibility: 1.4
+        }
+    }
+}
