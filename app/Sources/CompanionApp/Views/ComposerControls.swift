@@ -7,6 +7,9 @@ import SwiftUI
 /// truncates in the middle, so nothing ever overlaps the trailing buttons.
 struct ComposerControls: View {
     @Binding var showSees: Bool
+    /// Owned here, outside ViewThatFits, so a width change that swaps the label variant keeps an open
+    /// Automatic confirmation.
+    @State private var confirmAutomatic = false
 
     var body: some View {
         // In order: everything in full; the repository name middle-truncated (ideal 120 pt) with "Context: Ask";
@@ -14,18 +17,21 @@ struct ComposerControls: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: Design.Space.xs) {
                 RepoMenu()
-                ContextModeMenu(compact: false, showSees: $showSees)
+                ContextModeMenu(compact: false, showSees: $showSees, confirmAutomatic: $confirmAutomatic)
             }
             .fixedSize()
             HStack(spacing: Design.Space.xs) {
                 RepoMenu().frame(idealWidth: 120, alignment: .leading)
-                ContextModeMenu(compact: false, showSees: $showSees).fixedSize().layoutPriority(1)
+                ContextModeMenu(compact: false, showSees: $showSees, confirmAutomatic: $confirmAutomatic)
+                    .fixedSize().layoutPriority(1)
             }
             HStack(spacing: Design.Space.xs) {
                 RepoMenu().frame(idealWidth: 60, alignment: .leading)
-                ContextModeMenu(compact: true, showSees: $showSees).fixedSize().layoutPriority(1)
+                ContextModeMenu(compact: true, showSees: $showSees, confirmAutomatic: $confirmAutomatic)
+                    .fixedSize().layoutPriority(1)
             }
         }
+        .automaticModeConfirmation(isPresented: $confirmAutomatic)
         // Outside ViewThatFits, so the popover keeps its anchor when the labels switch.
         .popover(isPresented: $showSees, arrowEdge: .top) { WhatGPTSeesView() }
         #if DEBUG
@@ -143,7 +149,8 @@ struct ContextModeMenu: View {
     @Environment(AppModel.self) private var model
     var compact = false
     @Binding var showSees: Bool
-    @State private var confirmAutomatic = false
+    /// Owned by ComposerControls, which presents the confirmation.
+    @Binding var confirmAutomatic: Bool
 
     static let help = """
     What GPT gets from the Claude session with each question:
@@ -181,6 +188,5 @@ struct ContextModeMenu: View {
         .controlSize(.small)
         .help(Self.help)
         .accessibilityLabel("Context: \(current?.title ?? "unknown")")
-        .automaticModeConfirmation(isPresented: $confirmAutomatic)
     }
 }

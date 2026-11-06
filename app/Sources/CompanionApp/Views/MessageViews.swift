@@ -114,8 +114,24 @@ struct AnswerView: View {
         }
     }
 
-    /// Copy ▾, Read aloud (and Stop while reading), then the time: one line, at most 22 pt tall.
+    /// Copy ▾, Read aloud (and Stop while reading), the Speaking badge, then the time: one line, at most 22 pt
+    /// tall. ViewThatFits drops the time, then the badge's text, so it fits at 280 pt by construction.
     private var actionsRow: some View {
+        ViewThatFits(in: .horizontal) {
+            actions(time: true, badgeText: true)
+            actions(time: false, badgeText: true)
+            actions(time: false, badgeText: false)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .frame(height: 22)
+        // Shown for the latest answer, on hover for older ones; opacity keeps them for keyboard and VoiceOver.
+        .opacity(isLatest || hovering || speaking != nil ? 1 : 0)
+        .animation(Design.Motion.quick, value: hovering)
+    }
+
+    private func actions(time: Bool, badgeText: Bool) -> some View {
         HStack(spacing: 2) {
             Menu {
                 copyItems
@@ -139,9 +155,9 @@ struct AnswerView: View {
                 IconButton(symbol: "stop.fill", label: "Stop reading") { readAloud.stop() }
             }
             if let on = speaking {
-                SpeakingBadge(paused: !on).padding(.leading, Design.Space.xs)
+                SpeakingBadge(paused: !on, showText: badgeText).padding(.leading, Design.Space.xs)
             }
-            if let at = message.sentAt {
+            if time, let at = message.sentAt {
                 Text(verbatim: at.shortStamp)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -149,26 +165,34 @@ struct AnswerView: View {
                     .padding(.leading, Design.Space.xs)
                     .accessibilityLabel("Answered \(at.shortStamp)")
             }
-            Spacer(minLength: 0)
         }
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .frame(height: 22)
-        // Shown for the latest answer, on hover for older ones; opacity keeps them for keyboard and VoiceOver.
-        .opacity(isLatest || hovering || speaking != nil ? 1 : 0)
-        .animation(Design.Motion.quick, value: hovering)
+        .fixedSize()
     }
 }
 
 /// "Speaking" with a live waveform while Read Aloud plays this answer.
 struct SpeakingBadge: View {
     let paused: Bool
+    /// false: the waveform only (narrow actions row); the accessibility label is the same.
+    var showText = true
     var body: some View {
         Label(paused ? "Paused" : "Speaking", systemImage: "waveform")
+            .labelStyle(BadgeLabelStyle(showText: showText))
             .symbolEffect(.variableColor.iterative, isActive: !paused)
             .font(.caption)
             .foregroundStyle(.tint)
             .accessibilityLabel(paused ? "Reading paused" : "Reading aloud")
+    }
+}
+
+private struct BadgeLabelStyle: LabelStyle {
+    let showText: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        if showText {
+            Label(configuration)
+        } else {
+            configuration.icon
+        }
     }
 }
 
