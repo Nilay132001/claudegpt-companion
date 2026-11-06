@@ -1,3 +1,4 @@
+import AppKit
 import CompanionCore
 import SwiftUI
 
@@ -32,30 +33,33 @@ struct TableBlock: View {
         .chatTextSelection()
         .modifier(CopyPill(table: table))
         .modifier(RowReading(table: table))
+        // A container, so the label names the table and does not land on the cells.
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Table, \(table.rows.count) rows")
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
-            // Only the stacked decision lives here; grid and scroll are decided in the layout pass.
-            let st = TableLayout.decide(idealWidths: info.ideal(table, scale: scale), available: Double(w), previous: info.state)
-            info.state = st
-            let now = st.choice == .stacked
-            if now != stacked { stacked = now }
+            info.width = w
+            decideStacked(scale: scale)
         }
+        .onChange(of: table) { decideStacked(scale: scale) }
+    }
+
+    /// Only the stacked decision lives here; grid and scroll are decided in the layout pass.
+    private func decideStacked(scale: CGFloat) {
+        guard info.width > 0 else { return }
+        let st = TableLayout.decide(idealWidths: info.ideal(table, scale: scale), available: Double(info.width), previous: info.state)
+        info.state = st
+        let now = st.choice == .stacked
+        if now != stacked { stacked = now }
     }
 }
 
-/// Per-table values that are expensive or stateful but not part of what the view shows: the estimated column widths
-/// (computed once per type size, not in `body`) and the last layout decision (for hysteresis).
+/// Per-table values that are stateful but not part of what the view shows: the estimated column widths (cached per
+/// content and type size, not computed in `body`), the last layout decision (hysteresis) and the last width.
 final class TableInfo {
-    private var scale: CGFloat = -1
-    private var widths: [Double] = []
+    private let estimate = TableWidthEstimate()
     var state: TableLayoutState?
-    func ideal(_ t: TableModel, scale s: CGFloat) -> [Double] {
-        if s != scale {
-            scale = s
-            widths = t.estimatedColumnWidths(charWidth: 7.2 * Double(s))
-        }
-        return widths
-    }
+    var width: CGFloat = 0
+    func ideal(_ t: TableModel, scale s: CGFloat) -> [Double] { estimate.widths(for: t, scale: Double(s)) }
 }
 
 // MARK: Grid and scroll
@@ -211,9 +215,10 @@ private struct StackedRows: View {
     let size: CGFloat
 
     var body: some View {
+        let plans = table.stackedRows
         VStack(alignment: .leading, spacing: 0) {
             ForEach(table.rows.indices, id: \.self) { r in
-                let plan = table.stackedRow(r)
+                let plan = plans[r]
                 if r > 0 {
                     Rectangle().fill(Design.Fill.hairline(contrast)).frame(height: Design.Fill.hairlineWidth(contrast))
                 }
@@ -275,45 +280,69 @@ private struct RowReading: ViewModifier {
 private struct CopyPill: ViewModifier {
     let table: TableModel
     @State private var hover = false
+    @State private var pillHover = false
+    @State private var menuOpen = false
     @FocusState private var focused: Bool
 
     func body(content: Content) -> some View {
+        let show = hover || pillHover || menuOpen || focused
         content
             .onHover { hover = $0 }
             .overlay(alignment: .topTrailing) {
-                // Hover swaps the real Menu in; otherwise a plain Button of the same fixed size (a Menu per table
-                // measurably costs scroll time). Keyboard focus lands on the Button, whose action copies Markdown;
-                // the tab-separated copy is in the context menu and the accessibility actions.
-                Group {
-                    if hover {
-                        Menu {
-                            items
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        } primaryAction: {
-                            Design.copy(table.markdown)
-                        }
-                        .menuStyle(.button)
-                        .menuIndicator(.hidden)
-                    } else {
-                        Button { Design.copy(table.markdown) } label: { Image(systemName: "doc.on.doc") }
-                            .focused($focused)
-                    }
+                // The pill sticks out above the table, outside the table's hover region, so it has its own: one
+                // hover on a container around a catcher and the pill, so moving between them never drops it.
+                ZStack {
+                    Color.clear.frame(width: 28, height: 18).contentShape(Rectangle())
+                    pill(show: show)
                 }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .frame(width: 22, height: 18)
-                .background(.regularMaterial, in: Capsule())
+                .onHover { pillHover = $0 }
                 // Straddles the top edge, so it never covers the header's last cell (no space reserved in it).
-                .padding(.trailing, 6)
+                .padding(.trailing, 3)
                 .offset(y: -9)
-                .opacity(hover || focused ? 1 : 0)
-                .help("Copy table (click), or choose Markdown or tab-separated")
-                .accessibilityLabel("Copy table")
             }
             .contextMenu { items }
             .accessibilityAction(named: "Copy as Markdown") { Design.copy(table.markdown) }
             .accessibilityAction(named: "Copy as tab-separated") { Design.copy(table.tabSeparated) }
+    }
+
+    /// Until the table is hovered a plain Button of the same fixed size (a Menu per table measurably costs scroll
+    /// time); then the real Menu. Never swapped while the pill has keyboard focus (the focus would be lost), and
+    /// kept while its popup is open. Hidden with opacity and no mouse hits, still in the focus and accessibility trees.
+    @ViewBuilder private func pill(show: Bool) -> some View {
+        Group {
+            if (hover || pillHover || menuOpen) && !focused {
+                Menu {
+                    items
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                } primaryAction: {
+                    Design.copy(table.markdown)
+                }
+                .menuStyle(.button)
+                .menuIndicator(.hidden)
+                // Only while the Menu exists: the popup opening and closing keeps it in place.
+                .background {
+                    Color.clear.frame(width: 0, height: 0)
+                        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+                            if hover || pillHover { menuOpen = true }
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                            menuOpen = false
+                        }
+                }
+            } else {
+                Button { Design.copy(table.markdown) } label: { Image(systemName: "doc.on.doc") }
+                    .focused($focused)
+            }
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .frame(width: 22, height: 18)
+        .background(.regularMaterial, in: Capsule())
+        .opacity(show ? 1 : 0)
+        .allowsHitTesting(show)
+        .help("Copy table (click), or choose Markdown or tab-separated")
+        .accessibilityLabel("Copy table")
     }
 
     @ViewBuilder private var items: some View {
