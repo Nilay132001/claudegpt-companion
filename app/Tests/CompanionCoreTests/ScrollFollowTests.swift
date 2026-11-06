@@ -16,7 +16,7 @@ import Testing
         f.geometry(offset: 980, distanceFromBottom: 20)
         #expect(!f.following)
         #expect(!f.shouldStickToBottom)
-        #expect(!f.showsJumpToLatest) // the button waits until the reader is more than 80 pt up
+        #expect(f.showsJumpToLatest) // shown (and ⌘↓ enabled) as soon as the reader is more than 2 pt up
         f.geometry(offset: 980, distanceFromBottom: 140) // a delta arrives below: the reader stays where they are
         #expect(!f.following)
         #expect(f.showsJumpToLatest)
@@ -27,6 +27,35 @@ import Testing
         f.geometry(offset: 1000, distanceFromBottom: 0)
         f.geometry(offset: 980, distanceFromBottom: 20 + 60) // up 20 pt, and 60 pt of text arrived in the same frame
         #expect(!f.following)
+    }
+
+    @Test func aSlowUpwardDriftStopsFollowing() {
+        // A slow trackpad start: 0.3 pt per callback, below the old 0.5 pt test.
+        var f = ScrollFollow()
+        f.geometry(offset: 1000, distanceFromBottom: 0)
+        f.geometry(offset: 999.7, distanceFromBottom: 0.3)
+        #expect(!f.following)
+        #expect(!f.shouldStickToBottom)
+    }
+
+    @Test func jumpShowsJustAboveTheBottom() {
+        var f = ScrollFollow()
+        f.geometry(offset: 1000, distanceFromBottom: 0)
+        f.geometry(offset: 998.5, distanceFromBottom: 1.5)
+        #expect(!f.following && !f.showsJumpToLatest)     // within 2 pt: no button
+        f.geometry(offset: 997, distanceFromBottom: 3)
+        #expect(f.showsJumpToLatest)
+    }
+
+    @Test func aRestoredChatNearTheBottomFollowsOnItsFirstGeometry() {
+        // Intended: a chat restored with following: false whose first geometry is within 80 pt of the bottom is
+        // treated as at the bottom and follows; further up it stays put.
+        var near = ScrollFollow(following: false)
+        near.geometry(offset: 900, distanceFromBottom: 60)
+        #expect(near.following)
+        var far = ScrollFollow(following: false)
+        far.geometry(offset: 500, distanceFromBottom: 400)
+        #expect(!far.following && far.showsJumpToLatest)
     }
 
     @Test func aLayoutCorrectionAboveIsNotAScrollUp() {
@@ -156,7 +185,6 @@ import Testing
         let a = UUID()
         v.set(a, minY: 0, maxY: 400)
         #expect(v.first(top: 2000, viewportHeight: 700) == nil)   // only turns far above the viewport
-        v.set(a, minY: 0, maxY: 400)
         v.remove(a)
         #expect(v.first(top: 0, viewportHeight: 700) == nil)
     }

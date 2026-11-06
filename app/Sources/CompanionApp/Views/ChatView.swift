@@ -70,7 +70,8 @@ private struct ChatScroll: View {
         let _ = PerfProbe.count("body.ChatView")
         #endif
         // A session switch re-runs this body with the new key before any of the new chat's rows is laid out, while
-        // the tracker still holds the old chat's frames: save the old chat's position now.
+        // the tracker still holds the old chat's frames: save the old chat's position now (only if its rows and
+        // viewport were reported since it was shown; otherwise its saved position stays as it was).
         let _ = tracker.bind(session: sessionKey) { old, anchor in
             model.scrollMemory.save(session: old, anchor: anchor, following: follow.state.following)
         }
@@ -106,24 +107,34 @@ private struct ChatScroll: View {
                 follow.state.geometry(offset: m.offset, distanceFromBottom: m.distance)
                 tracker.viewport(top: m.top, height: m.height)
                 publish()
+                // A restore in progress: once the saved turn is the first visible one, put the marker (that many
+                // points into it) at the top, and check again on the next geometry until it is there.
+                if tracker.restoreNeedsMarker() {
+                    Self.note("restore")
+                    proxy.scrollTo(RestoreMarker.id, anchor: .top)
+                }
                 // Following, and the bottom moved away without the reader scrolling up (the answer grew, the panel
                 // was resized, a row above was measured): back to the bottom. Nothing else pins the bottom, so a
                 // reader above it is never moved.
-                if follow.state.shouldStickToBottom {
+                // Not while an animated Jump to latest is under way: it scrolls there itself.
+                if follow.state.shouldStickToBottom && !follow.jumping {
                     Self.note("follow")
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
             }
-            .onChange(of: feed.turns.last?.id) { _, _ in
-                // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last id.
-                if feed.isRunning {
+            .onChange(of: LastTurn(feed: ObjectIdentifier(feed), id: feed.turns.last?.id)) { old, new in
+                // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last
+                // id; a session switch swaps the feed, and onChange(of: sessionKey) restores that chat's position.
+                if old.feed == new.feed, feed.isRunning {
                     follow.state.followAgain()
                     publish()
                     Self.note("newTurn")
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
             }
-            .onAppear { if let restore { scroll(to: restore, proxy) } }
+            .onAppear {
+                if let restore { scroll(to: restore, proxy) }
+            }
             .onChange(of: sessionKey) { _, new in
                 // Another session's chat in the same scroll view: its saved line, or its bottom.
                 let r = model.scrollMemory.position(for: new)
@@ -138,12 +149,16 @@ private struct ChatScroll: View {
                 }
             }
             .onDisappear {
-                model.scrollMemory.save(session: sessionKey, anchor: tracker.firstVisible, following: follow.state.following)
+                if tracker.isFresh {
+                    model.scrollMemory.save(session: sessionKey, anchor: tracker.firstVisible,
+                                            following: follow.state.following)
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 JumpToLatest(follow: follow) { animated in
                     follow.state.followAgain()
                     publish()
+                    if animated != nil { follow.jumpUntil = .now + .milliseconds(400) }
                     Self.note("jump")
                     withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
                 }
@@ -153,6 +168,8 @@ private struct ChatScroll: View {
 
     private static let bottomID = "chat.bottom"
 
+    private struct LastTurn: Equatable { let feed: ObjectIdentifier; let id: UUID? }
+
     private func publish() { follow.publish() }
 
     /// Back to where the reader was: first the saved turn (the lazy list lays it out), then, once it has a frame,
@@ -161,16 +178,16 @@ private struct ChatScroll: View {
         guard feed.turns.contains(where: { $0.id == anchor.turn }) else { return }
         Self.note("restore")
         proxy.scrollTo(anchor.turn, anchor: .top)
-        tracker.whenLaidOut(anchor.turn) {
-            Self.note("restore")
-            proxy.scrollTo(RestoreMarker.id, anchor: .top)
-        }
+        tracker.restore(anchor)
     }
 }
 
 /// ScrollFollow in a reference (see ChatScroll.follow): `state` is not observed; `showsJump` is, by the Jump button.
 @MainActor @Observable final class FollowBox {
     @ObservationIgnored var state: ScrollFollow
+    /// An animated Jump to latest is scrolling until then; sticking to the bottom would cut it short.
+    @ObservationIgnored var jumpUntil: ContinuousClock.Instant?
+    var jumping: Bool { jumpUntil.map { ContinuousClock.now < $0 } ?? false }
     private(set) var showsJump = false
     init(_ state: ScrollFollow) { self.state = state }
 
@@ -182,47 +199,68 @@ private struct ChatScroll: View {
 
 /// The turns' frames in the scroll content and the viewport, for the reading position (ChatScrollMemory).
 /// A reference held in @State and never observed: rows write into it as the lazy list lays them out.
+/// Frames and the viewport are kept per session (the session shown when they were reported), so a switch never
+/// saves one chat's turn for another, and rows that survive a rapid switch-and-back keep their frames.
 @MainActor final class TurnTracker {
     nonisolated static let space = "chat.content"
-    private var turns = VisibleTurns()
+    private var frames: [String: VisibleTurns] = [:]
     private var top = 0.0
     private var height = 0.0
-
-    var firstVisible: ChatScrollAnchor? { turns.first(top: top, viewportHeight: height) }
+    /// The session the viewport was last reported under.
+    private var viewportSession: String?
     private var session: String?
+    private var restoring: (anchor: ChatScrollAnchor, until: ContinuousClock.Instant, tries: Int)?
+
+    /// The current chat's reading position, or nil when its rows or its viewport have not been reported since it
+    /// was shown (then nothing is saved and its stored position stays as it was).
+    var firstVisible: ChatScrollAnchor? { session.flatMap(anchor(for:)) }
+    var isFresh: Bool { session.map(isFresh(_:)) ?? false }
+
+    private func isFresh(_ s: String) -> Bool { viewportSession == s && (frames[s]?.count ?? 0) > 0 }
+    private func anchor(for s: String) -> ChatScrollAnchor? {
+        guard isFresh(s) else { return nil }
+        return frames[s]?.first(top: top, viewportHeight: height)
+    }
 
     /// Called from ChatScroll's body with the session it shows. On a change, hands the previous session's position
-    /// to `save` and forgets its frames.
+    /// to `save`, if it is known (a rapid switch-through never overwrites a stored position with nothing).
     func bind(session new: String, save: (String, ChatScrollAnchor?) -> Void) {
         defer { session = new }
         guard let old = session, old != new else { return }
-        save(old, firstVisible)
-        turns = VisibleTurns()
-        pending = nil
+        if isFresh(old) { save(old, anchor(for: old)) }
+        restoring = nil
     }
 
     func viewport(top: Double, height: Double) {
         self.top = top
         self.height = height
+        viewportSession = session
         report()
     }
-
-    private var pending: (turn: UUID, until: ContinuousClock.Instant, then: () -> Void)?
 
     func set(_ id: UUID, frame: CGRect) {
-        turns.set(id, minY: frame.minY, maxY: frame.maxY)
-        if let p = pending, p.turn == id {
-            pending = nil
-            // Only right after the restore scrolled to the turn: never later, under a reader who has moved on.
-            if ContinuousClock.now < p.until { p.then() }
-        }
+        frames[session ?? "", default: VisibleTurns()].set(id, minY: frame.minY, maxY: frame.maxY)
         report()
     }
 
-    /// Runs `then` once, when the turn first reports a frame within the next second.
-    func whenLaidOut(_ id: UUID, then: @escaping () -> Void) { pending = (id, .now + .seconds(1), then) }
+    /// A restore scrolled to `anchor.turn`; the marker step follows from the geometry (restoreNeedsMarker).
+    func restore(_ anchor: ChatScrollAnchor) { restoring = (anchor, .now + .seconds(3), 0) }
 
-    func remove(_ id: UUID) { turns.remove(id) }
+    /// True when the restoring turn is the first visible one but not yet at the saved inset: scroll the marker to
+    /// the top. Only within 3 s of the restore (laying out a just-loaded chat can take a second) and at most 3
+    /// times, so it never fights a reader who has moved on; done once the inset is within 2 pt.
+    func restoreNeedsMarker() -> Bool {
+        guard let r = restoring else { return false }
+        guard ContinuousClock.now < r.until, r.tries < 3 else { restoring = nil; return false }
+        guard let now = firstVisible, now.turn == r.anchor.turn else { return false }
+        if abs(now.inset - r.anchor.inset) <= 2 { restoring = nil; return false }
+        restoring?.tries += 1
+        return true
+    }
+
+    func remove(_ id: UUID) {
+        for k in Array(frames.keys) { frames[k]?.remove(id) }
+    }
 
     private func report() {
         #if DEBUG

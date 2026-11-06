@@ -6,10 +6,15 @@ import Foundation
 /// bottom grew. (Requiring 80 pt first let each streamed delta pull a reader who had scrolled up 20 pt back to the
 /// bottom, so they could never get away; the measured "pullbacks".) Neither content growing below (the offset stays,
 /// the distance grows) nor a layout correction above (offset and content height change together, the distance stays)
-/// is the reader scrolling up. Following starts again when the reader scrolls down to within `nearBottom` of the
+/// is the reader scrolling up. Movements are compared per geometry callback with a 0.01 pt tolerance, so even a slow
+/// trackpad start (a fraction of a point per frame) counts. Following starts again when the reader scrolls down to within `nearBottom` of the
 /// bottom, reaches the bottom, sends a question or jumps to the latest.
 public struct ScrollFollow: Equatable, Sendable {
     public static let nearBottom: Double = 80
+    /// "Jump to latest" shows once a reader who is not following is more than this above the bottom.
+    public static let jumpThreshold: Double = 2
+    /// Smallest offset or distance change that counts as movement (layout noise is below it).
+    static let epsilon = 0.01
     public private(set) var following: Bool
     public private(set) var distanceFromBottom: Double = 0
     private var lastOffset: Double?
@@ -17,8 +22,8 @@ public struct ScrollFollow: Equatable, Sendable {
 
     public init(following: Bool = true) { self.following = following }
 
-    /// The "Jump to latest" button shows while the reader is above the bottom and not following.
-    public var showsJumpToLatest: Bool { !following && distanceFromBottom > Self.nearBottom }
+    /// The "Jump to latest" button (and ⌘↓) is there whenever the reader is not following and above the bottom.
+    public var showsJumpToLatest: Bool { !following && distanceFromBottom > Self.jumpThreshold }
 
     /// Following, but no longer at the bottom (content grew below, the viewport changed size): scroll back down.
     public var shouldStickToBottom: Bool { following && distanceFromBottom > 0.5 }
@@ -28,12 +33,14 @@ public struct ScrollFollow: Equatable, Sendable {
         let distance = max(0, distanceFromBottom)
         self.distanceFromBottom = distance
         if let lastOffset, let lastDistance {
-            if offset < lastOffset - 0.5 && distance > lastDistance + 0.5 {
+            if offset < lastOffset - Self.epsilon && distance > lastDistance + Self.epsilon {
                 following = false                                   // the reader scrolled up
-            } else if distance <= 1 || (offset > lastOffset + 0.5 && distance <= Self.nearBottom) {
+            } else if distance <= 1 || (offset > lastOffset + Self.epsilon && distance <= Self.nearBottom) {
                 following = true                                    // at the bottom, or scrolled down near it
             }
         } else if distance <= Self.nearBottom {
+            // The first geometry of a chat (also one restored with following: false): within 80 pt of the bottom
+            // the reader is treated as at the bottom and follows.
             following = true
         }
         lastOffset = offset
