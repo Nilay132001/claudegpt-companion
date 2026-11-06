@@ -126,9 +126,11 @@ extension ReplyMarkdown {
             ? markdown.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n") : markdown
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.drop { $0 == " " || $0 == "\t" }
+            // A fence inside a quote starts after its `>` markers.
+            let body = trimmed.drop { $0 == ">" || $0 == " " || $0 == "\t" }
             if let f = fence {
                 lines.append(line)
-                if trimmed.hasPrefix(f), trimmed.drop(while: { $0 == f.first }).allSatisfy(\.isWhitespace) { fence = nil }
+                if body.hasPrefix(f), body.drop(while: { $0 == f.first }).allSatisfy(\.isWhitespace) { fence = nil }
                 continue
             }
             if let close = mathClose {
@@ -142,7 +144,7 @@ extension ReplyMarkdown {
             if sawBlank && !indented && !(inList && listItem) { flush() }
             sawBlank = false
             if !indented { inList = listItem }
-            if let m = trimmed.firstMatch(of: /^(`{3,}|~{3,})/) { fence = m.1 }
+            if let m = body.firstMatch(of: /^(`{3,}|~{3,})/) { fence = m.1 }
             if trimmed == "$$" { mathClose = "$$" } else if trimmed == "\\[" { mathClose = "\\]" }
             lines.append(line)
         }
@@ -162,15 +164,27 @@ extension ReplyMarkdown {
         if let doc = try? AttributedString(markdown: text, options: full) {
             let builder = BlockBuilder(root: root, style: style)
             blocks = builder.build(doc)
-            if chunk.isOpen, let last = blocks.last, case .code(var c) = last {
-                c.isOpen = true
-                blocks[blocks.count - 1] = .code(c)
-            }
+            if chunk.isOpen { blocks = markOpen(blocks) }
             blocks = mergeParagraphs(blocks, style: style)
         } else {
             blocks = [.paragraphs(AttributedString(chunk.text))]
         }
         return RenderedChunk(blocks: blocks, plainText: plainText(blocks), cost: chunk.text.utf8.count * 4 + 256)
+    }
+
+    /// The unclosed fence is the last code block, however deep it sits (list item, quote).
+    static func markOpen(_ blocks: [AnswerBlock]) -> [AnswerBlock] {
+        var blocks = blocks
+        guard let last = blocks.last else { return blocks }
+        switch last {
+        case .code(var c): c.isOpen = true; blocks[blocks.count - 1] = .code(c)
+        case .quote(let inner): blocks[blocks.count - 1] = .quote(markOpen(inner))
+        case .list(var l):
+            if var item = l.items.popLast() { item.content = markOpen(item.content); l.items.append(item) }
+            blocks[blocks.count - 1] = .list(l)
+        default: break
+        }
+        return blocks
     }
 
     /// Top-level paragraphs in a row become one run, so a selection crosses them.
@@ -196,6 +210,7 @@ extension ReplyMarkdown {
         var out: [String] = []
         var fence: String?
         var mathIndent: String?
+        var mathClose = "$$"
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
             let t = raw.trimmingCharacters(in: .whitespaces)
             let indent = String(raw.prefix { $0 == " " || $0 == "\t" })
@@ -205,11 +220,13 @@ extension ReplyMarkdown {
                 continue
             }
             if let i = mathIndent {
-                if t == "$$" || t == "\\]" { out.append(i + "```"); mathIndent = nil } else { out.append(raw) }
+                if t == mathClose { out.append(i + "```"); mathIndent = nil } else { out.append(raw) }
                 continue
             }
             if let m = t.firstMatch(of: /^(`{3,}|~{3,})/) { fence = String(m.1); out.append(raw); continue }
-            if t == "$$" || t == "\\[" { out.append(indent + "```math"); mathIndent = indent; continue }
+            if t == "$$" || t == "\\[" {
+                out.append(indent + "```math"); mathIndent = indent; mathClose = t == "$$" ? "$$" : "\\]"; continue
+            }
             if let m = t.firstMatch(of: /^\$\$(.+)\$\$$/) {
                 out += [indent + "```math", indent + String(m.1).trimmingCharacters(in: .whitespaces), indent + "```"]
                 continue
@@ -266,7 +283,7 @@ struct BlockBuilder {
             t.presentationIntent = nil
             return Piece(path: Array((run.presentationIntent?.components ?? []).reversed()), text: t)
         }
-        return build(pieces[...], depth: 0, listDepth: 0, role: .paragraph)
+        return build(pieces[...], depth: 0, listDepth: 0, level: 0, role: .paragraph)
     }
 
     private func groups(_ pieces: ArraySlice<Piece>, depth: Int) -> [(PresentationIntent.IntentType?, ArraySlice<Piece>)] {
@@ -280,18 +297,22 @@ struct BlockBuilder {
         return out
     }
 
-    private func build(_ pieces: ArraySlice<Piece>, depth: Int, listDepth: Int, role: ProseRole) -> [AnswerBlock] {
+    static let maxNesting = 32
+
+    private func build(_ pieces: ArraySlice<Piece>, depth: Int, listDepth: Int, level: Int, role: ProseRole) -> [AnswerBlock] {
+        // Deeper than any real answer: flatten to text rather than recurse (stack safety off the main thread).
+        if level >= Self.maxNesting { return [.paragraphs(inline(pieces, role: role))] }
         var out: [AnswerBlock] = []
         for (intent, group) in groups(pieces, depth: depth) {
             switch intent?.kind {
             case .header(let level)?:
                 out.append(.heading(level: level, text: inline(group, role: .heading(level: level))))
             case .orderedList?:
-                out.append(.list(list(group, depth: depth, ordered: true, listDepth: listDepth)))
+                out.append(.list(list(group, depth: depth, ordered: true, listDepth: listDepth, level: level)))
             case .unorderedList?:
-                out.append(.list(list(group, depth: depth, ordered: false, listDepth: listDepth)))
+                out.append(.list(list(group, depth: depth, ordered: false, listDepth: listDepth, level: level)))
             case .blockQuote?:
-                out.append(.quote(build(group, depth: depth + 1, listDepth: listDepth, role: .quote)))
+                out.append(.quote(build(group, depth: depth + 1, listDepth: listDepth, level: level + 1, role: .quote)))
             case .codeBlock(let hint)?:
                 out.append(code(group, hint: hint))
             case .thematicBreak?:
@@ -313,12 +334,12 @@ struct BlockBuilder {
         return s
     }
 
-    private func list(_ group: ArraySlice<Piece>, depth: Int, ordered: Bool, listDepth: Int) -> ListModel {
+    private func list(_ group: ArraySlice<Piece>, depth: Int, ordered: Bool, listDepth: Int, level: Int) -> ListModel {
         var items: [ListItem] = []
         for (intent, itemGroup) in groups(group, depth: depth + 1) {
             var ordinal = items.count + 1
             if case .listItem(let o)? = intent?.kind { ordinal = o }
-            var content = build(itemGroup, depth: depth + 2, listDepth: listDepth + 1, role: .listItem)
+            var content = build(itemGroup, depth: depth + 2, listDepth: listDepth + 1, level: level + 1, role: .listItem)
             var check: ListItem.Check?
             if case .paragraphs(var s)? = content.first {
                 let text = String(s.characters)
@@ -339,9 +360,11 @@ struct BlockBuilder {
         var text = group.map { String($0.text.characters) }.joined()
         if text.hasSuffix("\n") { text.removeLast() }
         let words = (hint ?? "").split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        let language = words.first.map(String.init)
+        // An info string that is only `path:line` has no language.
+        let firstIsReference = words.first.map { !FileReferences.find(in: String($0), root: root).isEmpty } ?? false
+        let language = firstIsReference ? nil : words.first.map(String.init)
         if language == "math" { return .math(text) }
-        let rest = words.count > 1 ? String(words[1]) : ""
+        let rest = firstIsReference ? (hint ?? "") : (words.count > 1 ? String(words[1]) : "")
         let reference = FileReferences.find(in: rest, root: root).first?.reference
         let lines = text.isEmpty ? 0 : text.split(separator: "\n", omittingEmptySubsequences: false).count
         return .code(CodeModel(language: language, text: text, isOpen: false, lineCount: lines, reference: reference))

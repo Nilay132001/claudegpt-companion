@@ -165,4 +165,42 @@ func describe(_ b: AnswerBlock) -> String {
         #expect(TextScale.factor(.xxxLarge) == 1.3)
         #expect(TextScale.factor(.accessibility) == 1.4)
     }
+
+    @Test func absurdNestingIsCappedAndKeepsItsText() {
+        let quote = ReplyMarkdown.blocks(String(repeating: "> ", count: 5000) + "deep text", root: nil)
+        #expect(ReplyMarkdown.plainText(quote).contains("deep text"))
+        var list = ""
+        for i in 0..<5000 { list += String(repeating: "  ", count: i) + "- item\n" }
+        let blocks = ReplyMarkdown.blocks(list + String(repeating: "  ", count: 5000) + "- bottom", root: nil)
+        #expect(ReplyMarkdown.plainText(blocks).contains("bottom"))
+    }
+
+    @Test func anOpenFenceInsideAListOrQuoteMarksTheChunkOpen() {
+        for md in ["- item\n  ```ts\n  let x", "> ```\n> code"] {
+            let chunk = ReplyMarkdown.chunks(md).last!
+            #expect(chunk.isOpen)
+            let r = ReplyMarkdown.renderChunk(chunk, root: nil, style: ReplyMarkdown.noStyle)
+            func hasOpen(_ b: AnswerBlock) -> Bool {
+                switch b {
+                case .code(let c): c.isOpen
+                case .quote(let bs): bs.contains(where: hasOpen)
+                case .list(let l): l.items.flatMap(\.content).contains(where: hasOpen)
+                default: false
+                }
+            }
+            #expect(r.blocks.contains(where: hasOpen), "\(md)")
+        }
+    }
+
+    @Test func mathClosersAgreeBetweenChunksAndPreprocess() {
+        // `\[` closes on `\]` only: a `$$` line inside stays math content, and the chunk ends at `\]`.
+        #expect(ReplyMarkdown.chunks("\\[\n$$\nx\n\\]\n\nAfter").map(\.text) == ["\\[\n$$\nx\n\\]", "After"])
+        #expect(d("\\[\n$$\nx\n\\]\n\nAfter") == ["math:$$\nx", "p:After"])
+    }
+
+    @Test func aPathOnlyInfoStringGivesTheReferenceWithoutALanguage() {
+        guard case .code(let c) = ReplyMarkdown.blocks("```src/a.ts:12\nx\n```", root: "/r").first else { Issue.record(); return }
+        #expect(c.language == nil)
+        #expect(c.reference == FileReference(path: "/r/src/a.ts", line: 12))
+    }
 }
