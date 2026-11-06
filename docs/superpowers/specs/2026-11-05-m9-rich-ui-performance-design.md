@@ -427,3 +427,99 @@ real released bundle on the owner's Mac. Unit tests alone do not count.
 8. `ChartSpec` validation, `ChartBlock` with the text equivalent and audio graph, and chart and table speech.
 9. `instructions.ts` tone and chart wording, with tests.
 10. Final measurements (§8), screenshots at the four widths, a manual real-bundle pass, and the PR through review.
+
+## 11. Results (after)
+
+**Conditions.**
+- Build: release-optimised with the DEBUG harness (`swift build -c release -Xswiftc -DDEBUG`). Base is 7212a86, the
+  §2 starting point. Final is af5d7bf, which is e0ef888 plus a harness-only probe.
+- Machine and panel: the same Mac at 120 Hz (8.33 ms display period), panel 449 pt. This time the panel opened on the
+  external display at scale 1.
+- Plain drivers: overlay scrollers are forced and the driver moves the clip view, as in §2. Display awake and screen
+  unlocked for every run (checked before and after each run), with `caffeinate -dimsu`.
+- Runs: base and final runs were interleaved, 3 each per scenario. Values are medians, with the three runs in
+  parentheses. `stream` was noisy (p95 8.3, 16.7, 14.4), so it ran twice more: five runs, median given.
+- Base here is re-measured, so its footprint (about 1,068 MB) is lower than §2's 4,221 MB. Base rasterisation at load
+  is not deterministic. §2 stays as the original baseline.
+
+| Scenario (trace prefix) | Base: frame p50 / p95 ms, late frames | After: frame p50 / p95 ms, late frames | Main thread busy, base → after |
+|---|---|---|---|
+| 200 turns, scroll (`long-scroll`) | 16.7 / 22.7, 494 of 622 | **8.3 / 8.3**, 13 of 1137 (15, 13, 13) | — |
+| 200 turns + streaming, still (`stream`) | 81.8 / 117.2, 125 of 125 | **8.3 / 8.3** (p95 8.3, 16.7, 14.4, 8.3, 8.3), 31 of 1164 | 99.5 / 99.6% → **15.3 / 15.1%** (`final-stream-tp-1/2`) |
+| 200 turns + streaming, scrolling (`stream-scroll`) | 90.1 / 134.9, 111 of 117 | **8.3 / 8.3**, 14 of 1140 | 99.5 / 99.6% → **32.6 / 32.0%** (`final-stream-scroll-tp-1/2`) |
+| Switch sessions, 200 turns (`switch-long`) | sync 7,945 ms, to next frame 8,031 ms | sync **76.8 ms** (76.8, 75.4, 77.3), to next frame 87.8 ms | — |
+| Resize 600↔300 pt, 200 turns (`resize-long`) | 1,426 / 1,493, `setFrame` 62.4 ms | **17.2 / 25.9** (p50 16.7, 17.2, 17.5), `setFrame` 0.8 ms | — |
+| Footprint after load, 200 turns (idle) | 1,067.9 MB | **64.4 MB** (64.4, 64.6, 64.1) | — |
+| Time to first stable layout, 200 turns (`long-scroll`) | 6,788 ms | **566 ms** (594, 541, 566) | — |
+| Read Aloud toggling while scrolling (`readaloud`) | no driver at base | 8.3 / 24.5, 114 of 1007; 33 toggles, 23 settled answer bodies, 0 jumps | — |
+
+Time Profiler traces are kept in `<scratch>/perf/traces-final/` and are not committed. Base busy comes from
+`stream-tp-1/2` (§2) and `base-stream-scroll-tp-1/2` (the Task 4b window).
+
+**Targets (§8).**
+
+| Metric | Target | After | |
+|---|---|---|---|
+| Scroll frame p50 / p95 | ≤ 8.4 / ≤ 12 ms | 8.3 / 8.3 | met |
+| Late frames while scrolling | ≤ 2% | 1.1% (13 of 1137) | met |
+| Stream p95, still / scrolling | ≤ 17 ms | 8.3 / 8.3 (worst single run 16.7) | met |
+| Main thread busy while streaming | ≤ 15% | 15.3 / 15.1% | **missed by 0.1–0.3 points** |
+| Session switch | ≤ 100 ms | 76.8 ms sync, 87.8 ms to the next frame | met |
+| Resize frame p50 | ≤ 17 ms | 17.2 ms (16.7, 17.2, 17.5) | **missed by 0.2 ms** |
+| Footprint after load | ≤ 200 MB | 64.4 MB | met |
+| Time to first stable layout | ≤ 0.5 s | 566 ms (594, 541, 566; idle runs 573, 578, 538) | **missed by 66 ms** |
+| Yanks when reading above the bottom | 0 | 0 in every scroll, stream-scroll and readaloud run (`yanksWhileReading`, `pullbacks`) | met |
+
+**Other counters (after).**
+- `stream`: 10 render-cache misses per run (the streamed answer's closed chunks).
+- `stream-scroll`: 3 non-driver moves per run, all lazy-layout height corrections that kept the content in place.
+  Base had 46, 57 and 62.
+- `switch-long`: 283 cache misses per run, from rendering the other session's restored answers off the main thread.
+- Read Aloud A/B: Task 9's binary and the final binary, 3 interleaved runs each, gave the same result: p95 24.6
+  against 24.7 ms, 21 settled answer bodies for 31–32 toggles. The final code did not regress it.
+- Read Aloud is not comparable with runs before Task 9: from Task 9 on, the driver scrolls inside a live scroll, so
+  SwiftUI's stale-offset write-backs (+3,068 pt) are gone.
+- Table-heavy scroll (`perf-table`, 2 runs): 372893a gave 26 and 31 late frames, 925 and 954 lateMs. Final gave 29 and
+  27 late frames, 971 and 934 lateMs, with an end footprint of 116 MB both times. Equal.
+- Chart-heavy scroll (`perf-chart`, Task 9): 34 late frames of about 1,120, footprint 152 MB after load.
+
+**Legacy scroll bars and the mouse wheel.** The owner uses a Bluetooth mouse, so their Mac shows legacy scroll bars.
+These runs used `COMPANION_PERF_SCROLLERS=system` and `COMPANION_PERF_INPUT=wheel`: discrete wheel notches delivered
+through the window.
+- `position`, perf-long, 3 runs: the same first visible line after a switch, after rapid switches and after a past
+  chat in 2 of 3 runs. In the third run the turn was right after the rapid switches and the past chat, but the
+  viewport sat 34 pt higher in it.
+- `position`, perf-stream (still streaming), 2 runs: the same line every time.
+- Reader trip (wheel down right after coming back): 0 pulls in 4 of 5 runs, and 1 move of 34 pt in the run above. 0
+  moves after the reader stopped.
+- `stream-scroll`, 2 runs: p50 / p95 8.3 / 8.3 ms, 22 and 25 late frames, 0 `yanksWhileReading`, 0 pullbacks.
+
+**What was not measured.**
+- The SwiftUI hitches template, which under-reports here (§1).
+- Time Profiler for the non-streaming scenarios.
+- Any run with a real person's input. The manual checks are in `docs/superpowers/m9-checklist.md`.
+
+**Screenshots.** `docs/screenshots/m9/` has the following, all synthetic demo content, from a debug build:
+- after: `rich-top-*`, `rich-bottom-*` and `long-*` at 300, 360, 449 and 600 pt, light and dark;
+- before (db5c26b): `before-long-*`.
+
+Every after shot of the rich, rich-tables, rich-charts, chat, context, status and history scenes was reviewed. No
+clipping, overlap or horizontal overflow was found outside the code and table scrollers. Two demo defects remain:
+- `rich-top` does not show the top. At 360–600 pt it shows the same bottom view as `rich-bottom`.
+- At 300 pt, `rich` with the top anchor shows an empty chat. Light, dark and long names all do this, in 3 of 3
+  attempts, at 3 s and 6 s. `rich-bottom` at 300 pt renders. The real app always opens at the bottom (or at a
+  restored anchor with following off), so this combination of top anchor and following is demo-only. Its cause is not
+  established.
+
+### Rulings during implementation
+
+- **Following the stream.** Any upward scroll stops following at once, whatever the distance. Following re-arms only
+  when the reader is back at the bottom, by scrolling there or with Jump to latest (⌘↓).
+- **Live resize.** Text selection is off while the panel is being live-resized, and comes back when the drag ends.
+  Selection overlays were the per-frame cost of a resize.
+- **Restoring a reading position.** The restore is a single anchored scroll to the saved turn and its offset. It is not
+  repeated corrections, and it ends on Jump, on a new turn or on a timer, so it never pulls back a reader who has
+  started scrolling.
+- **Pie charts** have at most 8 slices. A spec with more is invalid: it is shown as its code block, with the reason.
+- **Tables** use one of three layouts: a grid when the columns fit, side scroll when they do not, and stacked rows at
+  narrow widths. The layout is chosen inside a custom `Layout`, with one tier of hysteresis.
