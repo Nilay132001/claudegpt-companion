@@ -405,6 +405,8 @@ struct TurnView: View {
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        // The hovered turn's overlaid actions row hangs below its bounds: keep it above the next turn's hit shape.
+        .zIndex(hovering ? 1 : 0)
     }
 }
 

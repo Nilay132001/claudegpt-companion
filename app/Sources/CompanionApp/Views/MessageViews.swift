@@ -1,4 +1,5 @@
 import CompanionCore
+import AppKit
 import SwiftUI
 
 /// The user's question: a soft neutral bubble on the trailing side, at most 80 % of the column, selectable.
@@ -42,6 +43,8 @@ struct AnswerView: View {
     var rowHovered = false
     /// The pointer is on the overlaid actions row itself (it sits just outside the turn's own bounds).
     @State private var overlayHovered = false
+    /// The Copy menu is open: the pointer is in the menu, not on the row, but the row stays until it closes.
+    @State private var menuOpen = false
     private static let overlayRowHeight: CGFloat = 22
 
     var body: some View {
@@ -71,13 +74,22 @@ struct AnswerView: View {
         // (the gap to the next turn is the plain turn gap) and revealing it never moves a line.
         .overlay(alignment: .bottomLeading) {
             if !isLatest && !message.isRunning && !message.text.isEmpty {
-                let shown = rowHovered || overlayHovered || speech.phase != .idle
+                let shown = rowHovered || overlayHovered || menuOpen || speech.phase != .idle
                 actionsRow(message, phase: speech.phase)
                     .opacity(shown ? 1 : 0)
+                    .animation(Design.Motion.quick, value: shown)
                     .allowsHitTesting(shown)
                     .accessibilityHidden(!shown)
                     .onHover { overlayHovered = $0 }
-                    .offset(y: Self.overlayRowHeight - 2)
+                    .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+                        if overlayHovered { menuOpen = true }
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                        menuOpen = false
+                    }
+                    // The in-layout row of the latest answer sits 2 pt below the last block (8 pt stack gap minus the
+                    // 6 pt pull-up); the overlay's bottom edge is the last block's, so its row starts at +height+2.
+                    .offset(y: Self.overlayRowHeight + 2)
             }
         }
         // No contextMenu here: right-click on selected text keeps the system menu (Copy, Look Up, Share).
@@ -90,6 +102,9 @@ struct AnswerView: View {
             readAloud.toggle(id: message.id, markdown: message.text)
         }
         .accessibilityActions {
+            if speech.phase != .idle {
+                Button("Stop reading") { readAloud.stop() }
+            }
             if message.retry != nil && !readOnly {
                 Button("Send again") { Task { await app.sendAgain(message) } }
             }
@@ -170,7 +185,6 @@ struct AnswerView: View {
         .font(.callout)
         .foregroundStyle(.secondary)
         .frame(height: Self.overlayRowHeight)
-        .animation(Design.Motion.quick, value: rowHovered)
     }
 
     private func actions(_ message: ChatMessage, phase: SpeechPhase, time: Bool, badgeText: Bool) -> some View {
