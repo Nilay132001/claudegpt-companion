@@ -1,0 +1,1 @@
+{"version":1,"type":"bar","title":"Open issues by area","units":"issues","x":{"label":"Area"},"y":{"label":"Open issues"},"series":[{"name":"Open","points":[{"label":"Daemon","value":12},{"label":"App","value":7}]}],"source":"jira_search results for project CGC, read just now"}

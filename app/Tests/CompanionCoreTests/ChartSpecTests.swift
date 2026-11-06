@@ -166,4 +166,15 @@ import Testing
         else { Issue.record("not an invalid chart"); return }
         #expect(code.language == "companion-chart" && code.text == "{\"version\":2}" && code.lineCount == 1 && !code.isOpen)
     }
+
+    /// The example in companiond's GPT instructions (companiond/test/fixtures); a Node test pins that the instructions
+    /// carry exactly this text, so GPT is shown a spec this validator accepts.
+    @Test func theExampleInTheGPTInstructionsIsValid() throws {
+        var dir = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { dir.deleteLastPathComponent() }   // CompanionCoreTests, Tests, app, repo root
+        let url = dir.appendingPathComponent("companiond/test/fixtures/companion-chart-example.json")
+        let json = try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard case .success(let spec) = ChartSpec.parse(json) else { Issue.record("the instructions example is refused"); return }
+        #expect(spec.kind == .bar && spec.series.count == 1 && !spec.source.isEmpty)
+    }
 }
