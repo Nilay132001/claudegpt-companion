@@ -8,6 +8,7 @@ struct ListBlock: View {
     let list: ListModel
     let root: String?
     let depth: Int
+    let path: String
 
     var body: some View {
         let scale = Design.Typography.scale(typeSize)
@@ -18,7 +19,7 @@ struct ListBlock: View {
                 let item = list.items[i]
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     marker(item, column: column, scale: scale)
-                    NestedBlocks(blocks: item.content, root: root, listDepth: depth + 1, inListItem: true)
+                    NestedBlocks(blocks: item.content, root: root, listDepth: depth + 1, path: path + ".\(i)", inListItem: true)
                 }
             }
         }

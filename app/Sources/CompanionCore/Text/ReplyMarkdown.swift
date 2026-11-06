@@ -71,7 +71,7 @@ public enum ReplyMarkdown {
         case .rule: return "—"
         case .math(let m): return m
         case .chart(.valid(let spec)): return spec.plainText
-        case .chart(.invalid(let json, _)): return json
+        case .chart(.invalid(let code, _)): return code.text
         }
     }
 
@@ -201,7 +201,7 @@ extension ReplyMarkdown {
             case .code(let c) where c.language == chartLanguage && !c.isOpen:
                 switch ChartSpec.parse(c.text) {
                 case .success(let spec): return .chart(.valid(spec))
-                case .failure(let e): return .chart(.invalid(json: c.text, reason: e.reason))
+                case .failure(let e): return .chart(.invalid(code: c, reason: e.reason))
                 }
             case .quote(let inner): return .quote(charts(inner))
             case .list(var l):

@@ -38,7 +38,7 @@ import Testing
         #expect(reason(with(#""value":4.2"#, #""value":"4.2""#)) == "value 1 is not a number")
         #expect(reason(with(#""value":4.2"#, #""value":true"#)) == "value 1 is not a number")
         #expect(reason(with(#""value":4.2"#, #""value":1e13"#)) == "value 1 is too large")
-        #expect(reason(with(#""value":4.2"#, #""value":1e400"#)) != nil)
+        #expect(reason(with(#""value":4.2"#, #""value":1e400"#)) == "the data is not valid JSON")
         #expect(reason(with(#""value":4.2"#, "NaN")) == "the data is not valid JSON")
         #expect(reason(with(#""label":"csv""#, #""label":"parser""#)) == "label \"parser\" appears twice in series 1")
         #expect(reason(with(#""label":"csv","#, "")) != nil)                       // a point without a label
@@ -92,5 +92,78 @@ import Testing
         let streaming = ReplyMarkdown.chunks("```companion-chart\n{\"ver").last!
         #expect(ReplyMarkdown.renderChunk(streaming, root: nil, style: ReplyMarkdown.noStyle).blocks.map(describe)
                 == ["code(companion-chart,open):{\"ver"])
+    }
+
+    static let twoSeries = #"[{"name":"main","points":[{"label":"parser","value":4.2},{"label":"csv","value":1.9}]}]"#
+    func series(_ json: String) -> String { with(Self.twoSeries, json) }
+
+    @Test func seriesNamesAreUnique() {
+        let dup = #"[{"name":"main","points":[{"label":"a","value":1}]},{"name":"main ","points":[{"label":"a","value":2}]}]"#
+        #expect(reason(series(dup)) == "series name \"main \" appears twice")
+    }
+
+    @Test func labelsAreTrimmedBeforeTheDuplicateCheck() {
+        #expect(reason(with(#""label":"csv""#, #""label":" parser""#)) == "label \" parser\" appears twice in series 1")
+    }
+
+    @Test func controlAndDirectionCharactersAreRefused() {
+        #expect(reason(with(#""title":"Test runtime by package""#, #""title":"a\u0007b""#)) == "title has a control or text-direction character")
+        #expect(reason(with(#""label":"csv""#, #""label":"c‮sv""#)) == "point 2 label has a control or text-direction character")
+        #expect(reason(with(#""units":"s""#, #""units":"⁦s""#)) == "units has a control or text-direction character")
+        #expect(reason(with(#""name":"main""#, #""name":"ma\nin""#)) == "series 1 name has a control or text-direction character")
+        #expect(reason(with(#""label":"Package""#, #""label":"Pack\u0085age""#)) == "x label has a control or text-direction character")
+        // One character, many scalars (combining marks): capped at 4 × the limit.
+        let zalgo = "a" + String(repeating: "\u{0301}", count: 400)
+        #expect(reason(with(#""title":"Test runtime by package""#, "\"title\":\"\(zalgo)\"")) == "title must be 1–80 characters")
+    }
+
+    @Test func pieChartsHaveAtMostEightPoints() {
+        let pts = (1...9).map { #"{"label":"p\#($0)","value":1}"# }.joined(separator: ",")
+        let pie = with(#""type":"bar""#, #""type":"pie""#)
+        #expect(reason(pie.replacingOccurrences(of: #"[{"label":"parser","value":4.2},{"label":"csv","value":1.9}]"#, with: "[\(pts)]"))
+                == "a pie chart needs 1–8 points")
+        let eight = (1...8).map { #"{"label":"p\#($0)","value":1}"# }.joined(separator: ",")
+        #expect(reason(pie.replacingOccurrences(of: #"[{"label":"parser","value":4.2},{"label":"csv","value":1.9}]"#, with: "[\(eight)]")) == nil)
+    }
+
+    @Test func smallValuesKeepTwoSignificantDigitsAndThereIsNoMinusZero() {
+        #expect(ChartSpec.format(0.004) == "0.004")
+        #expect(ChartSpec.format(0.0043) == "0.0043")
+        #expect(ChartSpec.format(-0.001) == "-0.001")
+        #expect(ChartSpec.format(0.05) == "0.05")
+        #expect(ChartSpec.format(1e-9) == "1e-09")
+        #expect(ChartSpec.format(-0.0) == "0")
+        #expect(ChartSpec.format(-0.0000000001) != "-0")
+        #expect(ChartSpec.format(2.999) == "3")
+    }
+
+    @Test func longChartsAreSummarisedNotListed() throws {
+        let days = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+        let pts = (0..<60).map { i in #"{"label":"\#(days[i % 5])\#(i / 5 == 11 && i % 5 == 4 ? "" : "\(i)")","value":\#(i == 59 ? 6.1 : i == 0 ? 7.9 : 7.0)}"# }
+        let json = #"{"version":1,"type":"line","title":"Suite time","units":"s","series":[{"name":"suite","points":[\#(pts.joined(separator: ","))]}],"source":"x"}"#
+        let s = try ChartSpec.parse(json).get()
+        #expect(s.spokenSummary == "Line chart, Suite time: 60 points from Mon0 to Fri; lowest 6.1 seconds on Fri, highest 7.9 seconds on Mon0, last 6.1 seconds.")
+        #expect(s.spokenSummary.count < 200)
+        #expect(s.plainText.split(separator: "\n").count == 61)
+    }
+
+    @Test func categoriesAreTheOrderedUnionOfLabels() throws {
+        let s = try ChartSpec.parse(series(#"[{"name":"a","points":[{"label":"x","value":1},{"label":"y","value":2}]},{"name":"b","points":[{"label":"z","value":1},{"label":"x","value":2}]}]"#)).get()
+        #expect(s.categories == ["x", "y", "z"])
+    }
+
+    @Test func deepNestingIsRefusedBeforeDecoding() async {
+        #expect(reason(String(repeating: "[", count: 7) + String(repeating: "]", count: 7)) == "the data is nested too deeply")
+        #expect(ChartSpec.nestingDepth(#"{"a":"[[[[[[[[[[","b":"\"[["}"#) == 1)
+        let blocks = await Task.detached {
+            ReplyMarkdown.blocks("```companion-chart\n" + String(repeating: "[", count: 4000) + "\n```", root: nil).map(describe)
+        }.value
+        #expect(blocks == ["chart-invalid:the data is nested too deeply"])
+    }
+
+    @Test func anInvalidChartKeepsTheParsersCodeModel() {
+        guard case .chart(.invalid(let code, _))? = ReplyMarkdown.blocks("```companion-chart\n{\"version\":2}\n```", root: nil).first
+        else { Issue.record("not an invalid chart"); return }
+        #expect(code.language == "companion-chart" && code.text == "{\"version\":2}" && code.lineCount == 1 && !code.isOpen)
     }
 }

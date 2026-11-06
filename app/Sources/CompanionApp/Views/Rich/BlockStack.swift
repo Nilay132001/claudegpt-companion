@@ -7,6 +7,8 @@ struct BlockStack: View {
     @Environment(AppModel.self) private var model
     let answer: RenderedAnswer
     let root: String?
+    /// The answer's chart disclosure state (its MessageModel's), if any.
+    var charts: ChartDisclosures? = nil
 
     var body: some View {
         #if DEBUG
@@ -15,11 +17,12 @@ struct BlockStack: View {
         VStack(alignment: .leading, spacing: 0) {
             // The enumeration only looks up the previous block; the id is the BlockID.
             ForEach(Array(answer.blocks.enumerated()), id: \.element.id) { i, b in
-                BlockView(block: b.block, root: root, listDepth: 0)
+                BlockView(block: b.block, root: root, listDepth: 0, path: "\(b.id.chunk).\(b.id.index)")
                     .padding(.top, BlockSpacing.gap(before: b.block, after: i > 0 ? answer.blocks[i - 1].block : nil))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .environment(charts)
         .environment(\.openURL, OpenURLAction { url in
             // Checked again here: the root may have changed since the reply was rendered.
             guard let ref = EditorLink.parseCompanionURL(url), let root,
@@ -35,19 +38,21 @@ struct BlockView: View {
     let block: AnswerBlock
     let root: String?
     let listDepth: Int
+    /// Where the block sits in the answer (chart disclosure key).
+    let path: String
 
     var body: some View {
         switch block {
         case .paragraphs(let t): ProseBlock(text: t)
         case .heading(let level, let t): HeadingBlock(level: level, text: t)
-        case .list(let l): ListBlock(list: l, root: root, depth: listDepth)
-        case .quote(let bs): QuoteBlock(blocks: bs, root: root)
+        case .list(let l): ListBlock(list: l, root: root, depth: listDepth, path: path)
+        case .quote(let bs): QuoteBlock(blocks: bs, root: root, path: path)
         case .code(let c): CodeBlock(model: c, root: root)
         case .table(let t): TableBlock(table: t)
         case .rule: RuleBlock()
         case .math(let m): MathBlock(text: m)
-        case .chart(.valid(let s)): ChartBlock(spec: s)
-        case .chart(.invalid(let json, let why)): InvalidChartBlock(json: json, reason: why)
+        case .chart(.valid(let s)): ChartBlock(spec: s, path: path)
+        case .chart(.invalid(let code, let why)): InvalidChartBlock(code: code, reason: why)
         }
     }
 }
@@ -57,6 +62,7 @@ struct NestedBlocks: View {
     let blocks: [AnswerBlock]
     let root: String?
     let listDepth: Int
+    let path: String
     /// Inside a list item: a nested list follows its item's text at the list item gap, not the paragraph gap.
     var inListItem = false
 
@@ -71,7 +77,7 @@ struct NestedBlocks: View {
             // Nested blocks have no BlockID; their order inside a closed chunk never changes, and an open chunk only
             // appends, so the index is a stable identity here.
             ForEach(blocks.indices, id: \.self) { i in
-                BlockView(block: blocks[i], root: root, listDepth: listDepth)
+                BlockView(block: blocks[i], root: root, listDepth: listDepth, path: path + ".\(i)")
                     .padding(.top, gap(i))
             }
         }

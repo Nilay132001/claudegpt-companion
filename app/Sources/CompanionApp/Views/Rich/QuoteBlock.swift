@@ -6,6 +6,7 @@ struct QuoteBlock: View {
     @Environment(\.colorSchemeContrast) private var contrast
     let blocks: [AnswerBlock]
     let root: String?
+    let path: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -13,7 +14,7 @@ struct QuoteBlock: View {
                 .fill(contrast == .increased ? AnyShapeStyle(.secondary) : AnyShapeStyle(.secondary.opacity(0.5)))
                 .frame(width: contrast == .increased ? 3 : 2)
                 .accessibilityHidden(true)
-            NestedBlocks(blocks: blocks, root: root, listDepth: 0)
+            NestedBlocks(blocks: blocks, root: root, listDepth: 0, path: path)
                 .foregroundStyle(.secondary)
         }
         .fixedSize(horizontal: false, vertical: true)

@@ -17,6 +17,8 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
     /// The root `rendered` was made with, and the one a view renders with when `rendered` is nil: the feed's root.
     /// `path:line` links resolve against it, so a render made with another root is never kept (M9 §5.3).
     public private(set) var root: String?
+    /// The answer's open chart Data disclosures: outside the lazy row, so they survive the row being recycled.
+    @ObservationIgnored public let chartDisclosures = ChartDisclosures()
 
     init(_ message: ChatMessage, root: String?, rendered: RenderedAnswer?) {
         id = message.id
@@ -32,6 +34,15 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
     }
 
     func setRendered(_ r: RenderedAnswer) { if rendered != r { rendered = r } }
+}
+
+/// Which chart Data disclosures of one answer are open, by block path ("chunk.index", then ".i" per nesting level).
+/// A key is set when its chart first appears (open only if VoiceOver ran then) and when the reader toggles it.
+@MainActor @Observable public final class ChartDisclosures {
+    private var open: [String: Bool] = [:]
+    public init() {}
+    public func isOpen(_ key: String) -> Bool? { open[key] }
+    public func set(_ key: String, open value: Bool) { if open[key] != value { open[key] = value } }
 }
 
 /// A session's chat as the views see it. Mirrors `Conversation.messages`; views read only `turns` and the models.

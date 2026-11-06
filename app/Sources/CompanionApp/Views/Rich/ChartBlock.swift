@@ -2,17 +2,30 @@ import Charts
 import CompanionCore
 import SwiftUI
 
-/// A validated `companion-chart` block (M9 §6): title, the chart at a fixed height (so the turn's height is known
-/// from the first frame), a Data disclosure with every value as text, and the source line. Every string from the
-/// spec is shown verbatim; VoiceOver gets the spoken summary and an audio graph.
+/// A validated `companion-chart` block (M9 §6): title, the chart at a fixed per-kind height (so the turn's height is
+/// known from the first frame), a Data disclosure with every value as text, and the source line. Every string from
+/// the spec is shown verbatim; VoiceOver gets the spoken summary and an audio graph.
 struct ChartBlock: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// The answer's disclosure state (outside the lazy row); nil outside an answer, then `localOpen` is used.
+    @Environment(ChartDisclosures.self) private var disclosures: ChartDisclosures?
     let spec: ChartSpec
-    /// nil until the reader opens or closes it: then it starts open only while VoiceOver runs.
-    @State private var showData: Bool?
+    /// Where the block sits in the answer: its disclosure key.
+    let path: String
+    @State private var localOpen: Bool?
 
-    static let plotHeight: CGFloat = 220
+    /// Constant per kind; metric tiles take their own height.
+    static func plotHeight(_ kind: ChartSpec.Kind) -> CGFloat? {
+        switch kind {
+        case .bar, .line: 200
+        case .pie: 150
+        case .metric: nil
+        }
+    }
+
+    /// Open by default only if VoiceOver ran when the block first appeared; a later VoiceOver toggle opens nothing.
+    private var isOpen: Bool { disclosures?.isOpen(path) ?? localOpen ?? voiceOver }
 
     var body: some View {
         let scale = Design.Typography.scale(typeSize)
@@ -20,9 +33,9 @@ struct ChartBlock: View {
             Text(verbatim: spec.title).font(.headline)
             chart
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: spec.kind == .metric ? nil : Self.plotHeight)
+                .frame(height: Self.plotHeight(spec.kind))
                 .accessibilityChartDescriptor(ChartDescriptor(spec: spec))
-            DisclosureGroup(isExpanded: Binding(get: { showData ?? voiceOver }, set: { showData = $0 })) {
+            DisclosureGroup(isExpanded: Binding(get: { isOpen }, set: { setOpen($0) })) {
                 dataTable(size: Design.Typography.tableCell * scale)
                     .padding(.top, Design.Space.xs)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -35,12 +48,12 @@ struct ChartBlock: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Records the first-appearance default (the value already shown, so nothing moves).
+        .onAppear { if disclosures?.isOpen(path) == nil && localOpen == nil { setOpen(isOpen) } }
     }
 
-    /// " s", "%" (no space before a percent sign), or nothing.
-    private var unitSuffix: String {
-        guard let u = spec.units, !u.isEmpty else { return "" }
-        return u == "%" ? u : " " + u
+    private func setOpen(_ open: Bool) {
+        if let disclosures { disclosures.set(path, open: open) } else { localOpen = open }
     }
 
     private var xName: String { spec.xLabel ?? "Label" }
@@ -59,7 +72,7 @@ struct ChartBlock: View {
                 }
             }
             .chartLegend(spec.series.count > 1 ? .visible : .hidden)
-            .modifier(AxisLabels(spec: spec))
+            .modifier(Axes(spec: spec))
         case .line:
             Chart {
                 ForEach(spec.series, id: \.name) { s in
@@ -71,8 +84,10 @@ struct ChartBlock: View {
                     }
                 }
             }
+            // A line shows change: its scale fits the values (bars keep zero).
+            .chartYScale(domain: .automatic(includesZero: false))
             .chartLegend(spec.series.count > 1 ? .visible : .hidden)
-            .modifier(AxisLabels(spec: spec))
+            .modifier(Axes(spec: spec))
         case .pie:
             Chart(spec.series[0].points, id: \.label) { p in
                 SectorMark(angle: .value("Value", p.value), innerRadius: .ratio(0.5), angularInset: 1)
@@ -90,18 +105,21 @@ struct ChartBlock: View {
     @ViewBuilder private var metricTiles: some View {
         ForEach(spec.series[0].points, id: \.label) { p in
             VStack(alignment: .leading, spacing: 2) {
-                Text(verbatim: ChartSpec.format(p.value) + unitSuffix)
+                Text(verbatim: ChartSpec.format(p.value) + spec.unitSuffix)
                     .font(.title2.weight(.semibold))
                     .monospacedDigit()
-                Text(verbatim: p.label).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                Text(verbatim: p.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize()
         }
     }
 
     private func dataTable(size: CGFloat) -> some View {
-        let unit = unitSuffix
-        return Grid(alignment: .leading, horizontalSpacing: Design.Space.m, verticalSpacing: 3) {
+        Grid(alignment: .leading, horizontalSpacing: Design.Space.m, verticalSpacing: 3) {
             ForEach(spec.series, id: \.name) { s in
                 if spec.series.count > 1 {
                     GridRow {
@@ -111,7 +129,7 @@ struct ChartBlock: View {
                 ForEach(s.points, id: \.label) { p in
                     GridRow {
                         Text(verbatim: p.label)
-                        Text(verbatim: ChartSpec.format(p.value) + unit)
+                        Text(verbatim: ChartSpec.format(p.value) + spec.unitSuffix)
                             .monospacedDigit()
                             .gridColumnAlignment(.trailing)
                     }
@@ -123,35 +141,43 @@ struct ChartBlock: View {
     }
 }
 
-/// Axis titles from the spec (with the units on the value axis), only when it has them.
-private struct AxisLabels: ViewModifier {
+/// Value ticks carry the units; axis titles only from the spec's own labels (never the units alone). The y title sits
+/// above the plot, unrotated.
+private struct Axes: ViewModifier {
     let spec: ChartSpec
     func body(content: Content) -> some View {
-        let y = [spec.yLabel, spec.units.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
         content
+            .chartYAxis {
+                AxisMarks { v in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel {
+                        if let d = v.as(Double.self) { Text(verbatim: ChartSpec.format(d) + spec.unitSuffix) }
+                    }
+                }
+            }
             .chartXAxisLabel(position: .bottom, alignment: .center) {
                 if let x = spec.xLabel { Text(verbatim: x) }
             }
-            .chartYAxisLabel(position: .leading, alignment: .center) {
-                if !y.isEmpty { Text(verbatim: y) }
+            .chartYAxisLabel(position: .top, alignment: .leading) {
+                if let y = spec.yLabel { Text(verbatim: y) }
             }
     }
 }
 
-/// The audio graph and VoiceOver summary of a chart, from the validated spec.
+/// The audio graph and VoiceOver summary of a chart, from the validated spec (all values, not the short summary).
 struct ChartDescriptor: AXChartDescriptorRepresentable {
     let spec: ChartSpec
 
     func makeChartDescriptor() -> AXChartDescriptor {
         let values = spec.series.flatMap { $0.points.map(\.value) }
-        let lo = min(0, values.min() ?? 0)
+        // The line's scale fits its values; the others include zero, as drawn.
+        let lo = spec.kind == .line ? (values.min() ?? 0) : min(0, values.min() ?? 0)
         var hi = values.max() ?? 1
         if hi <= lo { hi = lo + 1 }
-        let unit = spec.units.map { " " + $0 } ?? ""
-        let x = AXCategoricalDataAxisDescriptor(title: spec.xLabel ?? "Label",
-                                                categoryOrder: spec.series[0].points.map(\.label))
+        let x = AXCategoricalDataAxisDescriptor(title: spec.xLabel ?? "Label", categoryOrder: spec.categories)
         let y = AXNumericDataAxisDescriptor(title: spec.yLabel ?? "Value", range: lo...hi, gridlinePositions: []) {
-            ChartSpec.format($0) + unit
+            ChartSpec.format($0) + spec.unitSuffix
         }
         let series = spec.series.map { s in
             AXDataSeriesDescriptor(name: s.name, isContinuous: spec.kind == .line,
@@ -162,17 +188,14 @@ struct ChartDescriptor: AXChartDescriptorRepresentable {
     }
 }
 
-/// A chart that failed validation: its source as a code block, and why it is not drawn.
+/// A chart that failed validation: its source as a code block (the parser's model), and why it is not drawn.
 struct InvalidChartBlock: View {
-    let json: String
+    let code: CodeModel
     let reason: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: Design.Space.xs) {
-            CodeBlock(model: CodeModel(language: ReplyMarkdown.chartLanguage, text: json, isOpen: false,
-                                       lineCount: json.isEmpty ? 0 : json.split(separator: "\n", omittingEmptySubsequences: false).count,
-                                       reference: nil),
-                      root: nil)
+            CodeBlock(model: code, root: nil)
             Text(verbatim: "Chart not shown: " + reason)
                 .font(.caption)
                 .foregroundStyle(.secondary)
