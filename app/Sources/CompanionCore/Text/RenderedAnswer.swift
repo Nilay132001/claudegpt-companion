@@ -131,6 +131,54 @@ public struct TableModel: Equatable, Sendable {
     }
 }
 
+public enum TableLayoutChoice: Equatable, Sendable { case grid, scroll, stacked }
+
+/// Which table layout fits the answer column (M9 §6, P8: thresholds on the column width, panel − 32 pt).
+public enum TableLayout {
+    public static let cellCap: Double = 220
+    public static func choose(idealWidths: [Double], available: Double) -> TableLayoutChoice {
+        let n = idealWidths.count
+        let fits = idealWidths.map { min($0, cellCap) }.reduce(0, +) <= available
+        if available < 300 { return n <= 2 ? .grid : .stacked }
+        if available < 380 { return n <= 3 && fits ? .grid : .scroll }
+        return fits ? .grid : .scroll
+    }
+}
+
+extension TableModel {
+    public func plainRows() -> [[String]] { ([header] + rows).map { $0.map { String($0.characters) } } }
+
+    public func estimatedColumnWidths(charWidth: Double = 7.2, padding: Double = 16) -> [Double] {
+        let p = plainRows()
+        return (0..<columnCount).map { c in
+            Double(p.map { c < $0.count ? $0[c].count : 0 }.max() ?? 0) * charWidth + padding
+        }
+    }
+
+    public var tabSeparated: String { plainRows().map { $0.joined(separator: "\t") }.joined(separator: "\n") }
+
+    public var markdown: String {
+        func row(_ cells: [String]) -> String {
+            "| " + cells.map { $0.replacingOccurrences(of: "|", with: "\\|") }.joined(separator: " | ") + " |"
+        }
+        let rule = alignments.map { a -> String in
+            switch a { case .leading: "---"; case .center: ":---:"; case .trailing: "---:" }
+        }
+        let p = plainRows()
+        return ([row(p[0]), "| " + rule.joined(separator: " | ") + " |"] + p.dropFirst().map(row)).joined(separator: "\n")
+    }
+
+    /// "first: second." for two columns; "first: header2 cell2, header3 cell3." for more (Task 9 speech).
+    public var spokenRows: [String] {
+        let p = plainRows(), head = p[0]
+        return p.dropFirst().map { r in
+            guard r.count > 1 else { return (r.first ?? "") + "." }
+            let rest = r.count == 2 ? r[1] : (1..<r.count).map { "\(head[$0]) \(r[$0])" }.joined(separator: ", ")
+            return "\(r[0]): \(rest)."
+        }
+    }
+}
+
 public enum AnswerAttributes {
     /// Text shown on screen but never spoken: a removed link's " (url)" and an image's alt text.
     public enum SpeechSkip: AttributedStringKey {
