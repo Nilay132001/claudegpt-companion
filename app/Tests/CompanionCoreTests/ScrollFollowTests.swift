@@ -194,4 +194,83 @@ import Testing
         let f = ScrollFollow(following: false)
         #expect(!f.following && !f.showsJumpToLatest) // shown once geometry reports it is above the bottom
     }
+
+    // MARK: RestoreProgress
+
+    private func restore(inset: Double = 400) -> (RestoreProgress, UUID) {
+        let id = UUID()
+        return (RestoreProgress(anchor: ChatScrollAnchor(turn: id, inset: inset), deadline: .now + .seconds(3)), id)
+    }
+
+    @Test func restoreScrollsTheMarkerOnceTheTurnLandsAndStopsWhenThere() {
+        var (r, id) = restore()
+        let other = UUID()
+        // The scroll to the turn, in two geometry steps (lazy layout), before it is first visible.
+        do { let asked = r.step(offset: 5000, distanceFromBottom: 9000, firstVisible: ChatScrollAnchor(turn: other, inset: 10), now: .now); #expect(!asked) }
+        do { let asked = r.step(offset: 3000, distanceFromBottom: 11000, firstVisible: nil, now: .now); #expect(!asked) }
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        do { let asked = r.step(offset: 2400, distanceFromBottom: 11600, firstVisible: ChatScrollAnchor(turn: id, inset: 400), now: .now); #expect(!asked) }
+        #expect(r.finished)
+    }
+
+    @Test func restoreAsksAgainWhileItsMarkerScrollHasNotMoved() {
+        var (r, id) = restore()
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        // Text arrived below (distance changed, offset did not): the marker scroll has not happened yet.
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12060, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        #expect(!r.finished && r.tries == 2)
+    }
+
+    @Test func aReaderScrollingInsideTheSavedTurnIsNeverPulledBack() {
+        // The marker landed short; the reader then scrolls inside the same long turn: no further marker scroll.
+        var (r, id) = restore(inset: 400)
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        do { let asked = r.step(offset: 2380, distanceFromBottom: 11620, firstVisible: ChatScrollAnchor(turn: id, inset: 380), now: .now); #expect(!asked) }
+        #expect(r.finished) // its own scroll moved but missed: it does not keep scrolling
+        // And when the reader moves before its scroll is asked for (landed at the turn top, then the reader scrolls):
+        var (r2, id2) = restore(inset: 400)
+        do { let asked = r2.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id2, inset: 0), now: .now); #expect(asked) }
+        do { let asked = r2.step(offset: 2300, distanceFromBottom: 11700, firstVisible: ChatScrollAnchor(turn: id2, inset: 300), now: .now); #expect(!asked) }
+        do { let asked = r2.step(offset: 2500, distanceFromBottom: 11500, firstVisible: ChatScrollAnchor(turn: id2, inset: 500), now: .now); #expect(!asked) }
+        do { let asked = r2.step(offset: 2300, distanceFromBottom: 11700, firstVisible: ChatScrollAnchor(turn: id2, inset: 300), now: .now); #expect(!asked) }
+        #expect(r2.finished && r2.tries == 1)
+    }
+
+    @Test func aScrollPhaseEndsTheRestore() {
+        var (r, id) = restore()
+        r.readerScrolled()
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(!asked) }
+        #expect(r.finished)
+    }
+
+    @Test func leavingTheSavedTurnEndsTheRestore() {
+        var (r, id) = restore()
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        // The marker scroll is still pending; the first visible turn is now another one.
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12010, firstVisible: ChatScrollAnchor(turn: UUID(), inset: 10), now: .now); #expect(!asked) }
+        #expect(r.finished)
+    }
+
+    @Test func aLayoutCorrectionIsNotTheReader() {
+        var (r, id) = restore()
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        // Rows above re-measured: offset and content height move together, the distance stays; the scroll is pending.
+        do { let asked = r.step(offset: 1400, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now); #expect(asked) }
+        #expect(!r.finished)
+        do { let asked = r.step(offset: 1800, distanceFromBottom: 11600, firstVisible: ChatScrollAnchor(turn: id, inset: 400), now: .now); #expect(!asked) }
+        #expect(r.finished)
+    }
+
+    @Test func theRestoreGivesUpAtItsDeadlineAndAfterThreeTries() {
+        var (r, id) = restore()
+        do { let asked = r.step(offset: 2000, distanceFromBottom: 12000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now + .seconds(4)); #expect(!asked) }
+        #expect(r.finished)
+        // The marker never lays out (nothing moves): asked at most three times.
+        var (r2, id2) = restore()
+        var issued = 0
+        for i in 0..<6 where r2.step(offset: 2000, distanceFromBottom: 12000 + Double(i),
+                                     firstVisible: ChatScrollAnchor(turn: id2, inset: 0), now: .now) { issued += 1 }
+        #expect(issued == RestoreProgress.maxTries)
+        #expect(r2.finished)
+    }
 }

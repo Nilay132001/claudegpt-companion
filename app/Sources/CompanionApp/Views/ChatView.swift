@@ -72,7 +72,7 @@ private struct ChatScroll: View {
         // A session switch re-runs this body with the new key before any of the new chat's rows is laid out, while
         // the tracker still holds the old chat's frames: save the old chat's position now (only if its rows and
         // viewport were reported since it was shown; otherwise its saved position stays as it was).
-        let _ = tracker.bind(session: sessionKey) { old, anchor in
+        let _ = tracker.bind(session: sessionKey, feed: feed) { old, anchor in
             model.scrollMemory.save(session: old, anchor: anchor, following: follow.state.following)
         }
         // No .scrollPosition binding (M9 Task 4b): with one, SwiftUI kept the bottom edge pinned while content grew
@@ -109,7 +109,7 @@ private struct ChatScroll: View {
                 publish()
                 // A restore in progress: once the saved turn is the first visible one, put the marker (that many
                 // points into it) at the top, and check again on the next geometry until it is there.
-                if tracker.restoreNeedsMarker() {
+                if tracker.restoreNeedsMarker(offset: m.offset, distance: m.distance) {
                     Self.note("restore")
                     proxy.scrollTo(RestoreMarker.id, anchor: .top)
                 }
@@ -131,6 +131,10 @@ private struct ChatScroll: View {
                     Self.note("newTurn")
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
+            }
+            // The reader taking hold of the scroll view ends a restore in progress: it never pulls them back.
+            .onScrollPhaseChange { _, phase in
+                if phase == .tracking || phase == .interacting || phase == .decelerating { tracker.readerScrolled() }
             }
             .onAppear {
                 if let restore { scroll(to: restore, proxy) }
@@ -209,7 +213,9 @@ private struct ChatScroll: View {
     /// The session the viewport was last reported under.
     private var viewportSession: String?
     private var session: String?
-    private var restoring: (anchor: ChatScrollAnchor, until: ContinuousClock.Instant, tries: Int)?
+    private var restoring: RestoreProgress?
+    /// The feed shown, so a late frame report from a row of the previous chat is ignored.
+    private weak var feed: ChatFeed?
 
     /// The current chat's reading position, or nil when its rows or its viewport have not been reported since it
     /// was shown (then nothing is saved and its stored position stays as it was).
@@ -224,7 +230,8 @@ private struct ChatScroll: View {
 
     /// Called from ChatScroll's body with the session it shows. On a change, hands the previous session's position
     /// to `save`, if it is known (a rapid switch-through never overwrites a stored position with nothing).
-    func bind(session new: String, save: (String, ChatScrollAnchor?) -> Void) {
+    func bind(session new: String, feed: ChatFeed, save: (String, ChatScrollAnchor?) -> Void) {
+        self.feed = feed
         defer { session = new }
         guard let old = session, old != new else { return }
         if isFresh(old) { save(old, anchor(for: old)) }
@@ -239,23 +246,38 @@ private struct ChatScroll: View {
     }
 
     func set(_ id: UUID, frame: CGRect) {
+        // A late report from a row of the chat shown before (a switch is under way): not this chat's turn.
+        if let feed, feed.model(id) == nil {
+            #if DEBUG
+            PerfProbe.count("tracker.ignoredFrame")
+            #endif
+            return
+        }
         frames[session ?? "", default: VisibleTurns()].set(id, minY: frame.minY, maxY: frame.maxY)
         report()
     }
 
-    /// A restore scrolled to `anchor.turn`; the marker step follows from the geometry (restoreNeedsMarker).
-    func restore(_ anchor: ChatScrollAnchor) { restoring = (anchor, .now + .seconds(3), 0) }
+    /// A restore scrolled to `anchor.turn`; the marker step follows from the geometry (RestoreProgress), within 3 s
+    /// (laying out a just-loaded chat can take a second).
+    func restore(_ anchor: ChatScrollAnchor) { restoring = RestoreProgress(anchor: anchor, deadline: .now + .seconds(3)) }
 
-    /// True when the restoring turn is the first visible one but not yet at the saved inset: scroll the marker to
-    /// the top. Only within 3 s of the restore (laying out a just-loaded chat can take a second) and at most 3
-    /// times, so it never fights a reader who has moved on; done once the inset is within 2 pt.
-    func restoreNeedsMarker() -> Bool {
-        guard let r = restoring else { return false }
-        guard ContinuousClock.now < r.until, r.tries < 3 else { restoring = nil; return false }
-        guard let now = firstVisible, now.turn == r.anchor.turn else { return false }
-        if abs(now.inset - r.anchor.inset) <= 2 { restoring = nil; return false }
-        restoring?.tries += 1
-        return true
+    /// The reader started scrolling: a restore in progress ends where they are.
+    func readerScrolled() {
+        #if DEBUG
+        if restoring != nil { PerfProbe.count("restore.end.phase") }
+        #endif
+        restoring = nil
+    }
+
+    /// True when the marker should be scrolled to the top now (RestoreProgress decides; it ends on its own).
+    func restoreNeedsMarker(offset: Double, distance: Double) -> Bool {
+        guard var r = restoring else { return false }
+        let ask = r.step(offset: offset, distanceFromBottom: distance, firstVisible: firstVisible, now: .now)
+        #if DEBUG
+        if r.finished { PerfProbe.count("restore.end." + (r.endReason ?? "?")) }
+        #endif
+        restoring = r.finished ? nil : r
+        return ask
     }
 
     func remove(_ id: UUID) {

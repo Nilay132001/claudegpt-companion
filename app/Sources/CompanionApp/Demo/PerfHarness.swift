@@ -381,12 +381,39 @@ enum PerfFlags {
             summary["error"] = "no past chat"
         }
         let afterPast = sample()
+        let samePast = same()
+        // A reader who scrolls right after coming back: switch away and back, and as soon as the saved turn is the
+        // first visible one, scroll down 300 pt (20 pt per frame). The restore must not pull them back.
+        await model.pin("s2")
+        for _ in 0..<30 { await nextFrame() }
+        let restoresBefore = PerfProbe.counts["scroll.restore"] ?? 0
+        await model.pin("s1")
+        // Wait for the restore's scroll to the saved turn, then for that turn to be the first visible one.
+        var waited = 0
+        while (PerfProbe.counts["scroll.restore"] ?? 0) == restoresBefore && waited < 120 { await nextFrame(); waited += 1 }
+        await nextFrame()
+        while PerfProbe.firstVisibleTurn != turn0 && waited < 120 { await nextFrame(); waited += 1 }
+        let progBefore = PerfProbe.programmaticScrolls
+        var y = clip.bounds.origin.y, pulls = 0
+        for _ in 0..<15 {
+            y += 20
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+            sv.reflectScrolledClipView(clip)
+            await nextFrame()
+            if abs(clip.bounds.origin.y - y) > 1 { pulls += 1; y = clip.bounds.origin.y } // moved under the reader
+        }
+        let yAfterReader = clip.bounds.origin.y
+        for _ in 0..<60 { await nextFrame() }
+        let readerScroll: [String: Any] = [
+            "framesToLand": waited, "restoreEnds": PerfProbe.counts.filter { $0.key.hasPrefix("restore.end") }, "appScrollsDuringAndAfter": PerfProbe.programmaticScrolls - progBefore,
+            "movedAfterReaderStopped": Double(clip.bounds.origin.y - yAfterReader),
+            "pullsWhileScrolling": pulls]
         // perf-stream: s1 is still streaming throughout; coming back must not land at the bottom.
         let docH = sv.documentView?.frame.height ?? 0
         summary["position"] = ["before": before, "afterSwitch": afterSwitch, "afterRapid0": afterRapid0,
                                "afterRapid1": afterRapid1, "afterPast": afterPast,
                                "same": sameSwitch, "sameRapid0": sameRapid0, "sameRapid1": sameRapid1,
-                               "samePast": same(), "turnKnown": turn0 != nil,
+                               "samePast": samePast, "turnKnown": turn0 != nil, "readerScroll": readerScroll,
                                "distanceFromBottomAtEnd": Double(docH - clip.bounds.height - clip.bounds.origin.y),
                                "streaming": model.currentFeed?.isRunning ?? false]
     }

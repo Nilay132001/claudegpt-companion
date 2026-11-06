@@ -67,6 +67,73 @@ public struct ChatScrollAnchor: Equatable, Sendable {
     }
 }
 
+/// The second step of a restore (ChatView): the saved turn was scrolled to the top; once it is the first visible turn,
+/// the marker `inset` points into it is scrolled to the top. It never fights the reader. It ends:
+/// - when the inset is within 2 pt;
+/// - when the reader scrolls (a scroll phase, `readerScrolled`), or, once the turn has landed, on any offset move it did
+///   not ask for that is not a layout correction (a correction moves offset and content height together, so the
+///   distance from the bottom stays);
+/// - when its own marker scroll moved but missed (it does not keep scrolling);
+/// - when the first visible turn leaves the saved turn after landing, after `maxTries` asks, or at the deadline.
+/// A marker scroll that has not moved anything yet (the marker not laid out) may be asked again.
+public struct RestoreProgress: Sendable {
+    public static let maxTries = 3
+    public let anchor: ChatScrollAnchor
+    public let deadline: ContinuousClock.Instant
+    public private(set) var tries = 0
+    public private(set) var finished = false
+    /// Why it ended (for diagnostics): landed, reader, missed, left, tries, deadline.
+    public private(set) var endReason: String?
+    private var landed = false
+    /// A marker scroll was asked for and no move has been seen since.
+    private var pendingScroll = false
+    private var lastOffset: Double?
+    private var lastDistance: Double?
+
+    public init(anchor: ChatScrollAnchor, deadline: ContinuousClock.Instant) {
+        self.anchor = anchor
+        self.deadline = deadline
+    }
+
+    /// The reader began scrolling (trackpad, wheel, scroller): stop.
+    public mutating func readerScrolled() { _ = finish("reader") }
+
+    /// One scroll geometry. Returns true when the marker should be scrolled to the top now.
+    public mutating func step(offset: Double, distanceFromBottom distance: Double, firstVisible: ChatScrollAnchor?,
+                              now: ContinuousClock.Instant) -> Bool {
+        guard !finished else { return false }
+        var moved = false
+        if let lastOffset, let lastDistance {
+            moved = abs(offset - lastOffset) > 0.5 && abs(distance - lastDistance) > 0.5
+        }
+        lastOffset = offset
+        lastDistance = distance
+        guard now < deadline else { return finish("deadline") }
+        var ourMove = false
+        if landed && moved {
+            guard pendingScroll else { return finish("reader") } // a move the restore did not ask for: the reader
+            pendingScroll = false
+            ourMove = true
+        }
+        guard let first = firstVisible, first.turn == anchor.turn else {
+            return landed ? finish("left") : false              // before landing: the turn scroll is under way
+        }
+        landed = true
+        if abs(first.inset - anchor.inset) <= 2 { return finish("landed") }
+        if ourMove { return finish("missed") }
+        guard tries < Self.maxTries else { return finish("tries") }
+        tries += 1
+        pendingScroll = true
+        return true
+    }
+
+    private mutating func finish(_ reason: String) -> Bool {
+        finished = true
+        endReason = reason
+        return false
+    }
+}
+
 /// The frames (in the scroll content's coordinates) of the turns the lazy list has laid out, so the first visible
 /// turn can be found when the chat goes away. Rows report their frames; nothing here is observed by a view.
 public struct VisibleTurns: Sendable {
