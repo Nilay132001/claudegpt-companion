@@ -1,6 +1,32 @@
 #if DEBUG
 /// Synthetic rich answers for the `rich` scene (every block type). Nothing here is real data.
 enum RichContent {
+    /// Scene `rich-tables`: a narrow (2 columns), a medium (4) and a wide (5) table, nothing else.
+    static let tableTurn: (question: String, answer: String) = ("Compare the tables", """
+        ## Parts
+
+        | Package | Seconds |
+        |---|---:|
+        | parser | 4.2 |
+        | csv | 1.9 |
+        | cli | 0.7 |
+
+        ## Runtime
+
+        | Package | Tests | Seconds | Change |
+        |:--------|------:|--------:|:------:|
+        | parser | 42 | 4.2 | −0.3 |
+        | csv | 17 | 1.9 | +0.1 |
+        | cli | 8 | 0.7 | 0 |
+
+        ## Files
+
+        | File | Lines changed | Risk | Reviewer note | Follow-up |
+        |---|---|---|---|---|
+        | src/parser/tokenize.ts | 14 | low | flush at end of input | none |
+        | src/csv/write.ts | 6 | medium | relies on empty-list behaviour of tokenize for blank rows | add a test |
+        """)
+
     static let turns: [(question: String, answer: String)] = [
         ("Summarise the parser change", """
         # Parser change review

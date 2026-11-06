@@ -257,6 +257,7 @@ enum DemoFlags {
 
     var storedTurns: [TurnRecord] {
         if scene == "rich" { return cleared ? [] : richTurns }
+        if scene == "rich-tables" { return cleared ? [] : [richTurn(RichContent.tableTurn, i: 0, of: 1)] }
         guard !cleared, ["chat", "context", "raw", "history", "whatGPTSees", "status", "streaming", "pastChat"].contains(scene) else { return [] }
         let now = Date().timeIntervalSince1970 * 1000
         let all = Self.items[...]
@@ -273,13 +274,13 @@ enum DemoFlags {
 
     /// `rich` scene: every block type (RichContent), stored in session s1, no context records.
     var richTurns: [TurnRecord] {
-        let now = Date().timeIntervalSince1970 * 1000
-        let n = Double(RichContent.turns.count)
-        return RichContent.turns.enumerated().map { i, t in
-            let at = now - (n - Double(i)) * 5 * 60_000
-            return TurnRecord(turnId: "r\(i + 1)", sessionId: "s1", threadId: "th1", sessionTitle: Self.title, mode: .off,
-                              question: t.question, answer: t.answer, sentAt: at, completedAt: at + 60_000)
-        }
+        return RichContent.turns.enumerated().map { richTurn($1, i: $0, of: RichContent.turns.count) }
+    }
+
+    private func richTurn(_ t: (question: String, answer: String), i: Int, of count: Int) -> TurnRecord {
+        let at = Date().timeIntervalSince1970 * 1000 - (Double(count) - Double(i)) * 5 * 60_000
+        return TurnRecord(turnId: "r\(i + 1)", sessionId: "s1", threadId: "th1", sessionTitle: Self.title, mode: .off,
+                          question: t.question, answer: t.answer, sentAt: at, completedAt: at + 60_000)
     }
 
     func historyList() async throws -> HistoryList {
