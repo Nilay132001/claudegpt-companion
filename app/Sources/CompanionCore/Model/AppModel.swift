@@ -46,8 +46,12 @@ public final class AppModel {
     public internal(set) var records: [String: TurnRecord] = [:]
     public internal(set) var history: HistoryList?
     public internal(set) var pastChat: PastChat?
-    /// The open past chat as the views see it (nil whenever `pastChat` is nil).
-    public internal(set) var pastFeed: ChatFeed?
+    /// The open past chat as the views see it (nil whenever `pastChat` is nil). It renders with the root of the
+    /// session it was opened from (`pastRootSession`) and follows that root's changes.
+    public internal(set) var pastFeed: ChatFeed? {
+        didSet { if oldValue !== pastFeed { oldValue?.prewarmTask?.cancel() } }
+    }
+    @ObservationIgnored var pastRootSession: String?
     /// Sessions whose stored chat is being read (the view shows a loading state instead of the empty state).
     public internal(set) var loadingChats: Set<String> = []
     public var draft = ""
@@ -404,7 +408,7 @@ public final class AppModel {
         let f = ChatFeed()
         feeds[sid] = f
         let root = root(for: sid)
-        f.sync(store[sid]?.messages ?? [], render: { self.render($0, isNew: $1, root: root) })
+        f.sync(store[sid]?.messages ?? [], root: root, render: { self.render($0, isNew: $1, root: root) })
         return f
     }
 
@@ -435,7 +439,7 @@ public final class AppModel {
         throttles[sid, default: FrameThrottle()].flushed(at: .now)
         guard let f = feeds[sid] else { return }      // nobody shows it yet; feed(for:) syncs on creation
         let root = root(for: sid)
-        f.sync(store[sid]?.messages ?? [], render: { self.render($0, isNew: $1, root: root) })
+        f.sync(store[sid]?.messages ?? [], root: root, render: { self.render($0, isNew: $1, root: root) })
     }
 
     /// Flushes coalesced updates now (tests; the end of a turn).

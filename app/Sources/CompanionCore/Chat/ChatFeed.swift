@@ -12,17 +12,22 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
 @MainActor @Observable public final class MessageModel: Identifiable {
     public let id: UUID
     public private(set) var message: ChatMessage
-    /// nil until rendered (the view then renders synchronously).
+    /// nil until rendered (the view then renders synchronously, with `root`).
     public private(set) var rendered: RenderedAnswer?
+    /// The root `rendered` was made with, and the one a view renders with when `rendered` is nil: the feed's root.
+    /// `path:line` links resolve against it, so a render made with another root is never kept (M9 §5.3).
+    public private(set) var root: String?
 
-    init(_ message: ChatMessage, rendered: RenderedAnswer?) {
+    init(_ message: ChatMessage, root: String?, rendered: RenderedAnswer?) {
         id = message.id
         self.message = message
+        self.root = root
         self.rendered = rendered
     }
 
-    func update(_ m: ChatMessage, rendered r: RenderedAnswer?) {
+    func update(_ m: ChatMessage, root newRoot: String?, rendered r: RenderedAnswer?) {
         if message != m { message = m }
+        if root != newRoot { root = newRoot }
         if rendered != r { rendered = r }
     }
 
@@ -33,7 +38,13 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
 @MainActor @Observable public final class ChatFeed {
     public private(set) var turns: [TurnRef] = []
     public private(set) var isRunning = false
+    /// The root the answers render with (the session's, or for a past chat the one it was opened with).
+    @ObservationIgnored public private(set) var root: String?
+    /// This feed's background render (M9 §5.3); a new one for the same feed cancels it, other feeds' never do.
+    @ObservationIgnored var prewarmTask: Task<Void, Never>?
     @ObservationIgnored private var models: [UUID: MessageModel] = [:]
+    /// The message ids of the last sync, in order: when unchanged (a delta), pairing and pruning are skipped.
+    @ObservationIgnored private var ids: [UUID] = []
 
     public init() {}
 
@@ -57,29 +68,44 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
         return out
     }
 
-    /// `render(message, isNew)` is called for new messages and for messages whose text or running state changed.
-    public func sync(_ messages: [ChatMessage], render: (ChatMessage, _ isNew: Bool) -> RenderedAnswer?) {
-        var seen = Set<UUID>()
+    /// `render(message, isNew)` is called for new messages and for messages whose text or running state changed
+    /// (`isNew` false). `render` must render with `root`. When `root` differs from the last sync's, every other
+    /// rendered message is dropped and asked for again with `isNew` true (a settled one then takes only what the
+    /// cache already holds for the new root; prewarm fills the rest).
+    public func sync(_ messages: [ChatMessage], root: String? = nil,
+                     render: (ChatMessage, _ isNew: Bool) -> RenderedAnswer?) {
+        let rootChanged = root != self.root
+        self.root = root
         for m in messages {
-            seen.insert(m.id)
             if let model = models[m.id] {
-                guard model.message != m else { continue }
                 let changed = model.message.text != m.text || model.message.isRunning != m.isRunning
-                model.update(m, rendered: changed ? render(m, false) : model.rendered)
+                if changed {
+                    model.update(m, root: root, rendered: render(m, false))
+                } else if rootChanged {
+                    model.update(m, root: root, rendered: model.rendered == nil ? nil : render(m, true))
+                } else if model.message != m {
+                    model.update(m, root: root, rendered: model.rendered)
+                }
             } else {
-                models[m.id] = MessageModel(m, rendered: render(m, true))
+                models[m.id] = MessageModel(m, root: root, rendered: render(m, true))
             }
         }
-        for id in models.keys where !seen.contains(id) { models[id] = nil }
-        let paired = Self.pair(messages)
-        if paired != turns { turns = paired }
+        let newIds = messages.map(\.id)
+        if newIds != ids {
+            ids = newIds
+            let seen = Set(newIds)
+            for id in models.keys where !seen.contains(id) { models[id] = nil }
+            let paired = Self.pair(messages)
+            if paired != turns { turns = paired }
+        }
         let running = messages.contains { $0.isRunning }
         if running != isRunning { isRunning = running }
     }
 
-    /// A background render finished; applied only if the message still has that text.
-    public func setRendered(_ r: RenderedAnswer, for id: UUID, text: String) {
-        guard let m = models[id], m.message.text == text else { return }
+    /// A background render finished; applied only if the message still has that text and the feed still renders
+    /// with that root (a late batch from before a root change is dropped).
+    public func setRendered(_ r: RenderedAnswer, for id: UUID, text: String, root: String?) {
+        guard root == self.root, let m = models[id], m.message.text == text, m.root == root else { return }
         m.setRendered(r)
     }
 }

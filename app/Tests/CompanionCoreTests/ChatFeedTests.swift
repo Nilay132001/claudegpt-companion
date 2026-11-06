@@ -48,9 +48,29 @@ import Testing
         let a = msg(.assistant, "old")
         feed.sync([a], render: { _, _ in nil })
         let r = RenderedAnswer(blocks: [], plainText: "old")
-        feed.setRendered(r, for: a.id, text: "stale")
+        feed.setRendered(r, for: a.id, text: "stale", root: nil)
         #expect(feed.model(a.id)?.rendered == nil)
-        feed.setRendered(r, for: a.id, text: "old")
+        feed.setRendered(r, for: a.id, text: "old", root: nil)
         #expect(feed.model(a.id)?.rendered == r)
+    }
+
+    @Test func aRootChangeDropsRendersMadeWithTheOldRoot() {
+        let feed = ChatFeed()
+        let a = msg(.assistant, "a"), q = msg(.user, "q")
+        let old = RenderedAnswer(blocks: [], plainText: "old root")
+        feed.sync([q, a], root: "/r") { m, _ in m.role == .assistant ? old : nil }
+        #expect(feed.model(a.id)?.rendered == old && feed.model(a.id)?.root == "/r")
+        var asked: [Bool] = []
+        feed.sync([q, a], root: "/r2") { m, isNew in asked.append(isNew); return nil }   // nothing cached for /r2
+        #expect(asked == [true])                       // only the rendered answer is asked again, as new
+        #expect(feed.model(a.id)?.rendered == nil && feed.model(a.id)?.root == "/r2" && feed.root == "/r2")
+        feed.setRendered(old, for: a.id, text: "a", root: "/r")     // a late batch from before the change
+        #expect(feed.model(a.id)?.rendered == nil)
+        let fresh = RenderedAnswer(blocks: [], plainText: "new root")
+        feed.setRendered(fresh, for: a.id, text: "a", root: "/r2")
+        #expect(feed.model(a.id)?.rendered == fresh)
+        var again = 0
+        feed.sync([q, a], root: "/r2") { _, _ in again += 1; return nil }   // same root, same messages: nothing
+        #expect(again == 0 && feed.model(a.id)?.rendered == fresh)
     }
 }

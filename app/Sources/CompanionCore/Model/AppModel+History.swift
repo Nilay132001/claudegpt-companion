@@ -25,27 +25,28 @@ extension AppModel {
             }
             mutate(sid) { $0.restore(turns) }
             for t in turns { records[t.turnId] = t }
-            prewarm(store[sid]?.messages ?? [], rootOf: sid) { [weak self] in self?.feeds[sid] }
+            prewarm(store[sid]?.messages ?? [], into: feed(for: sid))
         } catch {
             if generation == gen, chatTokens[sid, default: 0] == token { loadedChats.remove(sid) } // try again at the next selection or reconnect
         }
     }
 
     /// Renders settled answers off the main thread, newest first (they show first), and hands each result to its
-    /// message model in batches of 8. The cache key includes the root, and a session's chat and worktree load
-    /// concurrently: wait for the worktree read in flight, then read the root, so the prewarmed chunks are the ones
-    /// the views ask for.
-    func prewarm(_ messages: [ChatMessage], rootOf sid: String?, into feed: @escaping @MainActor @Sendable () -> ChatFeed?) {
+    /// message model in batches of 8. One prewarm per feed: a new one for the same feed cancels it; other feeds'
+    /// (another session, a past chat) are left alone. The cache key includes the root, and a session's chat and
+    /// worktree load concurrently: wait for the worktree read in flight, then take the feed's root (a root change
+    /// re-syncs the feed and starts a new prewarm). A batch that lands after the feed's root changed is dropped.
+    func prewarm(_ messages: [ChatMessage], into feed: ChatFeed) {
         let items = messages.reversed()
             .filter { $0.role == .assistant && !$0.isRunning && !$0.text.isEmpty }.map { ($0.id, $0.text) }
         guard !items.isEmpty else { return }
         let cache = renderCache, detail = detailLoad
-        prewarmTask?.cancel()
-        prewarmTask = Task { [weak self] in
+        feed.prewarmTask?.cancel()
+        let task = Task { [weak feed] in
             await detail?.value
-            guard let self, !Task.isCancelled else { return }
-            let root = sid.flatMap(self.root(for:))
-            let work = Task.detached(priority: .utility) {
+            guard let feed, !Task.isCancelled else { return }
+            let root = feed.root
+            let work = Task.detached(priority: .utility) { [feed] in
                 var batch: [(UUID, String, RenderedAnswer)] = []
                 // Newest first, within the cache's prewarm budget, so the newest stay resident; older answers
                 // render on demand when scrolled to.
@@ -56,20 +57,30 @@ extension AppModel {
                     if !batch.isEmpty && (batch.count == 8 || i == items.count - 1 || rendered == nil) {
                         let done = batch
                         batch = []
-                        await MainActor.run { for (id, text, r) in done { feed()?.setRendered(r, for: id, text: text) } }
+                        await MainActor.run {
+                            for (id, text, r) in done { feed.setRendered(r, for: id, text: text, root: root) }
+                        }
                     }
                     if rendered == nil { break }   // budget spent
                 }
             }
             await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
         }
+        feed.prewarmTask = task
+        prewarmTask = task
     }
 
-    /// A session's root changed (its worktree resolved or moved): its answers render again with the new root.
+    /// A session's root changed (its worktree resolved or moved): its feed, and a past chat opened from it, drop the
+    /// renders made with the old root and render again with the new one.
     func rootMayHaveChanged(_ sid: String, from old: String?) {
-        guard root(for: sid) != old else { return }
+        let root = root(for: sid)
+        guard root != old else { return }
         flush(sid)
-        prewarm(store[sid]?.messages ?? [], rootOf: sid) { [weak self] in self?.feeds[sid] }
+        if let f = feeds[sid] { prewarm(store[sid]?.messages ?? [], into: f) }
+        if pastRootSession == sid, let past = pastChat, let pf = pastFeed {
+            pf.sync(past.messages, root: root) { self.render($0, isNew: $1, root: root) }
+            prewarm(past.messages, into: pf)
+        }
     }
 
     /// After a reply ends: the daemon now holds its context block and items. Only the newest turn is read and merged.
@@ -124,10 +135,11 @@ extension AppModel {
             for t in turns { records[t.turnId] = t }
             // The past chat's answers render with the current root (as AnswerView does), so prewarm with that key.
             let feed = ChatFeed(), root = currentRoot
-            feed.sync(c.messages) { self.render($0, isNew: $1, root: root) }
+            feed.sync(c.messages, root: root) { self.render($0, isNew: $1, root: root) }
             pastChat = PastChat(summary: summary, messages: c.messages)
             pastFeed = feed
-            prewarm(c.messages, rootOf: selectedSessionId) { [weak feed] in feed }
+            pastRootSession = selectedSessionId
+            prewarm(c.messages, into: feed)
         } catch {
             errorMessage = Self.describe(error)
         }

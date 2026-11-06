@@ -47,14 +47,15 @@ struct AnswerView: View {
         let _ = PerfProbe.count(message.isRunning ? "body.AnswerView.running" : "body.AnswerView.settled")
         #endif
         // Once per body: the view and the accessibility label share it. Normally the model carries it (rendered by
-        // the coalesced update or the background prewarm); otherwise render now (closed chunks come from the cache).
+        // the coalesced update or the background prewarm); otherwise render now, with the feed's root (closed chunks
+        // come from the cache).
         let rendered = model.rendered ?? render(message)
         let speech = readAloud.speech(for: message.id)
         VStack(alignment: .leading, spacing: Design.Space.s) {
             if message.text.isEmpty && message.isRunning {
                 if let a = message.activity { ActivityRow(text: a) } else { TypingIndicator() }
             } else if !message.text.isEmpty {
-                ReplyView(answer: rendered, root: app.currentRoot)
+                ReplyView(answer: rendered, root: model.root)
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
             statusRow(message)
@@ -82,10 +83,10 @@ struct AnswerView: View {
         guard !message.text.isEmpty else { return .empty }
         #if DEBUG
         return PerfProbe.measure("render.answer") {
-            app.renderCache.answer(for: message.text, root: app.currentRoot, streaming: message.isRunning)
+            app.renderCache.answer(for: message.text, root: model.root, streaming: message.isRunning)
         }
         #else
-        return app.renderCache.answer(for: message.text, root: app.currentRoot, streaming: message.isRunning)
+        return app.renderCache.answer(for: message.text, root: model.root, streaming: message.isRunning)
         #endif
     }
 
