@@ -15,7 +15,8 @@ import os
 ///   resize  — steps the panel width between 300 and 600 pt at display rate, inside the live-resize notifications
 ///             AppKit posts while the user drags the panel's edge
 ///   idle    — does nothing (memory baseline)
-///   position — scrolls to the middle, switches to the other session and back; the first visible turn must match
+///   position — scrolls to the middle, switches to the other session and back (slowly, then rapidly), opens and
+///              closes a past chat; the first visible turn must match each time (perf-stream: while s1 streams)
 ///   readaloud — the scroll driver, toggling Read Aloud on the latest answer every 30 frames (a silent synthesizer)
 /// COMPANION_PERF_SECONDS (default 10), COMPANION_PERF_STEP (pt per frame, default 20), COMPANION_PERF_SETTLE (s, 2).
 enum PerfFlags {
@@ -360,6 +361,16 @@ enum PerfFlags {
         await model.pin("s1")
         for _ in 0..<60 { await nextFrame() }
         let afterSwitch = sample(), sameSwitch = same()
+        // Rapid switches: s2, s1, s2, s1 with no frame between, then the same with one frame between.
+        for _ in 0..<2 { await model.pin("s2"); await model.pin("s1") }
+        for _ in 0..<60 { await nextFrame() }
+        let afterRapid0 = sample(), sameRapid0 = same()
+        for _ in 0..<2 {
+            await model.pin("s2"); await nextFrame()
+            await model.pin("s1"); await nextFrame()
+        }
+        for _ in 0..<60 { await nextFrame() }
+        let afterRapid1 = sample(), sameRapid1 = same()
         await model.loadHistory()
         if let past = model.history?.chats.first(where: { $0.threadId != model.history?.currentThreads["s1"] }) {
             await model.openPastChat(past)
@@ -370,8 +381,14 @@ enum PerfFlags {
             summary["error"] = "no past chat"
         }
         let afterPast = sample()
-        summary["position"] = ["before": before, "afterSwitch": afterSwitch, "afterPast": afterPast,
-                               "same": sameSwitch, "samePast": same(), "turnKnown": turn0 != nil]
+        // perf-stream: s1 is still streaming throughout; coming back must not land at the bottom.
+        let docH = sv.documentView?.frame.height ?? 0
+        summary["position"] = ["before": before, "afterSwitch": afterSwitch, "afterRapid0": afterRapid0,
+                               "afterRapid1": afterRapid1, "afterPast": afterPast,
+                               "same": sameSwitch, "sameRapid0": sameRapid0, "sameRapid1": sameRapid1,
+                               "samePast": same(), "turnKnown": turn0 != nil,
+                               "distanceFromBottomAtEnd": Double(docH - clip.bounds.height - clip.bounds.origin.y),
+                               "streaming": model.currentFeed?.isRunning ?? false]
     }
 
     private func resize() async {
@@ -380,7 +397,16 @@ enum PerfFlags {
         var w: CGFloat = 600, dir: CGFloat = -1
         let end = DispatchTime.now().uptimeNanoseconds + UInt64(PerfFlags.seconds * 1e9)
         // As when the user drags the panel's edge: AppKit posts these around a live resize.
+        // The first frames after each notification carry ChatTextSelection's switch (every selectable Text rebuilt):
+        // timed separately, before the steps start and after they end.
+        func transition() async -> [Double] {
+            var out: [Double] = []
+            var t = DispatchTime.now()
+            for _ in 0..<3 { await nextFrame(); out.append(Self.ms(since: t)); t = .now() }
+            return out
+        }
         NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: p)
+        let startFrames = await transition()
         onTick = { _ in
             w += dir * 10
             if w <= 300 { w = 300; dir = 1 }
@@ -396,7 +422,9 @@ enum PerfFlags {
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil
         NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: p)
-        summary["resize"] = ["steps": widths.count, "setFrameMs": Self.stats(widths)]
+        let endFrames = await transition()
+        summary["resize"] = ["steps": widths.count, "setFrameMs": Self.stats(widths),
+                             "startFramesMs": startFrames, "endFramesMs": endFrames]
     }
 
     // MARK: Output
