@@ -339,4 +339,13 @@ import Testing
         await m.setSharingMode(.off)
         #expect(m.privacy?.sharingMode == .off)
     }
+
+    @Test func restoredAnswersAreRenderedInTheBackground() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "Hello\n\nWorld")]
+        let (m, _) = await started(d)
+        await m.chatLoad?.value
+        await m.prewarmTask?.value
+        #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: m.currentRoot) != nil)
+    }
 }

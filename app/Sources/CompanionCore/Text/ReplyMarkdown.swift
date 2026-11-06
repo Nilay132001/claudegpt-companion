@@ -155,3 +155,86 @@ public enum ReplyMarkdown {
         }.joined(separator: "\n\n")
     }
 }
+
+public struct MarkdownChunk: Hashable, Sendable {
+    public let text: String
+    /// Ends inside a fence that is not closed yet (only the last chunk can).
+    public let isOpen: Bool
+    public init(text: String, isOpen: Bool) { self.text = text; self.isOpen = isOpen }
+}
+
+extension ReplyMarkdown {
+    public typealias Styler = @Sendable (ProseRole, inout AttributedString) -> Void
+    public static let noStyle: Styler = { _, _ in }
+
+    /// Splits an answer into chunks at blank lines followed by an unindented line, never inside a fence and never
+    /// between items of one list. Earlier chunks do not change as the text grows, so they are parsed once.
+    public static func chunks(_ markdown: String) -> [MarkdownChunk] {
+        var out: [MarkdownChunk] = []
+        var lines: [Substring] = []
+        var fence: Substring?        // the opening marker, "```" or "~~~" (or longer)
+        var sawBlank = false
+        var inList = false
+        func flush() {
+            let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { out.append(MarkdownChunk(text: text, isOpen: false)) }
+            lines = []
+        }
+        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.drop { $0 == " " || $0 == "\t" }
+            if let f = fence {
+                lines.append(line)
+                if trimmed.hasPrefix(f), trimmed.drop(while: { $0 == f.first }).allSatisfy(\.isWhitespace) { fence = nil }
+                continue
+            }
+            if trimmed.isEmpty { sawBlank = true; lines.append(line); continue }
+            let indented = trimmed.count != line.count
+            let listItem = !indented && line.firstMatch(of: /^([-*+]|\d{1,9}[.)])(\s|$)/) != nil
+            if sawBlank && !indented && !(inList && listItem) { flush() }
+            sawBlank = false
+            if !indented { inList = listItem }
+            if let m = trimmed.firstMatch(of: /^(`{3,}|~{3,})/) { fence = m.1 }
+            lines.append(line)
+        }
+        let open = fence != nil
+        flush()
+        if open, let last = out.popLast() { out.append(MarkdownChunk(text: last.text, isOpen: true)) }
+        return out
+    }
+
+    /// Task 3: M8's block parser per chunk. Task 5 replaces the body with the full-syntax parser.
+    public static func renderChunk(_ chunk: MarkdownChunk, root: String?, style: Styler) -> RenderedChunk {
+        let segments = segments(chunk.text, root: root, style: style)
+        let blocks: [AnswerBlock] = segments.enumerated().map { i, s in
+            switch s {
+            case .prose(let a): .paragraphs(a)
+            case .code(let lang, let text): .code(language: lang, text: text, isOpen: chunk.isOpen && i == segments.count - 1)
+            }
+        }
+        return RenderedChunk(blocks: blocks, plainText: plainText(chunk.text), cost: chunk.text.utf8.count * 4 + 256)
+    }
+
+    /// Joins rendered chunks; adjacent `.paragraphs` blocks become one run, so a selection crosses them (P1).
+    public static func assemble(_ chunks: [RenderedChunk], style: Styler) -> RenderedAnswer {
+        var blocks: [RenderedBlock] = []
+        for (c, chunk) in chunks.enumerated() {
+            for (i, block) in chunk.blocks.enumerated() {
+                if case .paragraphs(let next) = block, let last = blocks.last, case .paragraphs(var run) = last.block {
+                    var gap = AttributedString("\n\n")
+                    style(.gap, &gap)
+                    run.append(gap)
+                    run.append(next)
+                    blocks[blocks.count - 1] = RenderedBlock(id: last.id, block: .paragraphs(run))
+                } else {
+                    blocks.append(RenderedBlock(id: BlockID(chunk: c, index: i), block: block))
+                }
+            }
+        }
+        return RenderedAnswer(blocks: blocks, plainText: chunks.map(\.plainText).filter { !$0.isEmpty }.joined(separator: "\n\n"))
+    }
+
+    /// Uncached render of a whole answer (tests, Copy, speech).
+    public static func render(_ markdown: String, root: String?, style: Styler = noStyle) -> RenderedAnswer {
+        assemble(chunks(markdown).map { renderChunk($0, root: root, style: style) }, style: style)
+    }
+}

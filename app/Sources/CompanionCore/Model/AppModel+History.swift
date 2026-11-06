@@ -25,8 +25,26 @@ extension AppModel {
             }
             conversations[sid, default: Conversation()].restore(turns)
             for t in turns { records[t.turnId] = t }
+            prewarm(turns, sessionId: sid)
         } catch {
             if generation == gen, chatTokens[sid, default: 0] == token { loadedChats.remove(sid) } // try again at the next selection or reconnect
+        }
+    }
+
+    /// Renders restored answers into the cache off the main thread, newest first (they show first). The cache key
+    /// includes the root, and a session's chat and worktree load concurrently: wait for the worktree read in flight,
+    /// then read the root, so the prewarmed chunks are the ones AnswerView asks for.
+    func prewarm(_ turns: [TurnRecord], sessionId sid: String?) {
+        let texts = turns.reversed().map(\.answer).filter { !$0.isEmpty }
+        guard !texts.isEmpty else { return }
+        let cache = renderCache, detail = detailLoad
+        prewarmTask?.cancel()
+        prewarmTask = Task { [weak self] in
+            await detail?.value
+            guard let self, !Task.isCancelled else { return }
+            let root = sid.flatMap(self.root(for:))
+            let work = Task.detached(priority: .utility) { cache.prewarm(texts, root: root) }
+            await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
         }
     }
 
@@ -80,6 +98,8 @@ extension AppModel {
             c.restore(turns)
             for t in turns { records[t.turnId] = t }
             pastChat = PastChat(summary: summary, messages: c.messages)
+            // The past chat's answers render with the current root (as AnswerView does), so prewarm with that key.
+            prewarm(turns, sessionId: selectedSessionId)
         } catch {
             errorMessage = Self.describe(error)
         }

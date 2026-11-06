@@ -43,11 +43,13 @@ struct AnswerView: View {
         #if DEBUG
         let _ = PerfProbe.count(message.isRunning ? "body.AnswerView.running" : "body.AnswerView.settled")
         #endif
+        // Once per body: the view and the accessibility label share it (closed chunks come from the cache).
+        let rendered = render()
         VStack(alignment: .leading, spacing: Design.Space.s) {
             if message.text.isEmpty && message.isRunning {
                 if let a = message.activity { ActivityRow(text: a) } else { TypingIndicator() }
             } else if !message.text.isEmpty {
-                ReplyView(markdown: message.text, root: model.currentRoot)
+                ReplyView(answer: rendered, root: model.currentRoot)
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
             statusRow
@@ -58,7 +60,7 @@ struct AnswerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         // No contextMenu here: right-click on selected text keeps the system menu (Copy, Look Up, Share).
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityText)
+        .accessibilityLabel(accessibilityText(rendered))
         .accessibilityAction(named: "Copy") { Design.copy(CopyFormat.markdown(message)) }
         .accessibilityAction(named: "Copy as plain text") { Design.copy(CopyFormat.plain(message)) }
         .accessibilityAction(named: readAloud.isActive(message.id) ? "Pause or resume reading" : "Read aloud") {
@@ -71,14 +73,21 @@ struct AnswerView: View {
         }
     }
 
-    private var accessibilityText: String {
+    private func render() -> RenderedAnswer {
+        guard !message.text.isEmpty else { return .empty }
+        #if DEBUG
+        return PerfProbe.measure("render.answer") {
+            model.renderCache.answer(for: message.text, root: model.currentRoot, streaming: message.isRunning)
+        }
+        #else
+        return model.renderCache.answer(for: message.text, root: model.currentRoot, streaming: message.isRunning)
+        #endif
+    }
+
+    private func accessibilityText(_ rendered: RenderedAnswer) -> String {
         if message.isRunning && message.text.isEmpty { return "GPT is thinking" }
         if case .failed(let why) = message.status { return "GPT's reply failed: \(why)" }
-        #if DEBUG
-        return "GPT answered: \(PerfProbe.measure("parse.plainText") { ReplyMarkdown.plainText(message.text) })"
-        #else
-        return "GPT answered: \(ReplyMarkdown.plainText(message.text))"
-        #endif
+        return "GPT answered: \(rendered.plainText)"
     }
 
     /// Read Aloud state of this answer: nil when it is not being read.

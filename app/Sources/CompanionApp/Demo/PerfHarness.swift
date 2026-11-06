@@ -122,6 +122,7 @@ enum PerfFlags {
             try? await Task.sleep(for: .seconds(PerfFlags.settle))
             self.startLink()
             let before = PerfProbe.snapshot()
+            let cacheBefore = model.renderCache.stats
             let span = PerfProbe.signposter.beginInterval("phase", id: PerfProbe.signposter.makeSignpostID())
             self.measuring = true
             let t0 = DispatchTime.now()
@@ -136,6 +137,9 @@ enum PerfFlags {
             PerfProbe.signposter.endInterval("phase", span)
             self.summary["phaseMs"] = Self.ms(since: t0)
             self.summary["phaseCounters"] = PerfProbe.diff(since: before)
+            let cache = model.renderCache.stats
+            self.summary["renderCache"] = ["hits": cache.hits - cacheBefore.hits, "misses": cache.misses - cacheBefore.misses,
+                                           "tailRenders": cache.tailRenders - cacheBefore.tailRenders]
             self.summary["footprintEndMB"] = PerfProbe.footprintMB()
             self.summary["frames"] = self.frameStats()
             self.finish()

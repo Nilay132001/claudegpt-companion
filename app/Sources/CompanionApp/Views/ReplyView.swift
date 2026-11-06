@@ -1,11 +1,12 @@
 import CompanionCore
 import SwiftUI
 
-/// Renders a GPT reply through ReplyMarkdown only. Each run of prose is ONE selectable Text (R7), so a selection can
-/// cross paragraphs and list items. The single link kind is companion-open (path:line inside the root).
+/// Renders a GPT reply from its cached `RenderedAnswer` (parsed only by ReplyMarkdown). Each prose run is ONE
+/// selectable Text (R7), so a selection can cross paragraphs and list items. Blocks are keyed by `BlockID`, so closed
+/// blocks keep their identity while an answer streams. The single link kind is companion-open (path:line in the root).
 struct ReplyView: View {
     @Environment(AppModel.self) private var model
-    let markdown: String
+    let answer: RenderedAnswer
     let root: String?
 
     var body: some View {
@@ -13,16 +14,16 @@ struct ReplyView: View {
         let _ = PerfProbe.count("body.ReplyView")
         #endif
         VStack(alignment: .leading, spacing: Design.Space.m - 2) {
-            ForEach(Array(Self.segments(markdown, root: root).enumerated()), id: \.offset) { _, segment in
-                switch segment {
-                case .prose(let text):
+            ForEach(answer.blocks) { b in
+                switch b.block {
+                case .paragraphs(let text):
                     Text(text)
                         .font(.body)
                         .lineSpacing(Design.bodyLineSpacing)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                case .code(let language, let code):
+                case .code(let language, let code, _):
                     CodeBlockView(language: language, code: code)
                 }
             }
@@ -34,25 +35,5 @@ struct ReplyView: View {
             FileOpener.open(FileReference(path: path, line: ref.line), root: root, editor: model.settings.editor)
             return .handled
         })
-    }
-
-    static func segments(_ markdown: String, root: String?) -> [ReplySegment] {
-        #if DEBUG
-        PerfProbe.measure("parse.segments") { styledSegments(markdown, root: root) }
-        #else
-        styledSegments(markdown, root: root)
-        #endif
-    }
-
-    private static func styledSegments(_ markdown: String, root: String?) -> [ReplySegment] {
-        ReplyMarkdown.segments(markdown, root: root) { role, s in
-            switch role {
-            case .heading(let level): s.font = level <= 2 ? .title3.weight(.semibold) : .headline
-            case .quote: s.foregroundColor = .secondary
-            // A short line between blocks: a caption2 line, relative to Dynamic Type.
-            case .gap: s.font = .caption2
-            case .paragraph, .bullet, .numbered: break
-            }
-        }
     }
 }

@@ -79,9 +79,16 @@ public final class AppModel {
     /// Events with no session id for a turn no conversation owns yet (chat.send has not answered). Replayed on attach.
     @ObservationIgnored private var unrouted: [String: [TurnEvent]] = [:]
 
-    public init(connector: @escaping Connector, jiraStore: any JiraSecretStore = NoJiraStore()) {
+    /// Rendered answer chunks, shared by the views (main thread) and background prewarm (M9 §5.3).
+    public let renderCache: RenderCache
+    /// Renders restored answers off the main thread; tests await it.
+    @ObservationIgnored public internal(set) var prewarmTask: Task<Void, Never>?
+
+    public init(connector: @escaping Connector, jiraStore: any JiraSecretStore = NoJiraStore(),
+                renderStyle: @escaping ReplyMarkdown.Styler = ReplyMarkdown.noStyle) {
         self.connector = connector
         self.jiraStore = jiraStore
+        self.renderCache = RenderCache(style: renderStyle)
     }
 
     var api: (any DaemonAPI)? { current?.api }

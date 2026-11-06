@@ -25,8 +25,11 @@ extension AppModel {
     public var isAnswering: Bool { selectedSessionId.flatMap { conversations[$0]?.isRunning } ?? false }
     public var canSend: Bool { gate == .ready && !isAnswering && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     public var currentWorktree: WorktreeResolution? { selectedSessionId.flatMap { worktrees[$0] } }
-    public var currentRoot: String? {
-        if case .resolved(let root, _, _)? = currentWorktree { root } else { nil }
+    public var currentRoot: String? { selectedSessionId.flatMap(root(for:)) }
+
+    /// The session's repository root once resolved; answers link `path:line` only inside it.
+    public func root(for sessionId: String) -> String? {
+        if case .resolved(let root, _, _)? = worktrees[sessionId] { root } else { nil }
     }
 
     public var repoSummary: String {
