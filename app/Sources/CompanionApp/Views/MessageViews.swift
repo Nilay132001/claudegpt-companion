@@ -6,6 +6,9 @@ struct QuestionBubble: View {
     let message: ChatMessage
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.QuestionBubble")
+        #endif
         TrailingFraction(fraction: Design.bubbleMaxFraction) {
             Text(verbatim: message.text)
                 .font(.body)
@@ -36,6 +39,9 @@ struct AnswerView: View {
     @State private var hovering = false
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count(message.isRunning ? "body.AnswerView.running" : "body.AnswerView.settled")
+        #endif
         VStack(alignment: .leading, spacing: Design.Space.s) {
             if message.text.isEmpty && message.isRunning {
                 if let a = message.activity { ActivityRow(text: a) } else { TypingIndicator() }
@@ -69,7 +75,11 @@ struct AnswerView: View {
     private var accessibilityText: String {
         if message.isRunning && message.text.isEmpty { return "GPT is thinking" }
         if case .failed(let why) = message.status { return "GPT's reply failed: \(why)" }
+        #if DEBUG
+        return "GPT answered: \(PerfProbe.measure("parse.plainText") { ReplyMarkdown.plainText(message.text) })"
+        #else
         return "GPT answered: \(ReplyMarkdown.plainText(message.text))"
+        #endif
     }
 
     /// Read Aloud state of this answer: nil when it is not being read.

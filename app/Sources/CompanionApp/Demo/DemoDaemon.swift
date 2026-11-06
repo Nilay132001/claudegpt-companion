@@ -4,7 +4,8 @@ import CompanionCore
 import Foundation
 
 /// DEBUG-only (ruling R6): COMPANION_DEMO=<scene> runs the real views on synthetic data. Nothing leaves the process.
-/// Scenes: empty, chat, context, raw, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status.
+/// Scenes: empty, chat, context, raw, history, pastChat, streaming, ask, signedOut, daemonDown, noSession, error, whatGPTSees, status,
+/// and the M9 perf scenes perf-short, perf-medium, perf-long, perf-stream (PerfHarness.swift).
 /// COMPANION_DEMO_WIDTH=<pt> sets the panel width; COMPANION_DEMO_LONG=1 uses long synthetic titles, repo, branch and
 /// paths (the real-world lengths that overlapped in the first M8 build).
 enum DemoFlags {
@@ -28,6 +29,10 @@ enum DemoFlags {
     let sink: AsyncStream<DaemonEvent>.Continuation
     var turn = 0
     var cleared = false
+    /// perf scenes only: the session sessions.pin selected (the switch driver alternates s1 and s2).
+    var selectedId = "s1"
+    /// perf scenes only: the stored turns of each session, built once.
+    var perfTurns: [String: [TurnRecord]] = [:]
 
     init(scene: String) {
         self.scene = scene
@@ -48,13 +53,14 @@ enum DemoFlags {
     var autoQuestion: String? {
         switch scene {
         case "streaming", "ask", "error": "Why does the widget parser drop the last token, and is Claude's fix right?"
+        case "perf-stream": "Walk me through every change Claude made to the parser and the CSV writer, with the risks."
         default: nil
         }
     }
 
     var mode: String {
         switch scene {
-        case "streaming", "error": "automatic"
+        case "streaming", "error", "perf-stream": "automatic"
         default: "ask"
         }
     }
@@ -72,21 +78,25 @@ enum DemoFlags {
     func authLogin() async throws -> URL { URL(string: "https://example.invalid")! }
 
     var snapJSON: String {
-        let selected = scene == "noSession" ? "null" : #""s1""#
+        let selected = scene == "noSession" ? "null" : "\"\(selectedId)\""
         let moved = scene == "status" ? #","focusMovedTo":"s2""# : ""
         return """
         {"sessions":[{"sessionId":"s1","cliSessionId":"c1","title":\(Self.quote(Self.title)),"status":"busy","isArchived":false,
         "lastFocusedAt":1,"lastActivityAt":1,"recordCwd":"\(Self.root)","recordBranch":"\(Self.branch)","resolvedRoot":"\(Self.root)","source":"desktop"},
         {"sessionId":"s2","cliSessionId":"c2","title":"Add CSV export","status":"idle","isArchived":false,
         "lastFocusedAt":1,"lastActivityAt":1,"recordCwd":"\(Self.root)","recordBranch":"main","resolvedRoot":"\(Self.root)","source":"desktop"}],
-        "selection":{"sessionId":\(selected),"via":"\(scene == "noSession" ? "none" : "focus")","focusedSessionId":"s1","focusLabel":"Claude focus","pinnedMissing":false\(moved)},
+        "selection":{"sessionId":\(selected),"via":"\(scene == "noSession" ? "none" : selectedId == "s1" ? "focus" : "pin")","focusedSessionId":"s1","focusLabel":"Claude focus","pinnedMissing":false\(moved)},
         "refreshedAt":1}
         """
     }
     func sessionsSnapshot() async throws -> SessionsSnapshot { Self.j(snapJSON) }
     func sessionsRefresh() async throws -> SessionsSnapshot { Self.j(snapJSON) }
     func sessionsPin(_ sessionId: String?) async throws -> Selection {
-        Self.j(#"{"sessionId":"s1","via":"focus","focusedSessionId":"s1","focusLabel":"Claude focus","pinnedMissing":false}"#)
+        if PerfFlags.isPerfScene {
+            selectedId = sessionId ?? "s1"
+            return Self.j(#"{"sessionId":"\#(selectedId)","via":"pin","focusedSessionId":"s1","focusLabel":"Claude focus","pinnedMissing":false}"#)
+        }
+        return Self.j(#"{"sessionId":"s1","via":"focus","focusedSessionId":"s1","focusLabel":"Claude focus","pinnedMissing":false}"#)
     }
     func sessionsPicker(query: String?, includeArchived: Bool) async throws -> PickerGroups {
         // The two sessions of the snapshot, as busy and idle.
@@ -176,6 +186,7 @@ enum DemoFlags {
     """
 
     func stream(turnId: String) async {
+        if scene == "perf-stream" { return await perfStream(turnId: turnId) }
         emit("chat.item", #"{"sessionId":"s1","threadId":"th1","turnId":"\#(turnId)","phase":"started","item":{"id":"x1","type":"mcpToolCall","server":"companion-readonly","tool":"read_file","status":"inProgress"}}"#)
         try? await Task.sleep(for: .milliseconds(scene == "streaming" ? 1200 : 10))
         let words = Self.answer2.split(separator: " ", omittingEmptySubsequences: false)
@@ -187,6 +198,25 @@ enum DemoFlags {
             try? await Task.sleep(for: .milliseconds(scene == "streaming" ? 350 : 15))
         }
         emit("chat.item", #"{"sessionId":"s1","threadId":"th1","turnId":"\#(turnId)","phase":"completed","item":{"id":"x1","type":"mcpToolCall","server":"companion-readonly","tool":"read_file","status":"completed"}}"#)
+        emit("chat.turnCompleted", #"{"sessionId":"s1","threadId":"th1","turnId":"\#(turnId)","status":"completed"}"#)
+    }
+
+    /// perf-stream: ~3 words every 60 ms (about 50 words/s, a brisk Codex pace), starting once the perf driver
+    /// measures (or after 1.5 s without one).
+    func perfStream(turnId: String) async {
+        let start = Date()
+        while !PerfDriver.shared.measuring && (PerfFlags.mode != nil || Date().timeIntervalSince(start) < 1.5) {
+            if Date().timeIntervalSince(start) > 60 { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        let words = PerfContent.streamAnswer.split(separator: " ", omittingEmptySubsequences: false)
+        var i = 0
+        while i < words.count {
+            let chunk = words[i..<min(i + 3, words.count)].joined(separator: " ") + (i + 3 < words.count ? " " : "")
+            emit("chat.delta", #"{"sessionId":"s1","threadId":"th1","turnId":"\#(turnId)","itemId":"i1","text":\#(Self.quote(chunk))}"#)
+            i += 3
+            try? await Task.sleep(for: .milliseconds(60))
+        }
         emit("chat.turnCompleted", #"{"sessionId":"s1","threadId":"th1","turnId":"\#(turnId)","status":"completed"}"#)
     }
 
@@ -252,7 +282,13 @@ enum DemoFlags {
         return HistoryList(chats: chats, currentThreads: ["s1": "th1"], enabled: true)
     }
     func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns {
-        HistoryTurns(threadId: "th1", turns: Array(storedTurns.filter { $0.sessionId == sessionId }.suffix(limit ?? 200)))
+        if let n = PerfFlags.turns {
+            let all = perfTurns[sessionId] ?? PerfContent.turns(sessionId: sessionId, count: n, root: Self.root,
+                                                                 title: sessionId == "s1" ? Self.title : "Add CSV export")
+            perfTurns[sessionId] = all
+            return HistoryTurns(threadId: "th-\(sessionId)", turns: Array(all.suffix(limit ?? 200)))
+        }
+        return HistoryTurns(threadId: "th1", turns: Array(storedTurns.filter { $0.sessionId == sessionId }.suffix(limit ?? 200)))
     }
     func historyTurns(threadId: String) async throws -> HistoryTurns {
         if threadId == "th1" { return HistoryTurns(threadId: "th1", turns: storedTurns) }

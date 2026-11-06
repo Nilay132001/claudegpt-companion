@@ -7,6 +7,9 @@ struct SidebarView: View {
 
     var body: some View {
         @Bindable var model = model
+        #if DEBUG
+        let _ = PerfProbe.count("body.SidebarView")
+        #endif
         content
             .frame(minWidth: 280, maxWidth: 640, minHeight: 320)
             .background(Color(nsColor: .windowBackgroundColor))

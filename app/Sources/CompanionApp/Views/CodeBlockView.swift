@@ -12,6 +12,9 @@ struct CodeBlockView: View {
     @State private var copied = CopiedFlag()
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.CodeBlockView")
+        #endif
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Design.Space.s) {
                 Text(verbatim: title ?? language?.lowercased() ?? "code")
@@ -66,6 +69,14 @@ struct CodeBlockView: View {
 
     /// The code with token colours, built piece by piece (tokens are ordered and never overlap).
     static func highlighted(_ code: String, language: String?) -> AttributedString {
+        #if DEBUG
+        PerfProbe.measure("parse.highlight") { highlight(code, language: language) }
+        #else
+        highlight(code, language: language)
+        #endif
+    }
+
+    private static func highlight(_ code: String, language: String?) -> AttributedString {
         var out = AttributedString()
         var at = code.startIndex
         for t in CodeHighlighter.tokens(code, language: language) where t.range.lowerBound >= at {

@@ -9,6 +9,9 @@ struct ReplyView: View {
     let root: String?
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.ReplyView")
+        #endif
         VStack(alignment: .leading, spacing: Design.Space.m - 2) {
             ForEach(Array(Self.segments(markdown, root: root).enumerated()), id: \.offset) { _, segment in
                 switch segment {
@@ -34,6 +37,14 @@ struct ReplyView: View {
     }
 
     static func segments(_ markdown: String, root: String?) -> [ReplySegment] {
+        #if DEBUG
+        PerfProbe.measure("parse.segments") { styledSegments(markdown, root: root) }
+        #else
+        styledSegments(markdown, root: root)
+        #endif
+    }
+
+    private static func styledSegments(_ markdown: String, root: String?) -> [ReplySegment] {
         ReplyMarkdown.segments(markdown, root: root) { role, s in
             switch role {
             case .heading(let level): s.font = level <= 2 ? .title3.weight(.semibold) : .headline

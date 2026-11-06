@@ -23,6 +23,9 @@ struct ContextSentView: View {
     private var expandable: Bool { !record.items.isEmpty }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.ContextSentView")
+        #endif
         VStack(alignment: .trailing, spacing: Design.Space.s) {
             Button {
                 guard expandable else { return }

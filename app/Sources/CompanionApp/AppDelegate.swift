@@ -37,6 +37,9 @@ import SwiftUI
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
+        #if DEBUG
+        PerfDriver.shared.markLaunch()
+        #endif
         let root = SidebarView()
             .environment(model).environment(readAloud).environment(dictation).environment(windowStatus)
         window.install(rootView: root, onWidthChange: { [weak self] w in self?.model.setSetting(\.panelWidth, Double(w)) })
@@ -75,6 +78,7 @@ import SwiftUI
                     model.draft = q
                     await model.submitDraft()
                 }
+                PerfDriver.shared.run(model: model)
             }
             #endif
         }

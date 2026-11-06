@@ -40,6 +40,9 @@ struct ChatView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.ChatView")
+        #endif
         ScrollViewReader { proxy in
             ScrollView {
                 let turns = Turn.pair(messages)
@@ -75,6 +78,9 @@ struct TurnView: View {
     var isLatest = false
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count(turn.answer?.isRunning == true ? "body.TurnView.running" : "body.TurnView.settled")
+        #endif
         VStack(alignment: .leading, spacing: Design.Space.m) {
             // The question and its "context sent" line read as one unit.
             VStack(alignment: .trailing, spacing: Design.Space.xs + 2) {
