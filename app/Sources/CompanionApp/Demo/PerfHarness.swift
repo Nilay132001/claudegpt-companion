@@ -42,8 +42,20 @@ enum PerfFlags {
     static let enabled = PerfFlags.mode != nil
     static var counts: [String: Int] = [:]
     static var nanos: [String: UInt64] = [:]
-    /// The chat's first visible turn (ChatView's scroll position), for the `position` driver.
+    /// The chat's first visible turn and how far (pt) the viewport top is below that turn's top, as ChatView's
+    /// tracker sees it, for the `position` driver.
     static var firstVisibleTurn: UUID?
+    static var firstVisibleInset: Double?
+    static var contentInsetTop = 0.0
+    /// Scrolls the app itself asked for (following the stream, a new turn, a restore). Counted even when a driver
+    /// is not running, so the driver can tell its own moves and lazy-layout corrections from the app's.
+    static var programmaticScrolls = 0
+
+    /// The app scrolled by itself (`reason`: follow, newTurn, restore, jump).
+    static func programmaticScroll(_ reason: String) {
+        programmaticScrolls += 1
+        count("scroll." + reason)
+    }
 
     /// Counts one evaluation of `name` (a view body, a parse).
     static func count(_ name: String) {
@@ -241,33 +253,64 @@ enum PerfFlags {
                                 "answerBodies": (PerfProbe.counts["body.AnswerView.settled"] ?? 0) - before]
     }
 
+    /// Scrolls the chat's clip view by `step` pt per frame between bottom and top (starting upward from where it is).
+    /// Every clip move it did not make is classified:
+    /// - `yanksWhileReading`: the app scrolled by itself (PerfProbe.programmaticScroll within the last 3 frames) while
+    ///   the driver's own last position was more than ScrollFollow.nearBottom above the bottom (measured when it moved,
+    ///   so content growing below does not make the driver "reading");
+    /// - `pullbacks`: the app scrolled by itself down, against the driver scrolling up (any distance): the reader
+    ///   cannot get away from the bottom;
+    /// - `offsetCorrections`: moves the app did not ask for (lazy-layout height corrections, clamping).
+    /// `yanksByOthers` (all of them) and `yanksWhileReadingLegacy` (the window's definition) stay for comparison.
     private func scroll(_ extra: (() -> Void)? = nil) async {
         guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
         let clip = sv.contentView
-        var y = clip.bounds.origin.y, dir: CGFloat = -1, yanks = 0, yanksWhileReading = 0, passes = 0, steps = 0
+        var y = clip.bounds.origin.y, dir: CGFloat = -1, yanks = 0, legacy = 0, passes = 0, steps = 0
+        var reading = 0, pullbacks = 0, corrections = 0, frame = 0, lastProgFrame = -100
+        var lastProg = PerfProbe.programmaticScrolls
+        var events: [String] = [] // the first few non-driver moves: kind@step:points (distance the driver had chosen)
+        var driverDistance: CGFloat = 0
+        var lastDocH = sv.documentView?.frame.height ?? 0
         summary["scrollStartY"] = Double(y)
         let end = DispatchTime.now().uptimeNanoseconds + UInt64(PerfFlags.seconds * 1e9)
         onTick = { _ in
-            // Was the driver reading above the bottom (by its own position) when someone else scrolled?
-            let readingAbove = max(0, (sv.documentView?.frame.height ?? 0) - clip.bounds.height) - y > ScrollFollow.nearBottom
-            if abs(clip.bounds.origin.y - y) > 1 { // someone else scrolled
+            frame += 1
+            if PerfProbe.programmaticScrolls != lastProg { lastProg = PerfProbe.programmaticScrolls; lastProgFrame = frame }
+            let docH = sv.documentView?.frame.height ?? 0
+            let legacyAbove = max(0, docH - clip.bounds.height) - y > ScrollFollow.nearBottom
+            let moved = clip.bounds.origin.y - y
+            if abs(moved) > 1 { // someone else scrolled
                 yanks += 1
-                if readingAbove { yanksWhileReading += 1 }
+                if legacyAbove { legacy += 1 }
+                var kind = "correction"
+                if frame - lastProgFrame <= 3 {
+                    kind = "programmatic"
+                    if driverDistance > ScrollFollow.nearBottom { reading += 1; kind = "reading" }
+                    if dir < 0 && moved > 0 { pullbacks += 1; kind = "pullback" }
+                } else {
+                    corrections += 1
+                }
+                // A correction that moves the offset by as much as the document height changed kept the visible
+                // content in place (the lazy list replaced estimated heights above the viewport).
+                if events.count < 8 { events.append("\(kind)@\(steps):\(Int(moved)) doc\(Int(docH - lastDocH)) d\(Int(driverDistance))") }
                 y = clip.bounds.origin.y
             }
-            let maxY = max(0, (sv.documentView?.frame.height ?? 0) - clip.bounds.height)
+            lastDocH = docH
+            let maxY = max(0, docH - clip.bounds.height)
             y += dir * PerfFlags.step
             if y <= 0 { y = 0; dir = 1; passes += 1 }
             if y >= maxY { y = maxY; dir = -1; passes += 1 }
             clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
             sv.reflectScrolledClipView(clip)
+            driverDistance = maxY - y
             steps += 1
             extra?()
         }
         while DispatchTime.now().uptimeNanoseconds < end { await nextFrame() }
         onTick = nil
         summary["scroll"] = ["steps": steps, "stepPt": Double(PerfFlags.step), "passes": passes, "yanksByOthers": yanks,
-                             "yanksWhileReading": yanksWhileReading]
+                             "yanksWhileReadingLegacy": legacy, "yanksWhileReading": reading, "pullbacks": pullbacks,
+                             "offsetCorrections": corrections, "events": events]
     }
 
     private func switchSessions(_ model: AppModel) async {
@@ -291,7 +334,8 @@ enum PerfFlags {
         summary["switch"] = ["count": sync.count, "syncMs": Self.stats(sync), "toNextFrameMs": Self.stats(toFrame)]
     }
 
-    /// Scroll to the middle, switch to the other session and back: the first visible turn should be the same.
+    /// Scroll to the middle, switch to the other session and back, then open a past chat and close it: the first
+    /// visible turn (and how far into it the viewport top is) should be the same after each round trip.
     private func position(_ model: AppModel) async {
         guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
         let clip = sv.contentView
@@ -299,14 +343,34 @@ enum PerfFlags {
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: mid))
         sv.reflectScrolledClipView(clip)
         for _ in 0..<30 { await nextFrame() }
-        let before = PerfProbe.firstVisibleTurn
+        func sample() -> [String: Any] {
+            ["turn": PerfProbe.firstVisibleTurn?.uuidString ?? "nil", "inset": PerfProbe.firstVisibleInset ?? -1,
+             "clipY": Double(chatScrollView()?.contentView.bounds.origin.y ?? -1), "p": PerfProbe.programmaticScrolls,
+             "insetTop": PerfProbe.contentInsetTop]
+        }
+        let before = sample()
+        let (turn0, inset0) = (PerfProbe.firstVisibleTurn, PerfProbe.firstVisibleInset)
+        func same() -> Bool {
+            guard let turn0, let inset0, let t = PerfProbe.firstVisibleTurn, let i = PerfProbe.firstVisibleInset else { return false }
+            return t == turn0 && abs(i - inset0) <= 2
+        }
         await model.pin("s2")
         for _ in 0..<30 { await nextFrame() }
         await model.pin("s1")
         for _ in 0..<60 { await nextFrame() }
-        let after = PerfProbe.firstVisibleTurn
-        summary["position"] = ["before": before?.uuidString ?? "nil", "after": after?.uuidString ?? "nil",
-                               "same": before != nil && before == after]
+        let afterSwitch = sample(), sameSwitch = same()
+        await model.loadHistory()
+        if let past = model.history?.chats.first(where: { $0.threadId != model.history?.currentThreads["s1"] }) {
+            await model.openPastChat(past)
+            for _ in 0..<30 { await nextFrame() }
+            model.closePastChat()
+            for _ in 0..<60 { await nextFrame() }
+        } else {
+            summary["error"] = "no past chat"
+        }
+        let afterPast = sample()
+        summary["position"] = ["before": before, "afterSwitch": afterSwitch, "afterPast": afterPast,
+                               "same": sameSwitch, "samePast": same(), "turnKnown": turn0 != nil]
     }
 
     private func resize() async {
