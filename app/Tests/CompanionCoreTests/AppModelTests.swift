@@ -381,4 +381,43 @@ import Testing
         m.flushPendingUpdates()
         #expect(!turns.on && !earlier.on && !sidebar.on)
     }
+
+    /// Starts with the worktree read held, after the chat has been restored (its prewarm is waiting for the root).
+    func startedWithWorktreeHeld(_ d: FakeDaemon) async -> AppModel {
+        d.worktreeGate = true
+        let m = AppModel(connector: { d.connection })
+        await m.start()
+        await m.chatLoad?.value
+        while d.worktreeResume == nil { await Task.yield() }
+        return m
+    }
+
+    @Test func prewarmWaitsForTheRootBeforeRendering() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "Hello\n\nWorld")]
+        let m = await startedWithWorktreeHeld(d)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(m.renderCache.count == 0)   // nothing rendered under root nil while the worktree is unknown
+        d.worktreeResume?.resume()
+        await m.detailLoad?.value
+        await m.prewarmTask?.value
+        #expect(m.currentRoot == "/r")
+        #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: "/r") != nil)
+        #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: nil) == nil)
+    }
+
+    @Test func aCancelledPrewarmRendersNothing() async {
+        let d = FakeDaemon()
+        d.worktree = nil   // the root stays nil, so resolving starts no second prewarm
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "Hello\n\nWorld")]
+        let m = await startedWithWorktreeHeld(d)
+        let task = m.prewarmTask
+        #expect(task != nil)
+        task?.cancel()
+        d.worktreeResume?.resume()
+        await m.detailLoad?.value
+        await task?.value
+        #expect(m.prewarmTask == task)
+        #expect(m.renderCache.count == 0)
+    }
 }

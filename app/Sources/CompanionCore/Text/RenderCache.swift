@@ -64,8 +64,33 @@ public final class RenderCache: Sendable {
         return ReplyMarkdown.assemble(rendered, style: style)
     }
 
+    /// What one prewarm pass may fill: about 3/4 of the limits, so the answers it renders first (the newest) are not
+    /// evicted by the ones it renders last, and the views keep room for what they render on demand.
+    public struct Budget: Sendable {
+        public var entries: Int
+        public var cost: Int
+        public var isSpent: Bool { entries <= 0 || cost <= 0 }
+    }
+    public var prewarmBudget: Budget { Budget(entries: limits.entries * 3 / 4, cost: limits.cost / 4 * 3) }
+
+    /// Renders `markdown` for prewarm and charges its chunks to `budget`; nil, rendering nothing, once the answer would
+    /// not fit in the entries left (or the cost is spent). A cost overshoot is at most one answer: cost is known only
+    /// after rendering.
+    public func prewarmAnswer(_ markdown: String, root: String?, budget: inout Budget) -> RenderedAnswer? {
+        let chunks = ReplyMarkdown.chunks(markdown)
+        guard !budget.isSpent, chunks.count <= budget.entries else { budget.entries = 0; return nil }
+        let rendered = chunks.map { chunk($0, root: root) }
+        budget.entries -= chunks.count
+        budget.cost -= rendered.reduce(0) { $0 + $1.cost }
+        return ReplyMarkdown.assemble(rendered, style: style)
+    }
+
+    /// Renders answers in order (callers pass the newest first) until the prewarm budget is spent or the task is cancelled.
     public func prewarm(_ markdowns: [String], root: String?) {
-        for m in markdowns where !Task.isCancelled { _ = answer(for: m, root: root, streaming: false) }
+        var budget = prewarmBudget
+        for m in markdowns {
+            guard !Task.isCancelled, prewarmAnswer(m, root: root, budget: &budget) != nil else { return }
+        }
     }
 
     private func lookup(_ key: Key) -> RenderedChunk? {

@@ -99,4 +99,29 @@ final class RenderLog: Sendable {
         let md = "# Title\n\nSome **bold** text.\n\n```swift\nlet a = 1\n```"
         #expect(c.answer(for: md, root: nil, streaming: false).plainText == ReplyMarkdown.plainText(md))
     }
+
+    @Test func prewarmStopsAtItsBudgetSoTheNewestStayCached() {
+        let log = RenderLog(), c = Self.cache(log, limits: .init(entries: 4, cost: 1 << 20))
+        let newestFirst = (0..<6).map { "Answer \(5 - $0)" }
+        c.prewarm(newestFirst, root: nil)
+        #expect(log.all == ["Answer 5", "Answer 4", "Answer 3"])   // 3/4 of 4 entries
+        #expect(c.cachedAnswer(for: "Answer 5", root: nil) != nil)
+        #expect(c.cachedAnswer(for: "Answer 0", root: nil) == nil)
+    }
+
+    @Test func prewarmStopsAtTheCostBudget() {
+        let log = RenderLog(), c = Self.cache(log, limits: .init(entries: 100, cost: 8))
+        c.prewarm(["aaaa", "bbbb", "cccc"], root: nil)   // budget 6: the second answer spends it
+        #expect(log.all == ["aaaa", "bbbb"])
+        #expect(c.cachedAnswer(for: "aaaa", root: nil) != nil)
+    }
+
+    @Test func aCancelledPrewarmStopsInserting() async {
+        let c = RenderCache { chunk, _ in
+            withUnsafeCurrentTask { $0?.cancel() }   // cancel the prewarming task during its first render
+            return RenderedChunk(blocks: [.code(language: nil, text: chunk.text, isOpen: false)], plainText: chunk.text, cost: 1)
+        }
+        await Task { c.prewarm(["A", "B", "C"], root: nil) }.value
+        #expect(c.count == 1)
+    }
 }

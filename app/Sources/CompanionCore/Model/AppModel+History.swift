@@ -47,13 +47,18 @@ extension AppModel {
             let root = sid.flatMap(self.root(for:))
             let work = Task.detached(priority: .utility) {
                 var batch: [(UUID, String, RenderedAnswer)] = []
+                // Newest first, within the cache's prewarm budget, so the newest stay resident; older answers
+                // render on demand when scrolled to.
+                var budget = cache.prewarmBudget
                 for (i, (id, text)) in items.enumerated() where !Task.isCancelled {
-                    batch.append((id, text, cache.answer(for: text, root: root, streaming: false)))
-                    if batch.count == 8 || i == items.count - 1 {
+                    let rendered = cache.prewarmAnswer(text, root: root, budget: &budget)
+                    if let rendered { batch.append((id, text, rendered)) }
+                    if !batch.isEmpty && (batch.count == 8 || i == items.count - 1 || rendered == nil) {
                         let done = batch
                         batch = []
                         await MainActor.run { for (id, text, r) in done { feed()?.setRendered(r, for: id, text: text) } }
                     }
+                    if rendered == nil { break }   // budget spent
                 }
             }
             await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }

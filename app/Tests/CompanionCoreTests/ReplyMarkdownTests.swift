@@ -73,4 +73,11 @@ import Testing
         #expect(ReplyMarkdown.chunks("").isEmpty)
         #expect(ReplyMarkdown.chunks("\n\n  \n").isEmpty)
     }
+
+    @Test func crlfAndLoneCRChunkLikeLF() {
+        let lf = ReplyMarkdown.chunks("# T\n\nOne\ntwo\n\n```\na\n\nb\n```\n\nEnd")
+        #expect(ReplyMarkdown.chunks("# T\r\n\r\nOne\r\ntwo\r\n\r\n```\r\na\r\n\r\nb\r\n```\r\n\r\nEnd") == lf)
+        #expect(ReplyMarkdown.chunks("# T\r\rOne\rtwo\r\r```\ra\r\rb\r```\r\rEnd") == lf)
+        #expect(lf.count == 4)
+    }
 }

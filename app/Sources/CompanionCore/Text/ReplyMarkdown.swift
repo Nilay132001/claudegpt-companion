@@ -180,6 +180,9 @@ extension ReplyMarkdown {
             if !text.isEmpty { out.append(MarkdownChunk(text: text, isOpen: false)) }
             lines = []
         }
+        // "\r\n" is one Character in Swift, so it never matches "\n": normalise CRLF and lone CR first.
+        let markdown = markdown.utf8.contains(13)
+            ? markdown.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n") : markdown
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.drop { $0 == " " || $0 == "\t" }
             if let f = fence {
