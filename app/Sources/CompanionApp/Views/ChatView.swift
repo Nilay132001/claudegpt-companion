@@ -14,12 +14,12 @@ struct ChatView: View {
     let readOnly: Bool
 
     var body: some View {
-        // One scroll view per chat: a new key is a new view (fresh scroll state, no turn-count animation across
-        // chats). Each saves its position when it goes away (switch, past chat, empty or loading state) and the
-        // next view for that key starts from it.
+        // One scroll view for every session: a session switch keeps it and swaps the feed (a new scroll view per
+        // session made each switch measure the new chat's rows from scratch: 247 ms at d1cb92b). The reading
+        // position is saved per chat when the session changes or the view goes away (past chat, empty or loading
+        // state), and restored for the chat it shows next.
         ChatScroll(feed: feed, sessionKey: sessionKey, readOnly: readOnly,
                    restore: model.scrollMemory.position(for: sessionKey))
-            .id(sessionKey)
     }
 }
 
@@ -28,8 +28,10 @@ private struct ChatScroll: View {
     let feed: ChatFeed
     let sessionKey: String
     let readOnly: Bool
-    /// Where the reader was in this chat, or nil to start at the bottom.
+    /// Where the reader was in the chat this view first shows, or nil to start at the bottom.
     let restore: ChatScrollAnchor?
+    /// The position being restored (the first chat's, then each chat switched to), for the marker in its turn.
+    @State private var restoring: ChatScrollAnchor?
 
     /// The follow state changes on every scroll and resize frame; a @State struct would start a SwiftUI transaction
     /// (a second graph update in the frame) each time, and re-run this body. Only the Jump button observes it, and
@@ -45,6 +47,7 @@ private struct ChatScroll: View {
         self.readOnly = readOnly
         self.restore = restore
         _follow = State(initialValue: FollowBox(ScrollFollow(following: restore == nil)))
+        _restoring = State(initialValue: restore)
     }
 
     private static var initialAnchor: UnitPoint {
@@ -66,6 +69,11 @@ private struct ChatScroll: View {
         #if DEBUG
         let _ = PerfProbe.count("body.ChatView")
         #endif
+        // A session switch re-runs this body with the new key before any of the new chat's rows is laid out, while
+        // the tracker still holds the old chat's frames: save the old chat's position now.
+        let _ = tracker.bind(session: sessionKey) { old, anchor in
+            model.scrollMemory.save(session: old, anchor: anchor, following: follow.state.following)
+        }
         // No .scrollPosition binding (M9 Task 4b): with one, SwiftUI kept the bottom edge pinned while content grew
         // under a reader it had not seen scroll, re-anchored every row on each resize frame, and adjusted the content
         // offset from inside lazy placement. Programmatic scrolls go through the proxy; the reading position is
@@ -74,7 +82,7 @@ private struct ChatScroll: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
-                    TurnList(feed: feed, readOnly: readOnly, tracker: tracker, restore: restore)
+                    TurnList(feed: feed, readOnly: readOnly, tracker: tracker, restore: restoring)
                     Color.clear.frame(height: 1).id(Self.bottomID)
                 }
                 .coordinateSpace(.named(TurnTracker.space))
@@ -115,16 +123,18 @@ private struct ChatScroll: View {
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
             }
-            .onAppear {
-                // Back to where the reader was: first the saved turn (the lazy list lays it out), then, once it has
-                // a frame, the marker `inset` points into it, so the same line is at the top as before.
-                if let restore, feed.turns.contains(where: { $0.id == restore.turn }) {
-                    Self.note("restore")
-                    proxy.scrollTo(restore.turn, anchor: .top)
-                    tracker.whenLaidOut(restore.turn) {
-                        Self.note("restore")
-                        proxy.scrollTo(RestoreMarker.id, anchor: .top)
-                    }
+            .onAppear { if let restore { scroll(to: restore, proxy) } }
+            .onChange(of: sessionKey) { _, new in
+                // Another session's chat in the same scroll view: its saved line, or its bottom.
+                let r = model.scrollMemory.position(for: new)
+                follow.state = ScrollFollow(following: r == nil)
+                publish()
+                restoring = r
+                if let r {
+                    scroll(to: r, proxy)
+                } else {
+                    Self.note("switch")
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
             }
             .onDisappear {
@@ -144,6 +154,18 @@ private struct ChatScroll: View {
     private static let bottomID = "chat.bottom"
 
     private func publish() { follow.publish() }
+
+    /// Back to where the reader was: first the saved turn (the lazy list lays it out), then, once it has a frame,
+    /// the marker `inset` points into it, so the same line is at the top as before.
+    private func scroll(to anchor: ChatScrollAnchor, _ proxy: ScrollViewProxy) {
+        guard feed.turns.contains(where: { $0.id == anchor.turn }) else { return }
+        Self.note("restore")
+        proxy.scrollTo(anchor.turn, anchor: .top)
+        tracker.whenLaidOut(anchor.turn) {
+            Self.note("restore")
+            proxy.scrollTo(RestoreMarker.id, anchor: .top)
+        }
+    }
 }
 
 /// ScrollFollow in a reference (see ChatScroll.follow): `state` is not observed; `showsJump` is, by the Jump button.
@@ -167,6 +189,17 @@ private struct ChatScroll: View {
     private var height = 0.0
 
     var firstVisible: ChatScrollAnchor? { turns.first(top: top, viewportHeight: height) }
+    private var session: String?
+
+    /// Called from ChatScroll's body with the session it shows. On a change, hands the previous session's position
+    /// to `save` and forgets its frames.
+    func bind(session new: String, save: (String, ChatScrollAnchor?) -> Void) {
+        defer { session = new }
+        guard let old = session, old != new else { return }
+        save(old, firstVisible)
+        turns = VisibleTurns()
+        pending = nil
+    }
 
     func viewport(top: Double, height: Double) {
         self.top = top
@@ -259,8 +292,11 @@ private struct TurnList: View {
         }
         // The entrance transition needs a transaction: animate only a newly appended turn, on the stack and not
         // the scroll view (spec §5.8). Keyed on the last turn's id, not the count: a restore inserts older turns
-        // at the front and keeps the last id, and a chat switch is a new view (ChatView's .id), so neither
-        // animates. Older rows use .identity; under Reduce Motion EntranceTransition is opacity only.
+        // at the front and keeps the last id, and a chat switch swaps the feed (below), so neither animates.
+        // Older rows use .identity; under Reduce Motion EntranceTransition is opacity only.
+        // A session switch swaps the feed in this same list: no entrance then. Nearer the rows than the entrance
+        // animation, so it wins when both values change in one update.
+        .animation(nil, value: ObjectIdentifier(feed))
         .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: turns.last?.id)
         .padding(.horizontal, Design.Space.l)
         .padding(.top, Design.Space.m)
