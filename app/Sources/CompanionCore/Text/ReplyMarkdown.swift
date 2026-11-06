@@ -9,8 +9,66 @@ public enum ReplyBlock: Equatable, Sendable {
     case code(language: String?, text: String)
 }
 
+/// What a piece of a prose run is, so the view can style it (fonts live in the app, not here).
+public enum ProseRole: Equatable, Sendable { case paragraph, heading(level: Int), bullet, numbered, quote, gap }
+
+/// A reply split for display: consecutive non-code blocks become ONE attributed string (one selectable Text),
+/// so a selection can cross paragraphs, headings and list items.
+public enum ReplySegment: Equatable, Sendable {
+    case prose(AttributedString)
+    case code(language: String?, text: String)
+}
+
 /// The only place GPT reply text is parsed as Markdown (SourceRulesTests enforces it).
 public enum ReplyMarkdown {
+    /// Splits a reply into prose runs and code blocks. `style` is called once per piece (and per gap between
+    /// blocks) so the caller can set fonts and colours; list items in a row are joined by one newline, other blocks
+    /// by a `.gap` piece ("\n\n") the caller can make shorter than a full line.
+    public static func segments(_ markdown: String, root: String?,
+                                style: (ProseRole, inout AttributedString) -> Void = { _, _ in }) -> [ReplySegment] {
+        var out: [ReplySegment] = []
+        var run: AttributedString?
+        var lastWasList = false
+        func flush() {
+            if let r = run { out.append(.prose(r)) }
+            run = nil
+            lastWasList = false
+        }
+        for block in blocks(markdown) {
+            let role: ProseRole
+            var piece: AttributedString
+            switch block {
+            case .code(let lang, let text):
+                flush()
+                out.append(.code(language: lang, text: text))
+                continue
+            case .paragraph(let t): role = .paragraph; piece = inline(t, root: root)
+            case .heading(let level, let t): role = .heading(level: level); piece = inline(t, root: root)
+            case .bullet(let t): role = .bullet; piece = AttributedString("•  ") + inline(t, root: root)
+            case .numbered(let marker, let t): role = .numbered; piece = AttributedString(marker + "  ") + inline(t, root: root)
+            case .quote(let t): role = .quote; piece = inline(t, root: root)
+            }
+            style(role, &piece)
+            let isList = role == .bullet || role == .numbered
+            if var r = run {
+                if isList && lastWasList {
+                    r.append(AttributedString("\n"))
+                } else {
+                    var gap = AttributedString("\n\n")
+                    style(.gap, &gap)
+                    r.append(gap)
+                }
+                r.append(piece)
+                run = r
+            } else {
+                run = piece
+            }
+            lastWasList = isList
+        }
+        flush()
+        return out
+    }
+
     public static func blocks(_ markdown: String) -> [ReplyBlock] {
         var out: [ReplyBlock] = []
         var para: [String] = []
@@ -81,5 +139,19 @@ public enum ReplyMarkdown {
             out[start..<end].link = EditorLink.companionURL(m.reference)
         }
         return out
+    }
+
+    /// The reply as plain text: headings, bullets and quotes flattened, inline marks removed, code verbatim.
+    public static func plainText(_ markdown: String) -> String {
+        func flat(_ s: String) -> String { String(inline(s, root: nil).characters) }
+        return blocks(markdown).map { block -> String in
+            switch block {
+            case .paragraph(let t), .quote(let t): flat(t)
+            case .heading(_, let t): flat(t)
+            case .bullet(let t): "• " + flat(t)
+            case .numbered(let marker, let t): marker + " " + flat(t)
+            case .code(_, let t): t
+            }
+        }.joined(separator: "\n\n")
     }
 }

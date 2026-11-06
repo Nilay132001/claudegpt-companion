@@ -382,3 +382,132 @@ public enum DaemonEvent: Sendable, Equatable {
         return e ?? .unknown(method)
     }
 }
+
+// MARK: History (M8)
+
+public struct TurnItem: Sendable, Equatable, Identifiable {
+    public let kind: String
+    public let label: String
+    public let text: String
+    public let redactions: Int
+    /// Position in the turn's item list (assigned when the turn is decoded).
+    public let index: Int
+    public var id: String { "\(index)" }
+    public init(kind: String, label: String, text: String, redactions: Int, index: Int) {
+        self.kind = kind
+        self.label = label
+        self.text = text
+        self.redactions = redactions
+        self.index = index
+    }
+}
+
+private struct RawTurnItem: Decodable {
+    let kind: String
+    let label: String
+    let text: String
+    let redactions: Int
+}
+
+public struct TurnRecord: Decodable, Sendable, Equatable, Identifiable {
+    public let turnId: String
+    public let sessionId: String
+    public let threadId: String
+    public let sessionTitle: String?
+    public let mode: SharingMode
+    public let question: String
+    public let contextBlock: String
+    public let items: [TurnItem]
+    public let omitted: Int
+    public let answer: String
+    public let status: String
+    public let error: String?
+    public let sentAt: Double
+    public let completedAt: Double?
+    public var id: String { turnId }
+
+    private enum Keys: String, CodingKey {
+        case turnId, sessionId, threadId, sessionTitle, mode, question, contextBlock, items, omitted, answer, status, error, sentAt, completedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        turnId = try c.decode(String.self, forKey: .turnId)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        threadId = try c.decode(String.self, forKey: .threadId)
+        sessionTitle = try c.decodeIfPresent(String.self, forKey: .sessionTitle)
+        mode = try c.decode(SharingMode.self, forKey: .mode)
+        question = try c.decode(String.self, forKey: .question)
+        contextBlock = try c.decode(String.self, forKey: .contextBlock)
+        items = try c.decode([RawTurnItem].self, forKey: .items).enumerated().map {
+            TurnItem(kind: $1.kind, label: $1.label, text: $1.text, redactions: $1.redactions, index: $0)
+        }
+        omitted = try c.decode(Int.self, forKey: .omitted)
+        answer = try c.decode(String.self, forKey: .answer)
+        status = try c.decode(String.self, forKey: .status)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        sentAt = try c.decode(Double.self, forKey: .sentAt)
+        completedAt = try c.decodeIfPresent(Double.self, forKey: .completedAt)
+    }
+}
+
+extension TurnRecord {
+    public init(turnId: String, sessionId: String, threadId: String, sessionTitle: String? = nil, mode: SharingMode = .automatic,
+                question: String, contextBlock: String = "", items: [TurnItem] = [], omitted: Int = 0, answer: String,
+                status: String = "completed", error: String? = nil, sentAt: Double = 0, completedAt: Double? = nil) {
+        self.turnId = turnId
+        self.sessionId = sessionId
+        self.threadId = threadId
+        self.sessionTitle = sessionTitle
+        self.mode = mode
+        self.question = question
+        self.contextBlock = contextBlock
+        self.items = items
+        self.omitted = omitted
+        self.answer = answer
+        self.status = status
+        self.error = error
+        self.sentAt = sentAt
+        self.completedAt = completedAt
+    }
+}
+
+public struct ChatSummary: Decodable, Sendable, Equatable, Identifiable {
+    public let sessionId: String
+    public let threadId: String
+    public let sessionTitle: String?
+    public let firstQuestion: String
+    public let turns: Int
+    public let startedAt: Double
+    public let lastAt: Double
+    public var id: String { threadId }
+    public init(sessionId: String, threadId: String, sessionTitle: String?, firstQuestion: String, turns: Int, startedAt: Double, lastAt: Double) {
+        self.sessionId = sessionId
+        self.threadId = threadId
+        self.sessionTitle = sessionTitle
+        self.firstQuestion = firstQuestion
+        self.turns = turns
+        self.startedAt = startedAt
+        self.lastAt = lastAt
+    }
+}
+
+public struct HistoryList: Decodable, Sendable, Equatable {
+    public let chats: [ChatSummary]
+    public let currentThreads: [String: String]
+    public let enabled: Bool
+    public init(chats: [ChatSummary], currentThreads: [String: String], enabled: Bool) {
+        self.chats = chats
+        self.currentThreads = currentThreads
+        self.enabled = enabled
+    }
+}
+
+public struct HistoryTurns: Decodable, Sendable, Equatable {
+    public let threadId: String?
+    public let turns: [TurnRecord]
+    public init(threadId: String?, turns: [TurnRecord]) {
+        self.threadId = threadId
+        self.turns = turns
+    }
+}

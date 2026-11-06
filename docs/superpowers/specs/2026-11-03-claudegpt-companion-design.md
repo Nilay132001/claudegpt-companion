@@ -1,6 +1,6 @@
 # ClaudeGPT Companion — design
 
-Status: **v3.6 — M7: packaging (bundled Node, signing notes)** · Date: 2026-11-05 (v3:
+Status: **v3.7 — M8: UI redesign, kept history, context ranking** · Date: 2026-11-05 (v3:
 2026-11-03) · Based on: `docs/findings/2026-11-03-phase1-poc.md`
 
 - v1 → v2: owner review (decisions D1–D3, required changes R1–R8, §15).
@@ -16,6 +16,20 @@ Status: **v3.6 — M7: packaging (bundled Node, signing notes)** · Date: 2026-1
   through the relay like the jail; the self-check fails on write-shaped tools; each change is marked "M6".
   Evidence: `companiond/itest/jira.itest.ts` and `itest/jiraProfile.itest.ts` (§11).
 - v3.6 (M7): M7 packaging: bundled Node, relay source in the bundle, signing notes.
+- v3.7 (M8): UI redesign and chat history. Each item is marked "M8" where it applies.
+  - `companion.db` schema v2 adds a `turns` table. The daemon gets `history.list`, `history.turns`,
+    `history.clear`, `history.setEnabled` and `chat.newChat`. New chat closes the current thread and clears
+    the stored thread and the context cursor.
+  - Context ranking: user messages and Claude replies/failures first, then commands, file edits and folder
+    changes, then subagent output. The cap is unchanged (12 KB, 2000 text chars, 1500 tool chars, 40 items).
+    Output keeps transcript order.
+  - History redaction: question and answer go through `redact()` before storage. The context block is stored
+    as sent (already redacted). Limits: 200 turns per chat, 2,000 overall, 64 KB per answer.
+  - Settings › Privacy: "Keep chat history" (default on) and "Clear history…". With history off, "View
+    what was sent" still works for this run from memory (§7.5).
+  - Original app icon (no OpenAI or Anthropic marks).
+  - Read Aloud picks the best installed voice (Premium, then Enhanced, then default; no novelty or Personal
+    Voice), with a voice picker, Preview and sentence pacing.
 
 ## 1. Goal and acceptance test
 
@@ -669,9 +683,17 @@ output before it reaches Codex.
   items the user removed: removed transcript items are not offered again (the user saw and declined them).
   Exception: subagent progress the user removed from the preview is offered again next time; only what was
   sent is marked sent. The cursor moves only when the turn completes and never moves backwards (§4).
-- Every sent message has "View what was sent" showing the exact context block. *M4b:* the daemon keeps the
-  exact context block of each sent turn in memory for the run (`chat.sent`); after a restart the same text
-  is in the Codex thread history. It is not written to `companion.db`.
+- Every sent message has "View what was sent" showing the exact context block. *M8 (v3.7):* with history on,
+  each sent turn (question, context block, sent items, answer) is stored redacted in `companion.db` and
+  `history.turns` reads it from there. With history off, nothing about the turn is written to
+  `companion.db`: the daemon keeps this run's turns in memory only (newest 50 per session) and
+  `history.turns {sessionId}` and `chat.sent` answer from that; after a restart they are gone (the same text
+  is still in the Codex thread history). A turn whose store write failed is shown from memory the same way.
+  `history.turns` takes an optional `limit` (1–200) and answers at most 4 MB of JSON, leaving out the oldest
+  turns first. Context ranking (v3.7) may leave newer tool and subagent items out of a turn's context under the cap;
+  those items are not resent with later turns.
+- "Clear history" removes the companion's saved history (and this run's in-memory turns). Codex keeps its
+  own thread records.
 - Raw full transcripts are never sent; the delta is capped (default 12 KB).
 
 ### 7.6 Prompt injection

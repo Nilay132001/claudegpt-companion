@@ -71,6 +71,23 @@ final class MemoryTransport: LineTransport {
         #expect(try await pin.via == "none")
     }
 
+    @Test func historyTurnsSendsTheLimitOnlyWhenGiven() async throws {
+        let t = MemoryTransport()
+        let client = DaemonClient(transport: t)
+        await client.start()
+        async let a = client.historyTurns(sessionId: "s1", limit: 1)
+        try await t.waitForRequests(1)
+        #expect(t.requests[0]["method"] == .string("history.turns"))
+        #expect(t.requests[0]["params"] == .object(["sessionId": .string("s1"), "limit": .number(1)]))
+        t.push(#"{"jsonrpc":"2.0","id":1,"result":{"threadId":null,"turns":[]}}"#)
+        #expect(try await a.turns.isEmpty)
+        async let b = client.historyTurns(sessionId: "s1")
+        try await t.waitForRequests(2)
+        #expect(t.requests[1]["params"] == .object(["sessionId": .string("s1")]))
+        t.push(#"{"jsonrpc":"2.0","id":2,"result":{"threadId":null,"turns":[]}}"#)
+        #expect(try await b.threadId == nil)
+    }
+
     @Test func mapsErrors() async throws {
         let t = MemoryTransport()
         let client = DaemonClient(transport: t)

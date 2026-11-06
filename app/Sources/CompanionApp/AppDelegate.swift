@@ -10,7 +10,21 @@ import SwiftUI
     let window: WindowCoordinator
     private var observers: [NSObjectProtocol] = []
 
+    #if DEBUG
+    static let demo: DemoDaemon? = DemoFlags.scene.map { DemoDaemon(scene: $0) }
+    #endif
+
     override init() {
+        #if DEBUG
+        if let demo = Self.demo {
+            model = AppModel(connector: demo.connector)
+            let status = WindowStatus()
+            windowStatus = status
+            window = WindowCoordinator(status: status)
+            super.init()
+            return
+        }
+        #endif
         model = AppModel(connector: DaemonLocator.live(
             env: ProcessInfo.processInfo.environment,
             configuredNode: { UserDefaults.standard.string(forKey: "nodePath") },
@@ -38,9 +52,45 @@ import SwiftUI
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.window.retryFollowIfNeeded() }
         })
-        apply(model.settings, byUser: false)
+        #if DEBUG
+        switch ProcessInfo.processInfo.environment["COMPANION_DEMO_APPEARANCE"] {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
+        DemoShot.scheduleIfAsked()
+        #endif
+        apply(initialSettings(), byUser: false)
         window.show()
-        Task { await model.start() }
+        Task {
+            await model.start()
+            #if DEBUG
+            if let demo = Self.demo {
+                demo.afterStart()
+                if demo.scene == "pastChat" {
+                    await model.loadHistory()
+                    if let c = model.history?.chats.first(where: { $0.threadId == "th0" }) { await model.openPastChat(c) }
+                }
+                if let q = demo.autoQuestion {
+                    model.draft = q
+                    await model.submitDraft()
+                }
+            }
+            #endif
+        }
+    }
+
+    /// The settings for the first layout. DEBUG: COMPANION_DEMO_WIDTH sizes the panel before it, so a demo chat lays
+    /// out once at that width.
+    private func initialSettings() -> UISettings {
+        #if DEBUG
+        if let w = DemoFlags.width.flatMap(Double.init) {
+            var s = model.settings
+            s.panelWidth = w
+            return s
+        }
+        #endif
+        return model.settings
     }
 
     private func apply(_ s: UISettings, byUser: Bool) {

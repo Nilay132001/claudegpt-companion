@@ -57,7 +57,7 @@ function fakeHost() {
     emit({ type: "turnCompleted", threadId, turnId, status, error: null });
   };
   return {
-    host, opened, closed, interrupted, turns, complete,
+    host, opened, closed, interrupted, turns, complete, emit,
     dropAll: () => active.clear(), // what sign-in or a failure does to CodexHost's threads
     setFailResume: (v: boolean) => { failResume = v; },
     setBusy: (v: boolean) => { busy = v; },
@@ -402,4 +402,230 @@ test("an older prepare completing later never moves the cursor backwards", async
   const o = await chat.send(oldP.prepareId, []);
   h.complete(o.threadId, o.turnId);
   assert.equal(store.getCursor("s1"), "u3");
+});
+
+const delta = (threadId: string, turnId: string, itemId: string, text: string): HostEvent => ({ type: "delta", threadId, turnId, itemId, text });
+
+test("history: a completed turn is recorded with context, sent items and the answer from deltas", async () => {
+  const { chat, store, h } = setup();
+  const p = await chat.prepare("s1", "What broke?");
+  const { threadId, turnId } = await chat.send(p.prepareId, ["item-1"]);
+  assert.equal(store.turnsForThread(threadId)[0]?.status, "running");
+  h.emit(delta(threadId, turnId, "a", "Hello "));
+  h.emit(delta(threadId, turnId, "b", "second"));
+  h.emit(delta(threadId, turnId, "a", "world"));
+  h.complete(threadId, turnId);
+  const t = store.turnsForThread(threadId);
+  assert.equal(t.length, 1);
+  assert.equal(t[0]?.status, "completed");
+  assert.equal(t[0]?.answer, "Hello world\n\nsecond");
+  assert.equal(t[0]?.question, "What broke?");
+  assert.equal(t[0]?.sessionTitle, "Login bug");
+  assert.equal(t[0]?.mode, "ask");
+  assert.deepEqual(t[0]?.items.map((i) => i.text), ["reply"]); // the removed item is not stored
+  assert.match(t[0]?.contextBlock ?? "", /\nreply\n/);
+  assert.equal(chat.sent("s1")[0]?.contextBlock, t[0]?.contextBlock);
+});
+
+test("history: interrupted and failed statuses; failed keeps the error", async () => {
+  const { chat, store, h } = setup();
+  const a = await chat.send((await chat.prepare("s1", "one")).prepareId, []);
+  h.complete(a.threadId, a.turnId, "interrupted");
+  const b = await chat.send((await chat.prepare("s1", "two")).prepareId, []);
+  h.emit({ type: "turnCompleted", threadId: b.threadId, turnId: b.turnId, status: "failed", error: "boom" });
+  const t = store.turnsForThread(a.threadId);
+  assert.deepEqual(t.map((x) => [x.status, x.error]), [["interrupted", null], ["failed", "boom"]]);
+});
+
+test("history: a turn that completes before turn/start answers is finished right after insert", async () => {
+  const { chat, store, h } = setup();
+  h.setCompleteEarly("completed");
+  const { threadId } = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  assert.equal(store.turnsForThread(threadId)[0]?.status, "completed");
+});
+
+test("history: Off stores the repository-only block and no title; disabled history writes nothing", async () => {
+  const off = setup({ mode: "off" });
+  const r = await off.chat.send((await off.chat.prepare("s1", "q")).prepareId, []);
+  const row = off.store.turnsForThread(r.threadId)[0];
+  assert.equal(row?.sessionTitle, null);
+  assert.equal(row?.mode, "off");
+  assert.deepEqual(row?.items, []);
+  assert.ok((row?.contextBlock ?? "").length > 0);
+  const x = setup();
+  x.store.setHistoryEnabled(false);
+  const s = await x.chat.send((await x.chat.prepare("s1", "q")).prepareId, []);
+  x.h.complete(s.threadId, s.turnId);
+  assert.equal(x.store.listChats().length, 0);
+  // Nothing written, but this run's turn is still there to view (from memory).
+  assert.deepEqual(x.chat.sent("s1").map((r) => r.turnId), [s.turnId]);
+});
+
+test("history off: this run's turns are kept in memory, answers accumulate, nothing reaches companion.db", async () => {
+  const { chat, store, h } = setup();
+  store.setHistoryEnabled(false);
+  let writes = 0;
+  const insert = store.insertTurn.bind(store);
+  store.insertTurn = (t) => { writes++; insert(t); };
+  const a = await chat.send((await chat.prepare("s1", "first question")).prepareId, []);
+  assert.equal(chat.turns("s1").turns[0]?.status, "running");
+  h.emit(delta(a.threadId, a.turnId, "x", "Hello "));
+  h.emit(delta(a.threadId, a.turnId, "y", "second"));
+  h.emit(delta(a.threadId, a.turnId, "x", "world"));
+  h.complete(a.threadId, a.turnId);
+  const fakeKey = ["sk", "ant", "api03", "A".repeat(40)].join("-"); // built at runtime: no key-shaped literal in the repo
+  const b = await chat.send((await chat.prepare("s1", `token ${fakeKey}`)).prepareId, []);
+  h.dropAll();
+  chat.reconcile();
+  const r = chat.turns("s1");
+  assert.equal(r.threadId, a.threadId);
+  assert.deepEqual(r.turns.map((t) => [t.turnId, t.status]), [[a.turnId, "completed"], [b.turnId, "abandoned"]]);
+  assert.equal(r.turns[0]?.answer, "Hello world\n\nsecond");
+  assert.equal(r.turns[0]?.sessionTitle, "Login bug");
+  assert.match(r.turns[0]?.contextBlock ?? "", /<untrusted_data/);
+  assert.doesNotMatch(r.turns[1]?.question ?? "", /sk-ant-api03/); // redacted like a stored row
+  assert.equal(chat.turns("s1", 1).turns.length, 1);
+  assert.equal(chat.turns("s1", 1).turns[0]?.turnId, b.turnId);
+  assert.equal(writes, 0);
+  assert.equal(store.turnsForThread(a.threadId).length, 0);
+  assert.deepEqual(chat.turns("s2"), { threadId: null, turns: [] });
+  // A new chat shows only its own turns; forgetTurns (history.clear) drops the memory.
+  await chat.newChat("s1");
+  const c = await chat.send((await chat.prepare("s1", "new chat")).prepareId, []);
+  assert.deepEqual(chat.turns("s1").turns.map((t) => t.turnId), [c.turnId]);
+  chat.forgetTurns(null);
+  assert.deepEqual(chat.turns("s1").turns, []);
+});
+
+test("history off: memory keeps the newest 50 turns per session", async () => {
+  const { chat, store, h } = setup();
+  store.setHistoryEnabled(false);
+  let last = "";
+  for (let i = 0; i < 55; i++) {
+    const s = await chat.send((await chat.prepare("s1", `q${i}`)).prepareId, []);
+    h.complete(s.threadId, s.turnId);
+    last = s.turnId;
+  }
+  const t = chat.turns("s1").turns;
+  assert.equal(t.length, 50);
+  assert.equal(t[0]?.question, "q5");
+  assert.equal(t.at(-1)?.turnId, last);
+});
+
+test("history on but the store write failed: the turn is shown from memory next to stored ones", async () => {
+  const { chat, store, h } = setup();
+  const a = await chat.send((await chat.prepare("s1", "stored")).prepareId, []);
+  h.complete(a.threadId, a.turnId);
+  const insert = store.insertTurn.bind(store);
+  store.insertTurn = () => { throw new Error("disk"); };
+  const b = await chat.send((await chat.prepare("s1", "not stored")).prepareId, []);
+  h.emit(delta(b.threadId, b.turnId, "x", "answer"));
+  h.complete(b.threadId, b.turnId);
+  store.insertTurn = insert;
+  assert.deepEqual(store.turnsForThread(a.threadId).map((t) => t.turnId), [a.turnId]);
+  const r = chat.turns("s1").turns;
+  assert.deepEqual(r.map((t) => t.turnId), [a.turnId, b.turnId]);
+  assert.equal(r[1]?.answer, "answer");
+  assert.deepEqual(chat.sent("s1").map((x) => x.question), ["stored", "not stored"]);
+});
+
+test("history: reconcile marks the running turn abandoned; a new service abandons leftovers", async () => {
+  const { chat, store, h } = setup();
+  const { threadId, turnId } = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  h.emit(delta(threadId, turnId, "a", "partial"));
+  h.dropAll();
+  chat.reconcile();
+  const t = store.turnsForThread(threadId)[0];
+  assert.equal(t?.status, "abandoned");
+  assert.equal(t?.answer, "partial");
+  assert.equal(t?.error, "Codex restarted before this reply finished. Ask again.");
+  store.insertTurn({ turnId: "x", sessionId: "s1", threadId, sessionTitle: null, mode: "off", question: "q", contextBlock: "", items: [], omitted: 0, sentAt: 5 });
+  const h2 = fakeHost();
+  new ChatService({ host: h2.host, bridge: {} as ChatBridge, store, sharingMode: () => "off", isApproved: () => true, launchFor: async () => { throw new Error("x"); } });
+  assert.equal(store.turnsForThread(threadId).find((x) => x.turnId === "x")?.status, "abandoned");
+});
+
+test("history: a failing store never breaks chatting", async () => {
+  const { chat, store, h } = setup();
+  store.insertTurn = () => { throw new Error("disk"); };
+  store.finishTurn = () => { throw new Error("disk"); };
+  const { threadId, turnId } = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  h.complete(threadId, turnId);
+  assert.equal(store.getCursor("s1"), "u2");
+});
+
+test("newChat: clears thread and cursor, closes the open thread, refuses while a reply runs", async () => {
+  const { chat, store, h } = setup();
+  const a = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  await assert.rejects(chat.newChat("s1"), (e: unknown) => e instanceof TurnBusyError);
+  h.complete(a.threadId, a.turnId);
+  assert.equal(store.getCursor("s1"), "u2");
+  await chat.newChat("s1");
+  assert.equal(store.getThread("s1"), null);
+  assert.equal(store.getCursor("s1"), null);
+  assert.deepEqual(h.closed, [a.threadId]);
+  assert.equal(store.turnsForThread(a.threadId).length, 1); // history stays
+  const b = await chat.send((await chat.prepare("s1", "again")).prepareId, []);
+  assert.notEqual(b.threadId, a.threadId);
+  assert.deepEqual(chat.sent("s1").map((r) => r.question), ["again"]);
+});
+
+test("newChat drops the session's unsent prepares", async () => {
+  const { chat } = setup();
+  const stale = await chat.prepare("s1", "old");
+  const other = await chat.prepare("s2", "other");
+  await chat.newChat("s1");
+  await assert.rejects(chat.send(stale.prepareId, []), (e: unknown) => e instanceof ChatError && e.reason === "prepare_expired");
+  assert.equal(chat.needsConfirm(other.prepareId), true); // another session's prepare is untouched
+});
+
+test("newChat refuses while a send is in flight", async () => {
+  const { chat, h } = setup();
+  let release!: () => void;
+  h.setStartGate(new Promise<void>((r) => { release = r; }));
+  const p = await chat.prepare("s1", "q");
+  const sending = chat.send(p.prepareId, []);
+  await new Promise((r) => setImmediate(r));
+  await assert.rejects(chat.newChat("s1"), (e: unknown) => e instanceof TurnBusyError);
+  release();
+  await sending;
+});
+
+test("newChat clears the repo note and the subagent tracker", async () => {
+  const { chat } = setup();
+  chat.noteRepoChange("s1", "Repository changed from /a to /r");
+  chat.noteSubagent("s1", { agentId: "a1", summary: "SYNTHETIC FIXTURE agent one", records: 3 });
+  await chat.newChat("s1");
+  const p = await chat.prepare("s1", "q");
+  assert.equal(p.repoNote, null);
+  assert.equal(p.preview?.items.some((i) => i.kind === "subagent"), false);
+});
+
+test("history: an oversized reply is cut at 64 KB", async () => {
+  const { chat, store, h } = setup();
+  const { threadId, turnId } = await chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  h.emit(delta(threadId, turnId, "a", "x".repeat(70 * 1024)));
+  h.emit(delta(threadId, turnId, "a", "more"));
+  h.complete(threadId, turnId);
+  assert.equal(store.turnsForThread(threadId)[0]?.answer.length, 64 * 1024);
+});
+
+test("history: foreign turns keep at most 32 reply buffers", async () => {
+  const { chat, h } = setup();
+  for (let i = 0; i < 40; i++) h.emit(delta("thr-x", `foreign-${i}`, "a", "t"));
+  assert.ok(chat.answerBufferCount() <= 32);
+});
+
+test("history: deltas that arrive before turn/start answers land in the answer", async () => {
+  const { chat, store, h } = setup();
+  let release!: () => void;
+  h.setStartGate(new Promise<void>((r) => { release = r; }));
+  const sending = chat.send((await chat.prepare("s1", "q")).prepareId, []);
+  await new Promise((r) => setImmediate(r));
+  h.emit(delta("thr-1", "turn-1", "a", "early "));
+  release();
+  const { threadId, turnId } = await sending;
+  h.emit(delta(threadId, turnId, "a", "late"));
+  h.complete(threadId, turnId);
+  assert.equal(store.turnsForThread(threadId)[0]?.answer, "early late");
 });

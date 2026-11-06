@@ -1,16 +1,27 @@
 import CompanionCore
 import SwiftUI
 
-/// Renders a GPT reply through ReplyMarkdown only. The single link kind is companion-open (path:line inside the root).
+/// Renders a GPT reply through ReplyMarkdown only. Each run of prose is ONE selectable Text (R7), so a selection can
+/// cross paragraphs and list items. The single link kind is companion-open (path:line inside the root).
 struct ReplyView: View {
     @Environment(AppModel.self) private var model
     let markdown: String
     let root: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(ReplyMarkdown.blocks(markdown).enumerated()), id: \.offset) { _, block in
-                view(for: block)
+        VStack(alignment: .leading, spacing: Design.Space.m - 2) {
+            ForEach(Array(Self.segments(markdown, root: root).enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let text):
+                    Text(text)
+                        .font(.body)
+                        .lineSpacing(Design.bodyLineSpacing)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .code(let language, let code):
+                    CodeBlockView(language: language, code: code)
+                }
             }
         }
         .environment(\.openURL, OpenURLAction { url in
@@ -22,24 +33,15 @@ struct ReplyView: View {
         })
     }
 
-    @ViewBuilder private func view(for block: ReplyBlock) -> some View {
-        switch block {
-        case .paragraph(let t):
-            Text(ReplyMarkdown.inline(t, root: root)).textSelection(.enabled)
-        case .heading(let level, let t):
-            Text(ReplyMarkdown.inline(t, root: root)).font(level <= 2 ? .headline : .subheadline.bold())
-        case .bullet(let t):
-            HStack(alignment: .firstTextBaseline, spacing: 6) { Text("•"); Text(ReplyMarkdown.inline(t, root: root)).textSelection(.enabled) }
-        case .numbered(let marker, let t):
-            HStack(alignment: .firstTextBaseline, spacing: 6) { Text(marker); Text(ReplyMarkdown.inline(t, root: root)).textSelection(.enabled) }
-        case .quote(let t):
-            Text(ReplyMarkdown.inline(t, root: root)).foregroundStyle(.secondary).padding(.leading, 8)
-                .overlay(alignment: .leading) { Rectangle().frame(width: 2).foregroundStyle(.tertiary) }
-        case .code(_, let code):
-            ScrollView(.horizontal) {
-                Text(code).font(.system(.callout, design: .monospaced)).textSelection(.enabled).padding(8)
+    static func segments(_ markdown: String, root: String?) -> [ReplySegment] {
+        ReplyMarkdown.segments(markdown, root: root) { role, s in
+            switch role {
+            case .heading(let level): s.font = level <= 2 ? .title3.weight(.semibold) : .headline
+            case .quote: s.foregroundColor = .secondary
+            // A short line between blocks: a caption2 line, relative to Dynamic Type.
+            case .gap: s.font = .caption2
+            case .paragraph, .bullet, .numbered: break
             }
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
         }
     }
 }

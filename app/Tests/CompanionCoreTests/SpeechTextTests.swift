@@ -29,4 +29,41 @@ import Testing
     @Test func flattensTables() {
         #expect(SpeechText.plainText(fromMarkdown: "| a | b |\n|---|---|\n| 1 | 2 |") == "a, b\n1, 2")
     }
+
+    private func texts(_ md: String, readCode: Bool = false) -> [String] { SpeechText.segments(fromMarkdown: md, readCode: readCode).map(\.text) }
+
+    @Test func splitsSentencesButNotAbbreviationsVersionsOrFileNames() {
+        #expect(texts("It works. Does it? Yes! Fine.") == ["It works.", "Does it?", "Yes!", "Fine."])
+        #expect(texts("Use a tool, e.g. grep, here. Next.") == ["Use a tool, e.g. grep, here.", "Next."])
+        #expect(texts("Upgrade to 1.2.3 now. Edit parser.ts too.") == ["Upgrade to 1.2.3 now.", "Edit parser.ts too."])
+    }
+    @Test func pausesAfterSentencesAndParagraphs() {
+        let segs = SpeechText.segments(fromMarkdown: "One. Two.\n\nThree.")
+        #expect(segs.map(\.pause) == [.sentence, .paragraph, .paragraph])
+        #expect(SpeechSegment.Pause.sentence.seconds == 0.12)
+        #expect(SpeechSegment.Pause.paragraph.seconds == 0.45)
+    }
+    @Test func wrappedLinesStayOneParagraph() {
+        #expect(texts("A sentence that\nwraps here. Next.") == ["A sentence that wraps here.", "Next."])
+    }
+    @Test func listItemsAndHeadingsEachEndWithAParagraphPause() {
+        let segs = SpeechText.segments(fromMarkdown: "## Plan\n- First step. Then more.\n2. Second")
+        #expect(segs.map(\.text) == ["Plan", "First step.", "Then more.", "Second"])
+        #expect(segs.map(\.pause) == [.paragraph, .sentence, .paragraph, .paragraph])
+    }
+    @Test func urlsBecomeLinkAndLinkTextIsRead() {
+        #expect(texts("See https://example.com/a-b for details.") == ["See link for details."])
+        #expect(texts("Read [the docs](https://example.com/x).") == ["Read the docs."])
+        #expect(texts("Go to <https://example.com>.") == ["Go to link."])
+    }
+    @Test func markdownSymbolsAreNeverRead() {
+        #expect(texts("a *star* and ~~gone~~ and `tick` and a_b and _lone") == ["a star and gone and tick and a_b and lone"])
+    }
+    @Test func codeBlockOmittedOrReadLineByLine() {
+        #expect(texts("Before.\n\n```ts\nlet a = 1\nlet b = 2\n```") == ["Before.", "Code block omitted."])
+        #expect(texts("```ts\nlet a = 1\nlet b = 2\n```", readCode: true) == ["let a = 1", "let b = 2"])
+    }
+    @Test func plainTextJoinsSegments() {
+        #expect(SpeechText.plainText(fromMarkdown: "One. Two.\n\nThree.") == "One. Two.\nThree.")
+    }
 }

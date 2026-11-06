@@ -1,84 +1,89 @@
 import CompanionCore
 import SwiftUI
 
+/// A question and the answer to it.
+struct Turn: Identifiable {
+    let question: ChatMessage?
+    let answer: ChatMessage?
+    var id: UUID { question?.id ?? answer!.id }
+
+    static func pair(_ messages: [ChatMessage]) -> [Turn] {
+        var out: [Turn] = []
+        var pending: ChatMessage?
+        for m in messages {
+            switch m.role {
+            case .user:
+                if let q = pending { out.append(Turn(question: q, answer: nil)) }
+                pending = m
+            case .assistant:
+                out.append(Turn(question: pending, answer: m))
+                pending = nil
+            }
+        }
+        if let q = pending { out.append(Turn(question: q, answer: nil)) }
+        return out
+    }
+}
+
+/// The chat: one column of turns on the window background, newest at the bottom.
 struct ChatView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let messages: [ChatMessage]
+    let readOnly: Bool
+
+    private static var initialAnchor: UnitPoint {
+        #if DEBUG
+        if DemoFlags.is_("context") || DemoFlags.is_("raw") { return .top }
+        #endif
+        return .bottom
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    if model.currentMessages.isEmpty {
-                        Text("Ask GPT about what Claude is doing in this session. GPT can read the repository but never changes it.")
-                            .font(.callout).foregroundStyle(.secondary).padding(.top, 20)
+                let turns = Turn.pair(messages)
+                VStack(alignment: .leading, spacing: Design.turnGap) {
+                    ForEach(turns) { turn in
+                        TurnView(turn: turn, readOnly: readOnly, isLatest: turn.id == turns.last?.id)
+                            .id(turn.id)
+                            .modifier(EntranceTransition())
                     }
-                    ForEach(model.currentMessages) { m in MessageView(message: m).id(m.id) }
                 }
-                .padding(10)
+                .padding(.horizontal, Design.Space.l)
+                .padding(.top, Design.Space.m)
+                .padding(.bottom, Design.Space.l)
+                Color.clear.frame(height: 1).id("bottom")
             }
-            .onChange(of: model.currentMessages.last?.text) {
-                if let id = model.currentMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+            .scrollEdgeEffectStyle(.hard, for: .top)
+            // Text scrolling under the composer fades out instead of showing around the field.
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
+            .defaultScrollAnchor(Self.initialAnchor)
+            .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: messages.count)
+            .onChange(of: messages.last?.text) {
+                if messages.last?.isRunning == true { proxy.scrollTo("bottom", anchor: .bottom) }
             }
+            .onChange(of: messages.count) { proxy.scrollTo("bottom", anchor: .bottom) }
         }
     }
 }
 
-struct MessageView: View {
+struct TurnView: View {
     @Environment(AppModel.self) private var model
-    @Environment(ReadAloudController.self) private var readAloud
-    let message: ChatMessage
+    let turn: Turn
+    let readOnly: Bool
+    var isLatest = false
 
     var body: some View {
-        if message.role == .user {
-            HStack {
-                Spacer(minLength: 40)
-                Text(message.text).textSelection(.enabled).padding(8)
-                    .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                if !message.text.isEmpty { ReplyView(markdown: message.text, root: model.currentRoot) }
-                if let a = message.activity {
-                    Label(a, systemImage: "doc.text.magnifyingglass").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: Design.Space.m) {
+            // The question and its "context sent" line read as one unit.
+            VStack(alignment: .trailing, spacing: Design.Space.xs + 2) {
+                if let q = turn.question { QuestionBubble(message: q) }
+                if let t = turn.answer?.turnId, let record = model.records[t] {
+                    ContextSentView(record: record)
                 }
-                footer
             }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            if let a = turn.answer { AnswerView(message: a, readOnly: readOnly, isLatest: isLatest) }
         }
-    }
-
-    @ViewBuilder private var footer: some View {
-        HStack(spacing: 10) {
-            switch message.status {
-            case .sending, .streaming:
-                ProgressView().controlSize(.small)
-                Text("Answering…").font(.caption).foregroundStyle(.secondary)
-            case .interrupted:
-                Text("Stopped").font(.caption).foregroundStyle(.secondary)
-            case .failed(let why):
-                Text(why).font(.caption).foregroundStyle(.red)
-                if message.retry != nil {
-                    Button("Send again") { Task { await model.sendAgain(message) } }.font(.caption)
-                }
-            case .done:
-                EmptyView()
-            }
-            Spacer(minLength: 0)
-            if !message.isRunning && !message.text.isEmpty {
-                Button { readAloud.toggle(id: message.id, markdown: message.text) } label: {
-                    Image(systemName: readAloud.icon(for: message.id))
-                }
-                .help(readAloud.isActive(message.id) ? "Pause or resume" : "Read aloud")
-                if readAloud.isActive(message.id) {
-                    Button { readAloud.stop() } label: { Image(systemName: "stop.fill") }.help("Stop reading")
-                }
-            }
-            if message.turnId != nil {
-                Button("View what was sent") { Task { await model.viewSent(message) } }.font(.caption)
-            }
-        }
-        .buttonStyle(.borderless)
     }
 }

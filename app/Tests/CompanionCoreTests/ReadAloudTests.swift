@@ -8,9 +8,13 @@ import Testing
     var onEnd: ((Int) -> Void)?
     var log: [String] = []
     var lastToken = 0
-    func speak(_ text: String, rate: Float, voiceIdentifier: String?, token: Int) {
-        log.append("speak:\(text)@\(rate)")
+    var lastVoice: String?
+    var lastSegments: [SpeechSegment] = []
+    func speak(_ segments: [SpeechSegment], rate: Float, voiceIdentifier: String?, token: Int) {
+        log.append("speak:\(segments.map(\.text).joined(separator: "|"))@\(rate)")
         lastToken = token
+        lastVoice = voiceIdentifier
+        lastSegments = segments
     }
     func pause() { log.append("pause") }
     func resume() { log.append("resume") }
@@ -42,9 +46,10 @@ final class EndBox: Sendable {
 
 @MainActor @Suite struct ReadAloudTests {
     @Test func rateMapping() {
-        #expect(ReadAloudController.avRate(multiplier: 1) == AVSpeechUtteranceDefaultSpeechRate)
-        #expect(ReadAloudController.avRate(multiplier: 0.5) == AVSpeechUtteranceDefaultSpeechRate * 0.5)
-        #expect(ReadAloudController.avRate(multiplier: 2) == min(AVSpeechUtteranceDefaultSpeechRate * 2, AVSpeechUtteranceMaximumSpeechRate))
+        let natural = AVSpeechUtteranceDefaultSpeechRate * 0.92
+        #expect(ReadAloudController.avRate(multiplier: 1) == natural)
+        #expect(ReadAloudController.avRate(multiplier: 0.5) == max(natural * 0.5, AVSpeechUtteranceMinimumSpeechRate))
+        #expect(ReadAloudController.avRate(multiplier: 2) == min(natural * 2, AVSpeechUtteranceMaximumSpeechRate))
         #expect(ReadAloudController.avRate(multiplier: 9) == ReadAloudController.avRate(multiplier: 2))
         #expect(ReadAloudController.avRate(multiplier: 0) == ReadAloudController.avRate(multiplier: 0.5))
     }
@@ -55,7 +60,7 @@ final class EndBox: Sendable {
         let a = UUID()
         c.toggle(id: a, markdown: "**Hi**\n```\ncode\n```")
         #expect(c.playback == .playing(a))
-        #expect(s.log == ["speak:Hi\nCode block omitted.@\(AVSpeechUtteranceDefaultSpeechRate)"])
+        #expect(s.log == ["speak:Hi|Code block omitted.@\(ReadAloudController.naturalRate)"])
         #expect(c.icon(for: a) == "pause.fill")
         c.toggle(id: a, markdown: "")
         #expect(c.playback == .paused(a))
@@ -88,7 +93,51 @@ final class EndBox: Sendable {
         c.readCode = true
         c.rateMultiplier = 0.5
         c.play(id: UUID(), markdown: "```\nlet x = 1\n```")
-        #expect(s.log == ["speak:let x = 1@\(AVSpeechUtteranceDefaultSpeechRate * 0.5)"])
+        #expect(s.log == ["speak:let x = 1@\(ReadAloudController.avRate(multiplier: 0.5))"])
+    }
+
+    @Test func multipleSegmentsEndOnceAndOnlyThePlayingMessageIsSpeaking() {
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s)
+        let a = UUID()
+        c.play(id: a, markdown: "One. Two. Three.\n\nFour.")
+        #expect(s.lastSegments.map(\.text) == ["One.", "Two.", "Three.", "Four."])
+        #expect(c.isSpeaking(a))
+        c.toggle(id: a, markdown: "")
+        #expect(c.isActive(a) && !c.isSpeaking(a))
+        c.toggle(id: a, markdown: "")
+        #expect(c.isSpeaking(a) && !c.isSpeaking(UUID()))
+        s.onEnd?(s.lastToken)
+        #expect(c.playback == .idle)
+        #expect(!c.isSpeaking(a))
+    }
+
+    @Test func stopMidwayGoesIdleAndALateEndIsHarmless() {
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s)
+        let a = UUID()
+        c.play(id: a, markdown: "One. Two. Three.")
+        let t = s.lastToken
+        c.stop()
+        #expect(c.playback == .idle)
+        #expect(s.log.last == "stop:word")
+        s.onEnd?(t)
+        #expect(c.playback == .idle)
+    }
+
+    @Test func voiceFallsBackToTheBestInstalledVoice() {
+        let voices = [VoiceDescriptor(identifier: "std", name: "Aaron", language: VoiceRanking.currentLanguageCode),
+                      VoiceDescriptor(identifier: "prem", name: "Zoe", language: VoiceRanking.currentLanguageCode, quality: .premium)]
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s, voices: { voices })
+        c.play(id: UUID(), markdown: "Hi.")
+        #expect(s.lastVoice == "prem")                  // nothing stored
+        c.voiceIdentifier = "gone"
+        c.play(id: UUID(), markdown: "Hi.")
+        #expect(s.lastVoice == "prem")                  // stored voice no longer installed
+        c.voiceIdentifier = "std"
+        c.play(id: UUID(), markdown: "Hi.")
+        #expect(s.lastVoice == "std")                   // a stored, installed choice wins
     }
 
     /// Spec §12.3: write(_:toBufferCallback:) produces non-empty audio. Needs at least one installed voice.
@@ -137,7 +186,7 @@ final class EndBox: Sendable {
         let adapter = await MainActor.run { () -> AVSpeechAdapter in
             let a = AVSpeechAdapter()
             a.onEnd = { box.add($0) }
-            a.speak("This sentence is long enough to be paused in the middle of it, on this Mac.", rate: AVSpeechUtteranceDefaultSpeechRate, voiceIdentifier: nil, token: 1)
+            a.speak([SpeechSegment("This sentence is long enough to be paused in the middle of it, on this Mac.")], rate: AVSpeechUtteranceDefaultSpeechRate, voiceIdentifier: nil, token: 1)
             return a
         }
         try await Task.sleep(for: .milliseconds(600))
@@ -145,7 +194,7 @@ final class EndBox: Sendable {
         try await Task.sleep(for: .milliseconds(600))
         await MainActor.run {
             adapter.stop(atWordBoundary: atWordBoundary)
-            adapter.speak("Okay.", rate: AVSpeechUtteranceDefaultSpeechRate, voiceIdentifier: nil, token: 2)
+            adapter.speak([SpeechSegment("Okay.")], rate: AVSpeechUtteranceDefaultSpeechRate, voiceIdentifier: nil, token: 2)
         }
         for _ in 0..<200 where !box.tokens.withLock({ $0.contains(2) }) { try await Task.sleep(for: .milliseconds(50)) }
         #expect(box.tokens.withLock { $0.contains(2) })
