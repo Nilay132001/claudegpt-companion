@@ -132,6 +132,16 @@ enum PerfFlags {
     private var expectedMs = 0.0
 
     func markLaunch() {
+        // Overlay scrollers for every run, whatever the Mac's "Show scroll bars" setting and pointing device (a
+        // connected mouse makes them legacy). With legacy scrollers SwiftUI's scroll view wrote its own offset back
+        // over the drivers' clip-view moves on its next update (a jump to the middle came back to the bottom), so
+        // results depended on whether a mouse was connected. Process-local (argument domain), nothing persisted.
+        // (keepPanelAwayFromPointer handles the other case of the same race.)
+        if PerfFlags.mode != nil {
+            var args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+            args["AppleShowScrollBars"] = "WhenScrolling"
+            UserDefaults.standard.setVolatileDomain(args, forName: UserDefaults.argumentDomain)
+        }
         launched = .now()
         summary["footprintLaunchMB"] = PerfProbe.footprintMB()
     }
@@ -141,6 +151,7 @@ enum PerfFlags {
         summary["scene"] = DemoFlags.scene ?? ""
         summary["driver"] = mode
         summary["width"] = DemoFlags.width ?? "default"
+        keepPanelAwayFromPointer()
         Task { @MainActor in
             // A sleeping display delivers no frames: give up with what we have rather than hang.
             try? await Task.sleep(for: .seconds(PerfFlags.settle + PerfFlags.seconds + 60))
@@ -150,6 +161,14 @@ enum PerfFlags {
         Task { @MainActor in
             let ready = await self.waitForContent()
             self.summary["contentReadyMs"] = ready
+            if let p = self.panel {
+                self.summary["environment"] = [
+                    "panel": NSStringFromRect(p.frame), "scale": Double(p.backingScaleFactor),
+                    "screens": NSScreen.screens.map { NSStringFromRect($0.frame) },
+                    "preferredScrollerStyle": NSScroller.preferredScrollerStyle == .legacy ? "legacy" : "overlay",
+                    "chatScrollerStyle": self.chatScrollView().map { $0.scrollerStyle == .legacy ? "legacy" : "overlay" } ?? "-",
+                    "pointerOverPanel": p.frame.contains(NSEvent.mouseLocation)]
+            }
             self.summary["footprintLoadedMB"] = PerfProbe.footprintMB()
             self.summary["loadCounters"] = PerfProbe.diff(since: ([:], [:]))
             try? await Task.sleep(for: .seconds(PerfFlags.settle))
@@ -179,6 +198,23 @@ enum PerfFlags {
             self.summary["frames"] = self.frameStats()
             self.finish()
         }
+    }
+
+    /// The drivers move the chat's clip view directly; SwiftUI's scroll view learns of that on its next scroll
+    /// update. A hover update (the pointer resting over rows that move under it) can run first and write SwiftUI's
+    /// previous offset back: a jump to the middle came back to the bottom, and long-scroll was thrown back every
+    /// ~230 steps, whenever the pointer happened to be over the panel. So the panel is moved, on its own screen,
+    /// to the side away from the pointer (the run records where it was).
+    private func keepPanelAwayFromPointer() {
+        guard let p = panel, let screen = p.screen else { return }
+        let mouse = NSEvent.mouseLocation
+        summary["pointerWasOverPanel"] = p.frame.contains(mouse)
+        guard p.frame.contains(mouse) else { return }
+        var f = p.frame
+        let v = screen.visibleFrame
+        f.origin.x = mouse.x - v.minX > v.maxX - mouse.x ? v.minX : v.maxX - f.width
+        if f.contains(mouse) { f.origin.x = mouse.x > v.midX ? mouse.x - f.width - 40 : mouse.x + 40 }
+        p.setFrame(f, display: true)
     }
 
     // MARK: Finding the chat
