@@ -30,14 +30,42 @@ struct Turn: Identifiable {
 /// offers "Jump to latest" (⌘↓) otherwise, and remembers each chat's position across session switches.
 struct ChatView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let messages: [ChatMessage]
     /// The session id, or `"past:" + threadId` for a past chat.
     let sessionKey: String
     let readOnly: Bool
 
-    @State private var position = ScrollPosition(idType: UUID.self, edge: ChatView.initialEdge)
-    @State private var follow = ScrollFollow()
+    var body: some View {
+        // One scroll view per chat: a new key is a new view (fresh scroll state, no turn-count animation across
+        // chats). Each saves its position when it goes away (switch, past chat, empty or loading state) and the
+        // next view for that key starts from it.
+        ChatScroll(messages: messages, sessionKey: sessionKey, readOnly: readOnly,
+                   restore: model.scrollMemory.position(for: sessionKey))
+            .id(sessionKey)
+    }
+}
+
+private struct ChatScroll: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let messages: [ChatMessage]
+    let sessionKey: String
+    let readOnly: Bool
+    /// The first visible turn saved for this chat, or nil to start at the bottom.
+    let restore: UUID?
+
+    @State private var position: ScrollPosition
+    @State private var follow: ScrollFollow
+
+    init(messages: [ChatMessage], sessionKey: String, readOnly: Bool, restore: UUID?) {
+        self.messages = messages
+        self.sessionKey = sessionKey
+        self.readOnly = readOnly
+        self.restore = restore
+        _position = State(initialValue: restore.map { ScrollPosition(id: $0, anchor: .top) }
+            ?? ScrollPosition(idType: UUID.self, edge: Self.initialEdge))
+        _follow = State(initialValue: ScrollFollow(following: restore == nil))
+    }
 
     private static var initialAnchor: UnitPoint {
         #if DEBUG
@@ -62,10 +90,11 @@ struct ChatView: View {
                         .modifier(EntranceTransition(enabled: latest))
                 }
             }
-            // The entrance transition needs a transaction: animate only the turn-count change, on the stack and not
-            // the scroll view (spec §5.8). Older rows use .identity, so only the newly inserted newest turn animates;
-            // under Reduce Motion EntranceTransition is opacity only.
-            .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: turns.count)
+            // The entrance transition needs a transaction: animate only a newly appended turn, on the stack and not
+            // the scroll view (spec §5.8). Keyed on the last turn's id, not the count: a restore inserts older turns
+            // at the front and keeps the last id, and a chat switch is a new view (ChatView's .id), so neither
+            // animates. Older rows use .identity; under Reduce Motion EntranceTransition is opacity only.
+            .animation(Design.Motion.standard(reduceMotion: reduceMotion), value: turns.last?.id)
             .scrollTargetLayout()
             .padding(.horizontal, Design.Space.l)
             .padding(.top, Design.Space.m)
@@ -77,7 +106,7 @@ struct ChatView: View {
         .scrollPosition($position, anchor: .top)
         // Only the first appearance starts at the bottom. Size changes keep the turn being read in place
         // (scrollPosition), instead of keeping the bottom pinned while the reader is above it.
-        .defaultScrollAnchor(Self.initialAnchor, for: .initialOffset)
+        .defaultScrollAnchor(restore == nil ? Self.initialAnchor : .top, for: .initialOffset)
         // No .animation(value: messages.count) here: it animated the whole scroll view (spec §5.8).
         .onScrollGeometryChange(for: ScrollMetrics.self) { g in
             ScrollMetrics(offset: g.contentOffset.y, distance: g.contentSize.height - g.visibleRect.maxY)
@@ -91,18 +120,17 @@ struct ChatView: View {
             // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last id.
             if messages.last?.isRunning == true { follow.followAgain(); position.scrollTo(edge: .bottom) }
         }
-        .onChange(of: sessionKey) { old, new in
-            model.scrollMemory.save(session: old, firstVisible: position.viewID(type: UUID.self), following: follow.following)
-            if let id = model.scrollMemory.position(for: new) {
-                follow = ScrollFollow(following: false)
-                position.scrollTo(id: id, anchor: .top)
-            } else {
-                follow = ScrollFollow()
-                position.scrollTo(edge: .bottom)
-            }
+        .onAppear {
+            // The initial ScrollPosition carries the saved turn; scrolling to it again once the lazy rows exist
+            // makes the restore exact.
+            if let restore { position.scrollTo(id: restore, anchor: .top) }
+        }
+        .onDisappear {
+            model.scrollMemory.save(session: sessionKey, firstVisible: position.viewID(type: UUID.self),
+                                    following: follow.following)
         }
         .overlay(alignment: .bottomTrailing) { jumpButton }
-        .modifier(FirstVisibleProbe(id: position.viewID(type: UUID.self)))
+        .modifier(FirstVisibleProbe(position: position))
     }
 
     private var jumpButton: some View {
@@ -120,9 +148,10 @@ struct ChatView: View {
         .accessibilityLabel("Jump to latest message")
         .padding(.trailing, Design.Space.l)
         .padding(.bottom, Design.Space.m)
-        // Kept in the hierarchy so ⌘↓ always works; hidden and inert at the bottom.
+        // Hidden and disabled at the bottom: a disabled button's ⌘↓ does not fire, so the composer keeps ⌘↓
+        // (move to end), and the button leaves the focus order.
         .opacity(follow.showsJumpToLatest ? 1 : 0)
-        .allowsHitTesting(follow.showsJumpToLatest)
+        .disabled(!follow.showsJumpToLatest)
         .accessibilityHidden(!follow.showsJumpToLatest)
     }
 }
@@ -131,10 +160,10 @@ private struct ScrollMetrics: Equatable { let offset: Double; let distance: Doub
 
 /// DEBUG: reports the first visible turn to the perf harness (`position` driver). A no-op in release.
 private struct FirstVisibleProbe: ViewModifier {
-    let id: UUID?
+    let position: ScrollPosition
     func body(content: Content) -> some View {
         #if DEBUG
-        content.onChange(of: id, initial: true) { _, id in PerfProbe.firstVisibleTurn = id }
+        content.onChange(of: position.viewID(type: UUID.self), initial: true) { _, id in PerfProbe.firstVisibleTurn = id }
         #else
         content
         #endif
