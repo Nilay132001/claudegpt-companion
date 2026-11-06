@@ -133,34 +133,92 @@ public struct TableModel: Equatable, Sendable {
 
 public enum TableLayoutChoice: Equatable, Sendable { case grid, scroll, stacked }
 
+/// A layout decision and the width tier it was made in, kept by the view's layout so the next decision can be
+/// made with hysteresis.
+public struct TableLayoutState: Equatable, Sendable {
+    public var choice: TableLayoutChoice
+    public var tier: Int
+    public init(choice: TableLayoutChoice, tier: Int) { self.choice = choice; self.tier = tier }
+}
+
 /// Which table layout fits the answer column (M9 §6, P8: thresholds on the column width, panel − 32 pt).
 public enum TableLayout {
     public static let cellCap: Double = 220
+    /// A decision only flips once the width is this far past a threshold, so a scroll bar appearing (about 15 pt
+    /// narrower) cannot flip it back and forth.
+    public static let hysteresis: Double = 8
+    public static let thresholds: [Double] = [300, 380]
+
     public static func choose(idealWidths: [Double], available: Double) -> TableLayoutChoice {
+        decide(idealWidths: idealWidths, available: available, previous: nil).choice
+    }
+
+    public static func decide(idealWidths: [Double], available: Double, previous: TableLayoutState?) -> TableLayoutState {
+        // Tier 0: under 300, 1: 300..<380, 2: 380 and up; leaving the previous tier needs `hysteresis` more.
+        var tier = thresholds.filter { available >= $0 }.count
+        if let p = previous, p.tier != tier {
+            let edge = thresholds[min(p.tier, tier)]
+            let inside = p.tier < tier ? available < edge + hysteresis : available >= edge - hysteresis
+            if inside { tier = p.tier }
+        }
+        let slack = previous?.choice == .grid ? hysteresis : (previous == nil ? 0 : -hysteresis)
+        let fits = idealWidths.map { min($0, cellCap) }.reduce(0, +) <= available + slack
         let n = idealWidths.count
-        let fits = idealWidths.map { min($0, cellCap) }.reduce(0, +) <= available
-        if available < 300 { return n <= 2 ? .grid : .stacked }
-        if available < 380 { return n <= 3 && fits ? .grid : .scroll }
-        return fits ? .grid : .scroll
+        let choice: TableLayoutChoice
+        switch tier {
+        case 0: choice = n <= 2 ? .grid : .stacked
+        case 1: choice = n <= 3 && fits ? .grid : .scroll
+        default: choice = fits ? .grid : .scroll
+        }
+        return TableLayoutState(choice: choice, tier: tier)
     }
 }
 
 extension TableModel {
-    public func plainRows() -> [[String]] { ([header] + rows).map { $0.map { String($0.characters) } } }
+    public func plainRows() -> [[String]] {
+        ([header] + rows).map { r in (0..<columnCount).map { $0 < r.count ? String(r[$0].characters) : "" } }
+    }
 
-    public func estimatedColumnWidths(charWidth: Double = 7.2, padding: Double = 16) -> [Double] {
+    /// Ideal column widths (widest cell, capped later by `TableLayout.cellCap`). `reserveTrailing` is added to the
+    /// last column (room for the Copy control over the header).
+    public func estimatedColumnWidths(charWidth: Double = 7.2, padding: Double = 16, reserveTrailing: Double = 0) -> [Double] {
         let p = plainRows()
         return (0..<columnCount).map { c in
-            Double(p.map { c < $0.count ? $0[c].count : 0 }.max() ?? 0) * charWidth + padding
+            Double(p.map { $0[c].count }.max() ?? 0) * charWidth + padding + (c == columnCount - 1 ? reserveTrailing : 0)
         }
     }
 
-    public var tabSeparated: String { plainRows().map { $0.joined(separator: "\t") }.joined(separator: "\n") }
+    static func isNumeric(_ s: String) -> Bool {
+        s.range(of: #"^[-+−]?[\d.,]+%?$"#, options: .regularExpression) != nil
+    }
 
-    public var markdown: String {
-        func row(_ cells: [String]) -> String {
-            "| " + cells.map { $0.replacingOccurrences(of: "|", with: "\\|") }.joined(separator: " | ") + " |"
+    /// Tab-separated, one line per row: tabs and line breaks inside a cell become a space, and a cell a spreadsheet
+    /// would run as a formula (starts with = + - @, a tab or a return, and is not a plain number) gets a leading '.
+    public var tabSeparated: String {
+        func cell(_ c: String) -> String {
+            var t = c
+            if let f = t.first, "=+-@\t\r".contains(f), !Self.isNumeric(t) { t = "'" + t }
+            return t.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\t", with: " ")
+                .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
         }
+        return plainRows().map { $0.map(cell).joined(separator: "\t") }.joined(separator: "\n")
+    }
+
+    /// GitHub-style Markdown: backslashes and Markdown specials in cells are escaped, line breaks become `<br>`.
+    public var markdown: String {
+        func esc(_ c: String) -> String {
+            var out = ""
+            for ch in c {
+                switch ch {
+                case "\\", "`", "*", "_", "[", "]", "<", ">", "|", "~": out.append("\\"); out.append(ch)
+                case "\r": break
+                case "\n": out += "<br>"
+                default: out.append(ch)
+                }
+            }
+            return out
+        }
+        func row(_ cells: [String]) -> String { "| " + cells.map(esc).joined(separator: " | ") + " |" }
         let rule = alignments.map { a -> String in
             switch a { case .leading: "---"; case .center: ":---:"; case .trailing: "---:" }
         }
@@ -176,6 +234,29 @@ extension TableModel {
             let rest = r.count == 2 ? r[1] : (1..<r.count).map { "\(head[$0]) \(r[$0])" }.joined(separator: ", ")
             return "\(r[0]): \(rest)."
         }
+    }
+
+    /// What VoiceOver reads for each body row: every column as "Header: value" (same cells as `spokenRows`).
+    public var accessibilityRows: [String] {
+        let p = plainRows(), head = p[0]
+        return p.dropFirst().map { r in (0..<r.count).map { "\(head[$0]): \(r[$0])" }.joined(separator: ", ") }
+    }
+
+    /// How a body row is shown in the stacked layout: titled by its first cell, unless that is empty or a number,
+    /// then "Row N" and column 0 is an ordinary "Header: value" line. Empty values are skipped.
+    public struct StackedRow: Equatable, Sendable {
+        public var titleColumn: Int?   // nil: the title is "Row \(number)"
+        public var number: Int         // 1-based
+        public var detailColumns: [Int]
+    }
+
+    public func stackedRow(_ index: Int) -> StackedRow {
+        let p = plainRows()[index + 1]
+        let first = p.first ?? ""
+        let titled = !first.trimmingCharacters(in: .whitespaces).isEmpty && !Self.isNumeric(first)
+        let detail = (titled ? 1 : 0)..<columnCount
+        return StackedRow(titleColumn: titled ? 0 : nil, number: index + 1,
+                          detailColumns: detail.filter { !p[$0].trimmingCharacters(in: .whitespaces).isEmpty })
     }
 }
 

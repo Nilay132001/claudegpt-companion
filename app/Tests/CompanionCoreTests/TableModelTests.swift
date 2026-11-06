@@ -47,4 +47,66 @@ import Testing
         #expect(table(two).spokenRows == ["parser: 4.2.", "csv: 1.9."])
         #expect(table(five).spokenRows == ["1: b 2, c 3, d 4, e 5."])
     }
+
+    func t(_ cells: [[String]]) -> TableModel {
+        TableModel(alignments: Array(repeating: .leading, count: cells[0].count),
+                   header: cells[0].map { AttributedString($0) }, rows: cells.dropFirst().map { $0.map { AttributedString($0) } })
+    }
+
+    @Test func boundaries() {
+        #expect(TableLayout.choose(idealWidths: [40, 40, 40], available: 299) == .stacked)
+        #expect(TableLayout.choose(idealWidths: [40, 40, 40], available: 300) == .grid)
+        #expect(TableLayout.choose(idealWidths: [60, 60, 60, 60], available: 379) == .scroll)
+        #expect(TableLayout.choose(idealWidths: [60, 60, 60, 60], available: 380) == .grid)
+        #expect(TableLayout.choose(idealWidths: [], available: 400) == .grid)
+        #expect(TableLayout.choose(idealWidths: [50], available: 200) == .grid)
+    }
+
+    @Test func hysteresisKeepsTheDecisionNearAThreshold() {
+        let w = [60.0, 60, 60, 60]
+        let at380 = TableLayout.decide(idealWidths: w, available: 380, previous: nil)
+        #expect(at380.choice == .grid && at380.tier == 2)
+        // 15 pt narrower (a scroll bar appeared): stays in the tier and a grid
+        #expect(TableLayout.decide(idealWidths: w, available: 372, previous: at380).choice == .grid)
+        #expect(TableLayout.decide(idealWidths: w, available: 371, previous: at380).tier == 1)
+        let at379 = TableLayout.decide(idealWidths: w, available: 379, previous: nil)
+        #expect(at379.tier == 1)
+        #expect(TableLayout.decide(idealWidths: w, available: 387, previous: at379).tier == 1)
+        #expect(TableLayout.decide(idealWidths: w, available: 388, previous: at379).tier == 2)
+        let s = TableLayout.decide(idealWidths: [40, 40, 40], available: 295, previous: nil)
+        #expect(s.choice == .stacked)
+        #expect(TableLayout.decide(idealWidths: [40, 40, 40], available: 305, previous: s).choice == .stacked)
+        #expect(TableLayout.decide(idealWidths: [40, 40, 40], available: 308, previous: s).choice == .grid)
+    }
+
+    @Test func tsvNeutralisesFormulasTabsAndNewlines() {
+        let m = t([["a", "b"], ["=1+1", "@x"], ["-cmd", "+0.1"], ["-0.3", "0"], ["a\tb", "x\ny"], ["12%", "−0.3"]])
+        let rows = m.tabSeparated.split(separator: "\n", omittingEmptySubsequences: false).map { $0.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
+        #expect(rows[1] == ["'=1+1", "'@x"])
+        #expect(rows[2] == ["'-cmd", "+0.1"])
+        #expect(rows[3] == ["-0.3", "0"])
+        #expect(rows[4] == ["a b", "x y"])
+        #expect(rows[5] == ["12%", "−0.3"])
+        #expect(rows.count == 6)
+    }
+
+    @Test func markdownEscapesSpecialsAndBreaks() {
+        let m = t([["h"], ["a*b_c [x] <y> `z` \\ ~"], ["l1\nl2"]])
+        #expect(m.markdown.contains("a\\*b\\_c \\[x\\] \\<y\\> \\`z\\` \\\\ \\~"))
+        #expect(m.markdown.contains("l1<br>l2"))
+        #expect(!m.markdown.contains("l1\nl2"))
+    }
+
+    @Test func accessibilityRowsNameEveryColumn() {
+        #expect(table(two).accessibilityRows == ["Package: parser, Seconds: 4.2", "Package: csv, Seconds: 1.9"])
+        #expect(table(five).accessibilityRows == ["a: 1, b: 2, c: 3, d: 4, e: 5"])
+    }
+
+    @Test func stackedRowTitles() {
+        let m = t([["Name", "N", "Note"], ["alpha", "1", ""], ["", "2", "x"], ["42", "3", "y"], ["-0.3", "", ""]])
+        #expect(m.stackedRow(0) == .init(titleColumn: 0, number: 1, detailColumns: [1]))
+        #expect(m.stackedRow(1) == .init(titleColumn: nil, number: 2, detailColumns: [1, 2]))
+        #expect(m.stackedRow(2) == .init(titleColumn: nil, number: 3, detailColumns: [0, 1, 2]))
+        #expect(m.stackedRow(3) == .init(titleColumn: nil, number: 4, detailColumns: [0]))
+    }
 }
