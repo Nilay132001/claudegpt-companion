@@ -42,7 +42,7 @@ struct BlockView: View {
         case .heading(let level, let t): HeadingBlock(level: level, text: t)
         case .list(let l): ListBlock(list: l, root: root, depth: listDepth)
         case .quote(let bs): QuoteBlock(blocks: bs, root: root)
-        case .code(let c): CodeBlockView(language: c.language, code: c.text)   // Task 7 replaces with CodeBlock(model:root:)
+        case .code(let c): CodeBlock(model: c, root: root)
         case .table(let t): TableBlock(table: t)
         case .rule: RuleBlock()
         case .math(let m): MathBlock(text: m)

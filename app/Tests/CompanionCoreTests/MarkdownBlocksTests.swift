@@ -227,3 +227,14 @@ func describe(_ b: AnswerBlock) -> String {
         #expect(d(md) == ["q[p:a q[p:b]]", "ol[1. p:x ul[◦ p:y ul[▪ p:z]]]", "ol[10. p:w]"], "\(d(md))")
     }
 }
+
+@Suite struct CodePreviewTests {
+    @Test func longCodeShowsTheFirst24Lines() {
+        let text = (1...41).map { "line \($0)" }.joined(separator: "\n")
+        let m = CodeModel(language: nil, text: text, isOpen: false, lineCount: 41, reference: nil)
+        let p = m.preview()
+        #expect(p?.hiddenLines == 17)
+        #expect(p?.text == (1...24).map { "line \($0)" }.joined(separator: "\n"))
+        #expect(CodeModel(language: nil, text: "a", isOpen: false, lineCount: 40, reference: nil).preview() == nil)
+    }
+}

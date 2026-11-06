@@ -46,6 +46,14 @@ public struct CodeModel: Equatable, Sendable {
     public init(language: String?, text: String, isOpen: Bool, lineCount: Int, reference: FileReference?) {
         self.language = language; self.text = text; self.isOpen = isOpen; self.lineCount = lineCount; self.reference = reference
     }
+
+    /// The first `shownLines` lines and how many are hidden, or nil when the block has at most `maxLines` lines.
+    public func preview(maxLines: Int = 40, shownLines: Int = 24) -> (text: String, hiddenLines: Int)? {
+        guard lineCount > maxLines else { return nil }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > shownLines else { return nil }
+        return (lines.prefix(shownLines).joined(separator: "\n"), lineCount - shownLines)
+    }
 }
 
 public struct TableModel: Equatable, Sendable {

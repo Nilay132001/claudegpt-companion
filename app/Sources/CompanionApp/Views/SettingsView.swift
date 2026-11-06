@@ -192,6 +192,7 @@ struct WindowSettings: View {
             Text("Uses the Accessibility permission only to read where Claude Desktop's window is, and keeps the panel against its left edge. Nothing in Claude is changed.")
                 .font(.caption).foregroundStyle(.secondary)
             if let note = status.followNote { Text(note).font(.callout).foregroundStyle(.orange) }
+            Toggle("Wrap long lines in code blocks", isOn: Binding(get: { model.settings.codeWrap }, set: { model.setSetting(\.codeWrap, $0) }))
             Section("Show or hide shortcut") {
                 HStack {
                     Toggle("⌃", isOn: modifier(\.control))

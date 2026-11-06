@@ -87,7 +87,9 @@ struct ContextSentView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
             if showRaw {
-                CodeBlockView(language: nil, code: record.contextBlock, title: "Raw block sent to GPT", copyHelp: "Copy raw block")
+                CodeBlock(model: CodeModel(language: nil, text: record.contextBlock, isOpen: false,
+                                           lineCount: record.contextBlock.split(separator: "\n", omittingEmptySubsequences: false).count,
+                                           reference: nil), root: nil, title: "Raw block sent to GPT", copyHelp: "Copy raw block")
                     .transition(.opacity)
             }
         }

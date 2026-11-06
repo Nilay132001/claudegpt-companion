@@ -63,6 +63,62 @@ enum RichContent {
         npm test -- --runInBand --coverage --coverageReporters=text-summary --testPathPattern='src/(parser|csv)/.*\\.test\\.ts$'
         ```
         """),
+        ("Show the whole matcher", """
+        The matcher in full (long, so only the start shows until you expand it):
+
+        ```ts packages/worker/src/reconcile/ledgerMatcher.ts:12
+        export const SETTLEMENT_WINDOW_NOTE = "Settlements that arrive more than 72 hours after the ledger entry are matched in the late pass, never the first one, to avoid double counting.";
+        const row1 = ledger.rows[1];
+        const row2 = ledger.rows[2];
+        const row3 = ledger.rows[3];
+        const row4 = ledger.rows[4];
+        const row5 = ledger.rows[5];
+        const row6 = ledger.rows[6];
+        // step 7: keep the ledger rows in order and skip entries that were already matched in an earlier pass
+        const row8 = ledger.rows[8];
+        const row9 = ledger.rows[9];
+        const row10 = ledger.rows[10];
+        const row11 = ledger.rows[11];
+        const row12 = ledger.rows[12];
+        const row13 = ledger.rows[13];
+        // step 14: keep the ledger rows in order and skip entries that were already matched in an earlier pass
+        const row15 = ledger.rows[15];
+        const row16 = ledger.rows[16];
+        const row17 = ledger.rows[17];
+        const row18 = ledger.rows[18];
+        const row19 = ledger.rows[19];
+        const row20 = ledger.rows[20];
+        // step 21: keep the ledger rows in order and skip entries that were already matched in an earlier pass
+        const row22 = ledger.rows[22];
+        const row23 = ledger.rows[23];
+        const row24 = ledger.rows[24];
+        const row25 = ledger.rows[25];
+        const row26 = ledger.rows[26];
+        const row27 = ledger.rows[27];
+        // step 28: keep the ledger rows in order and skip entries that were already matched in an earlier pass
+        const row29 = ledger.rows[29];
+        const row30 = ledger.rows[30];
+        const row31 = ledger.rows[31];
+        const row32 = ledger.rows[32];
+        const row33 = ledger.rows[33];
+        const row34 = ledger.rows[34];
+        // step 35: keep the ledger rows in order and skip entries that were already matched in an earlier pass
+        const row36 = ledger.rows[36];
+        const row37 = ledger.rows[37];
+        const row38 = ledger.rows[38];
+        const row39 = ledger.rows[39];
+        const row40 = ledger.rows[40];
+        const row41 = ledger.rows[41];
+        // step 42: keep the ledger rows in order and skip entries that were already matched in an earlier pass
+        const row43 = ledger.rows[43];
+        const row44 = ledger.rows[44];
+        const row45 = ledger.rows[45];
+        ```
+
+        ```
+        a plain block with no language: short
+        ```
+        """),
     ]
 }
 #endif

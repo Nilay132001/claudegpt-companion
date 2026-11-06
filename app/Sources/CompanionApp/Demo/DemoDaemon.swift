@@ -15,6 +15,8 @@ enum DemoFlags {
     static let width: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO_WIDTH"]
     /// `rich` scene: "bottom" starts at the last answer instead of the first.
     static let anchor: String? = ProcessInfo.processInfo.environment["COMPANION_DEMO_ANCHOR"]
+    /// COMPANION_DEMO_WRAP=1 starts with "Wrap long lines in code blocks" on.
+    static let wrap = ProcessInfo.processInfo.environment["COMPANION_DEMO_WRAP"] == "1"
 }
 
 @MainActor final class DemoDaemon: DaemonAPI {
@@ -322,6 +324,7 @@ enum DemoFlags {
         switch key {
         case "ui.autoPlay": "false"
         case "ui.window.width": DemoFlags.width
+        case "ui.code.wrap": DemoFlags.wrap ? "true" : nil
         default: nil
         }
     }
