@@ -179,12 +179,12 @@ extension TableModel {
         ([header] + rows).map { r in (0..<columnCount).map { $0 < r.count ? String(r[$0].characters) : "" } }
     }
 
-    /// Ideal column widths (widest cell, capped later by `TableLayout.cellCap`). `reserveTrailing` is added to the
-    /// last column (room for the Copy control over the header).
-    public func estimatedColumnWidths(charWidth: Double = 7.2, padding: Double = 16, reserveTrailing: Double = 0) -> [Double] {
+    /// Ideal column widths (widest cell; `TableLayout.cellCap` is applied when choosing). Pass `charWidth` scaled by
+    /// the type size.
+    public func estimatedColumnWidths(charWidth: Double = 7.2, padding: Double = 16) -> [Double] {
         let p = plainRows()
         return (0..<columnCount).map { c in
-            Double(p.map { $0[c].count }.max() ?? 0) * charWidth + padding + (c == columnCount - 1 ? reserveTrailing : 0)
+            Double(p.map { $0[c].count }.max() ?? 0) * charWidth + padding
         }
     }
 

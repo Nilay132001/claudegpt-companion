@@ -1,140 +1,231 @@
 import CompanionCore
-import AppKit
 import SwiftUI
 
-/// A Markdown table that adapts to the answer column (M9 §6, P8): a plain grid when it fits, the same grid in a
-/// sideways scroller when it does not, and one small block per row when the column is too narrow for even that
-/// (under 300 pt, more than two columns). `TableLayout.choose` decides from the estimated column widths; the
-/// decision is kept in `@State` and only recomputed when the column width moves by more than a point, so a live
-/// resize does not re-measure the table per frame.
+/// A Markdown table that adapts to the answer column (M9 §6, P8). Grid and sideways scroll are one view tree: a
+/// custom `Layout` (`TableGridLayout`) inside a horizontal scroller reads the column width and picks "fits, so a
+/// grid" or "wider, so it scrolls" while it lays out, with 8 pt of hysteresis, so there is no state flip, no second
+/// build and no height change after the first layout. Only the stacked layout (under 300 pt, more than two
+/// columns) is a different tree; it is switched by `@State` from the measured width, which only changes when the
+/// panel is that narrow.
 ///
-/// Selection: one `chatTextSelection()` on the whole table, not one per cell (per-block overlays cost memory and
-/// resize time, Task 6). A drag can still select across cells; each Text keeps its own overlay, which is the
-/// price of a grid that wraps cells and aligns columns (one Text per row cannot do either).
+/// Selection: one `chatTextSelection()` on the whole table. Each Text still has its own overlay (a wrapping,
+/// aligned grid cannot be one Text), the same count as before Task 8.
 struct TableBlock: View {
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.colorSchemeContrast) private var contrast
     let table: TableModel
     static let cellCap = CGFloat(TableLayout.cellCap)
 
-    /// Starts as `.scroll`: before the first measurement it lays out at the cells' natural widths (capped at 220 pt),
-    /// so the first frame is never a wide table squeezed into a narrow column and wrapped to a huge height.
-    @State private var choice: TableLayoutChoice = .scroll
-    @State private var ideal: [Double]?
-    @State private var measuredWidth: CGFloat = 0
+    @State private var info = TableInfo()
+    @State private var stacked = false
+
+    var body: some View {
+        let scale = Design.Typography.scale(typeSize)
+        let size = Design.Typography.tableCell * scale
+        Group {
+            if stacked {
+                StackedRows(table: table, size: size).framed()
+            } else {
+                TableScroller(table: table, size: size, ideal: info.ideal(table, scale: scale))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .chatTextSelection()
+        .modifier(CopyPill(table: table))
+        .modifier(RowReading(table: table))
+        .accessibilityLabel("Table, \(table.rows.count) rows")
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+            // Only the stacked decision lives here; grid and scroll are decided in the layout pass.
+            let st = TableLayout.decide(idealWidths: info.ideal(table, scale: scale), available: Double(w), previous: info.state)
+            info.state = st
+            let now = st.choice == .stacked
+            if now != stacked { stacked = now }
+        }
+    }
+}
+
+/// Per-table values that are expensive or stateful but not part of what the view shows: the estimated column widths
+/// (computed once per type size, not in `body`) and the last layout decision (for hysteresis).
+final class TableInfo {
+    private var scale: CGFloat = -1
+    private var widths: [Double] = []
+    var state: TableLayoutState?
+    func ideal(_ t: TableModel, scale s: CGFloat) -> [Double] {
+        if s != scale {
+            scale = s
+            widths = t.estimatedColumnWidths(charWidth: 7.2 * Double(s))
+        }
+        return widths
+    }
+}
+
+// MARK: Grid and scroll
+
+private struct TableScroller: View {
+    @Environment(\.colorSchemeContrast) private var contrast
+    let table: TableModel
+    let size: CGFloat
+    let ideal: [Double]
     @State private var fadeEdge = false
 
     var body: some View {
-        let size = Design.Typography.tableCell * Design.Typography.scale(typeSize)
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
-        VStack(alignment: .trailing, spacing: 2) {
-            copyMenu
-            Group {
-                switch choice {
-                case .grid: grid(size: size).overlay(border(shape))
-                case .scroll: scroller(size: size, shape: shape)
-                case .stacked: stacked(size: size).overlay(border(shape))
+        let n = table.columnCount
+        ScrollView(.horizontal) {
+            TableGridLayout(columns: n, ideal: ideal) {
+                // Reports the scroller's width to the layout (a zero-height view as wide as the visible area).
+                Color.clear.frame(height: 0).containerRelativeFrame(.horizontal)
+                ForEach(0..<n, id: \.self) { c in cell(table.header, r: 0, c: c) }
+                ForEach(table.rows.indices, id: \.self) { r in
+                    ForEach(0..<n, id: \.self) { c in cell(table.rows[r], r: r + 1, c: c) }
                 }
             }
-            .clipShape(shape)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .chatTextSelection()
-            .modifier(RowReading(table: table))
+            // The border moves with the table, so a scroll bar track sits outside it.
+            .framed()
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
-            guard abs(w - measuredWidth) > 1 else { return }
-            measuredWidth = w
-            let widths = ideal ?? table.estimatedColumnWidths()
-            if ideal == nil { ideal = widths }
-            let next = TableLayout.choose(idealWidths: widths, available: Double(w))
-            if next != choice { choice = next }
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .onScrollGeometryChange(for: Bool.self) { g in
+            g.contentSize.width > g.containerSize.width + 1 && g.visibleRect.maxX < g.contentSize.width - 1
+        } action: { _, more in
+            fadeEdge = more
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Table, \(table.rows.count) rows")
-    }
-
-    private func border(_ shape: RoundedRectangle) -> some View {
-        shape.strokeBorder(Design.Fill.hairline(contrast), lineWidth: Design.Fill.hairlineWidth(contrast))
-    }
-
-    /// One line per body row: every column as "Header: value".
-    fileprivate static func spoken(_ t: TableModel) -> [String] {
-        let p = t.plainRows()
-        return p.dropFirst().map { r in (0..<r.count).map { "\(p[0][$0]): \(r[$0])" }.joined(separator: ", ") }
-    }
-
-    // MARK: Copy
-
-    private var copyMenu: some View {
-        Menu {
-            Button("Copy as Markdown") { Design.copy(table.markdown) }
-            Button("Copy as tab-separated") { Design.copy(table.tabSeparated) }
-        } label: {
-            Image(systemName: "doc.on.doc")
-        } primaryAction: {
-            Design.copy(table.markdown)
+        .overlay(alignment: .trailing) {
+            if fadeEdge {
+                LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color(nsColor: .windowBackgroundColor).opacity(0)],
+                               startPoint: .trailing, endPoint: .leading)
+                    .frame(width: 12)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
-        .menuStyle(.button)
-        .buttonStyle(.borderless)
-        .menuIndicator(.visible)
-        .controlSize(.small)
-        .fixedSize()
-        .foregroundStyle(.secondary)
-        .help("Copy table (click), or choose Markdown or tab-separated")
-        .accessibilityLabel("Copy table")
     }
 
-    // MARK: Layouts
+    private func cell(_ row: [AttributedString], r: Int, c: Int) -> some View {
+        let header = r == 0
+        let a = TableBlock.alignment(table.alignments[c])
+        return CappedWidth(cap: TableBlock.cellCap) {
+            Text(c < row.count ? row[c] : AttributedString())
+                .font(.system(size: size, weight: header ? .semibold : .regular))
+                .multilineTextAlignment(a.text)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        // Fills the cell the layout gives it, so the zebra fill spans the whole row height.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: a.frame)
+        .background(!header && (r - 1) % 2 == 1 ? Color.primary.opacity(0.03) : .clear)
+        .overlay(alignment: .bottom) {
+            if header { Rectangle().fill(Design.Fill.hairline(contrast)).frame(height: Design.Fill.hairlineWidth(contrast)) }
+        }
+    }
+}
 
-    private func grid(size: CGFloat) -> some View {
-        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-            GridRow { cells(table.header, size: size, header: true, zebra: false) }
-            Rectangle()
-                .fill(Design.Fill.hairline(contrast))
-                .frame(height: Design.Fill.hairlineWidth(contrast))
-                .gridCellUnsizedAxes(.horizontal)
+/// Lays the table's cells out as a grid with the column width decided here: the first subview is a zero-height probe
+/// as wide as the scroller, then the header cells, then the body cells, `columns` per row.
+///   grid: columns share the width (natural widths, shrunk or stretched to it);
+///   scroll: natural widths (cells capped at 220 pt), at least as wide as the scroller.
+struct TableGridLayout: Layout {
+    var columns: Int
+    var ideal: [Double]
+
+    struct Cache {
+        var state: TableLayoutState?
+        var natural: [CGFloat]?
+        var widths: [CGFloat] = []
+        var heights: [CGFloat] = []
+    }
+    func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    private func natural(_ subviews: Subviews, _ cache: inout Cache) -> [CGFloat] {
+        if let n = cache.natural { return n }
+        var w = [CGFloat](repeating: 0, count: columns)
+        for (i, v) in subviews.dropFirst().enumerated() { w[i % columns] = max(w[i % columns], v.sizeThatFits(.unspecified).width) }
+        cache.natural = w
+        return w
+    }
+
+    private func columnWidths(_ subviews: Subviews, _ cache: inout Cache) -> [CGFloat] {
+        let nat = natural(subviews, &cache)
+        let avail = subviews[0].sizeThatFits(.unspecified).width
+        guard avail.isFinite, avail > 1 else { return nat }
+        let st = TableLayout.decide(idealWidths: ideal, available: Double(avail), previous: cache.state)
+        cache.state = st
+        var w = nat
+        let sum = w.reduce(0, +)
+        if sum < avail {
+            let extra = (avail - sum) / CGFloat(columns)
+            w = w.map { $0 + extra }
+        } else if sum > avail, st.choice == .grid {
+            // The estimate said it fits and it does not quite: shrink the widest columns (cells wrap), not below 56.
+            var over = sum - avail
+            while over > 0.5 {
+                let widest = w.max() ?? 0
+                let tier = w.filter { $0 > widest - 0.01 }.count
+                let next = max(w.filter { $0 < widest - 0.01 }.max() ?? 56, 56)
+                let step = min(widest - next, over / CGFloat(tier))
+                if step <= 0.01 { break }
+                w = w.map { $0 > widest - 0.01 ? $0 - step : $0 }
+                over -= step * CGFloat(tier)
+            }
+        }
+        return w
+    }
+
+    private func rowHeights(_ subviews: Subviews, _ widths: [CGFloat], _ cache: inout Cache) -> [CGFloat] {
+        if cache.widths == widths, !cache.heights.isEmpty { return cache.heights }
+        let cells = Array(subviews.dropFirst())
+        let rows = cells.count / max(columns, 1)
+        let h = (0..<rows).map { r in
+            (0..<columns).map { c in cells[r * columns + c].sizeThatFits(ProposedViewSize(width: widths[c], height: nil)).height }.max() ?? 0
+        }
+        cache.widths = widths; cache.heights = h
+        return h
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        guard columns > 0, subviews.count > 1 else { return .zero }
+        let w = columnWidths(subviews, &cache)
+        return CGSize(width: w.reduce(0, +), height: rowHeights(subviews, w, &cache).reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        guard columns > 0, subviews.count > 1 else { return }
+        subviews[0].place(at: bounds.origin, proposal: ProposedViewSize(width: 0, height: 0))
+        let w = columnWidths(subviews, &cache), h = rowHeights(subviews, w, &cache)
+        var y = bounds.minY
+        for (r, rh) in h.enumerated() {
+            var x = bounds.minX
+            for c in 0..<columns {
+                subviews[1 + r * columns + c].place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: w[c], height: rh))
+                x += w[c]
+            }
+            y += rh
+        }
+    }
+}
+
+// MARK: Stacked
+
+/// One block per body row: a semibold title (the first cell, or "Row N" when it is empty or a number), then
+/// "Header: value" lines for the non-empty cells.
+private struct StackedRows: View {
+    @Environment(\.colorSchemeContrast) private var contrast
+    let table: TableModel
+    let size: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(table.rows.indices, id: \.self) { r in
-                GridRow { cells(table.rows[r], size: size, header: false, zebra: r % 2 == 1) }
-            }
-        }
-        // Measured at its ideal height, so a wrapped cell sets its row's height and the other cells fill it.
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// The grid sideways, header first, with the code blocks' 12 pt trailing fade while there is more.
-    private func scroller(size: CGFloat, shape: RoundedRectangle) -> some View {
-        // At least the column wide, so a table that fits looks the same as in the plain grid.
-        ScrollView(.horizontal) { grid(size: size).frame(minWidth: measuredWidth, alignment: .leading).overlay(border(shape)) }
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentSize.width > g.containerSize.width + 1 && g.visibleRect.maxX < g.contentSize.width - 1
-            } action: { _, more in
-                fadeEdge = more
-            }
-            .overlay(alignment: .trailing) {
-                if fadeEdge {
-                    LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color(nsColor: .windowBackgroundColor).opacity(0)],
-                                   startPoint: .trailing, endPoint: .leading)
-                        .frame(width: 12)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
-            }
-    }
-
-    /// One block per body row: the first cell as a semibold title, then "Header: value" for the others.
-    private func stacked(size: CGFloat) -> some View {
-        let p = table.rows
-        return VStack(alignment: .leading, spacing: 0) {
-            ForEach(p.indices, id: \.self) { r in
+                let plan = table.stackedRow(r)
                 if r > 0 {
                     Rectangle().fill(Design.Fill.hairline(contrast)).frame(height: Design.Fill.hairlineWidth(contrast))
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(p[r].first ?? AttributedString())
-                        .font(.system(size: size, weight: .semibold))
-                    Text(Self.detail(table, row: p[r]))
-                        .font(.system(size: size))
+                    if let t = plan.titleColumn {
+                        Text(table.rows[r][t]).font(.system(size: size, weight: .semibold))
+                    } else {
+                        Text("Row \(plan.number)").font(.system(size: size, weight: .semibold))
+                    }
+                    if !plan.detailColumns.isEmpty {
+                        Text(detail(plan, row: table.rows[r])).font(.system(size: size))
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8)
@@ -144,59 +235,106 @@ struct TableBlock: View {
         }
     }
 
-    /// "Header: value" lines for every column after the first, one Text so a drag selects the whole row.
-    private static func detail(_ t: TableModel, row: [AttributedString]) -> AttributedString {
+    /// One Text so a drag selects the whole row.
+    private func detail(_ plan: TableModel.StackedRow, row: [AttributedString]) -> AttributedString {
         var out = AttributedString()
-        for c in 1..<max(t.columnCount, 1) where c < row.count {
-            if c > 1 { out += AttributedString("\n") }
-            var h = t.header[c]
+        for (i, c) in plan.detailColumns.enumerated() {
+            if i > 0 { out += AttributedString("\n") }
+            var h = table.header[c]
             h.foregroundColor = .secondary
             out += h + AttributedString(": ") + row[c]
         }
         return out
     }
+}
 
-    @ViewBuilder private func cells(_ row: [AttributedString], size: CGFloat, header: Bool, zebra: Bool) -> some View {
-        ForEach(0..<table.columnCount, id: \.self) { c in
-            let a = Self.alignment(table.alignments[c])
-            CappedWidth(cap: Self.cellCap) {
-                Text(c < row.count ? row[c] : AttributedString())
-                    .font(.system(size: size, weight: header ? .semibold : .regular))
-                    .multilineTextAlignment(a.text)
+/// VoiceOver reads a table by rows with their header names. The row elements exist only while VoiceOver runs (the
+/// environment value follows it at runtime): an always-present accessibilityChildren, even empty, measurably costs
+/// memory and layout time on every table of a long chat.
+private struct RowReading: ViewModifier {
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    let table: TableModel
+    func body(content: Content) -> some View {
+        if voiceOver {
+            content.accessibilityChildren {
+                VStack {
+                    ForEach(Array(table.accessibilityRows.enumerated()), id: \.offset) { _, line in Text(line) }
+                }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            // Fills its grid cell, so the zebra fill spans the whole row height.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: a.frame)
-            .background(zebra ? Color.primary.opacity(0.03) : .clear)
-            .gridColumnAlignment(a.horizontal)
+        } else {
+            content
         }
     }
+}
 
-    private static func alignment(_ a: TableModel.Alignment) -> (text: TextAlignment, frame: Alignment, horizontal: HorizontalAlignment) {
+// MARK: Copy
+
+/// A small Copy pill on the table's top trailing edge, fixed (outside the scroller). It shows on hover or keyboard
+/// focus; hidden with opacity, not removed, so it stays in the focus and accessibility trees. Also a context menu
+/// and two accessibility actions with the same two items.
+private struct CopyPill: ViewModifier {
+    let table: TableModel
+    @State private var hover = false
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hover = $0 }
+            .overlay(alignment: .topTrailing) {
+                Menu {
+                    items
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                } primaryAction: {
+                    Design.copy(table.markdown)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .controlSize(.small)
+                .fixedSize()
+                .focused($focused)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(.regularMaterial, in: Capsule())
+                // Straddles the top edge, so it never covers the header's last cell (no space reserved in it).
+                .padding(.trailing, 6)
+                .offset(y: -9)
+                .opacity(hover || focused ? 1 : 0)
+                .help("Copy table (click), or choose Markdown or tab-separated")
+                .accessibilityLabel("Copy table")
+            }
+            .contextMenu { items }
+            .accessibilityAction(named: "Copy as Markdown") { Design.copy(table.markdown) }
+            .accessibilityAction(named: "Copy as tab-separated") { Design.copy(table.tabSeparated) }
+    }
+
+    @ViewBuilder private var items: some View {
+        Button("Copy as Markdown") { Design.copy(table.markdown) }
+        Button("Copy as tab-separated") { Design.copy(table.tabSeparated) }
+    }
+}
+
+private struct TableFrame: ViewModifier {
+    @Environment(\.colorSchemeContrast) private var contrast
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        content.clipShape(shape)
+            .overlay(shape.strokeBorder(Design.Fill.hairline(contrast), lineWidth: Design.Fill.hairlineWidth(contrast)))
+    }
+}
+
+private extension View {
+    func framed() -> some View { modifier(TableFrame()) }
+}
+
+extension TableBlock {
+    fileprivate static func alignment(_ a: TableModel.Alignment) -> (text: TextAlignment, frame: Alignment, horizontal: HorizontalAlignment) {
         switch a {
         // Top-aligned: a short cell next to a wrapped one starts on the row's first line.
         case .leading: (.leading, .topLeading, .leading)
         case .center: (.center, .top, .center)
         case .trailing: (.trailing, .topTrailing, .trailing)
-        }
-    }
-}
-
-/// VoiceOver reads a table by rows, with the header names ("Package: parser, Seconds: 4.2"), not cell by cell.
-/// The row elements are only built while VoiceOver is running: they cost memory and layout time on every table
-/// of a long chat, and nobody else reads them.
-private struct RowReading: ViewModifier {
-    let table: TableModel
-    func body(content: Content) -> some View {
-        if NSWorkspace.shared.isVoiceOverEnabled {
-            content.accessibilityChildren {
-                VStack {
-                    ForEach(Array(TableBlock.spoken(table).enumerated()), id: \.offset) { _, line in Text(line) }
-                }
-            }
-        } else {
-            content
         }
     }
 }
