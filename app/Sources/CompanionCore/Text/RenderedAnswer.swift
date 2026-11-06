@@ -9,9 +9,63 @@ public struct BlockID: Hashable, Sendable {
 }
 
 public enum AnswerBlock: Equatable, Sendable {
-    /// Consecutive paragraphs (and, until Task 5, headings, list items and quotes): one selectable Text.
+    /// Consecutive top-level paragraphs: one selectable Text.
     case paragraphs(AttributedString)
-    case code(language: String?, text: String, isOpen: Bool)
+    case heading(level: Int, text: AttributedString)
+    case list(ListModel)
+    case quote([AnswerBlock])
+    case code(CodeModel)
+    case table(TableModel)
+    case rule
+    case math(String)
+}
+
+public struct ListModel: Equatable, Sendable {
+    public var ordered: Bool
+    public var items: [ListItem]
+    public init(ordered: Bool, items: [ListItem]) { self.ordered = ordered; self.items = items }
+}
+
+public struct ListItem: Equatable, Sendable {
+    public enum Check: Equatable, Sendable { case open, done }
+    /// "•" "◦" "▪" by depth, or "3."
+    public var marker: String
+    public var check: Check?
+    public var content: [AnswerBlock]
+    public init(marker: String, check: Check?, content: [AnswerBlock]) {
+        self.marker = marker; self.check = check; self.content = content
+    }
+}
+
+public struct CodeModel: Equatable, Sendable {
+    public var language: String?
+    public var text: String
+    public var isOpen: Bool
+    public var lineCount: Int
+    public var reference: FileReference?
+    public init(language: String?, text: String, isOpen: Bool, lineCount: Int, reference: FileReference?) {
+        self.language = language; self.text = text; self.isOpen = isOpen; self.lineCount = lineCount; self.reference = reference
+    }
+}
+
+public struct TableModel: Equatable, Sendable {
+    public enum Alignment: Equatable, Sendable { case leading, center, trailing }
+    public var alignments: [Alignment]
+    public var header: [AttributedString]
+    /// Padded to `alignments.count`.
+    public var rows: [[AttributedString]]
+    public var columnCount: Int { alignments.count }
+    public init(alignments: [Alignment], header: [AttributedString], rows: [[AttributedString]]) {
+        self.alignments = alignments; self.header = header; self.rows = rows
+    }
+}
+
+public enum AnswerAttributes {
+    /// Text shown on screen but never spoken: a removed link's " (url)" and an image's alt text.
+    public enum SpeechSkip: AttributedStringKey {
+        public typealias Value = Bool
+        public static let name = "companion.speechSkip"
+    }
 }
 
 public struct RenderedBlock: Identifiable, Equatable, Sendable {

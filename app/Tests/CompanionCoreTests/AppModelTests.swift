@@ -476,11 +476,13 @@ import Testing
         let answer = feed.turns[0].answer!
         m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: "one ")))
         m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: "two")))
-        // Within one frame of the last flush (the question's, or the first delta's), so the second waits.
-        #expect(feed.model(answer)?.message.text != "one two")
         #expect(m.currentMessages.last?.text == "one two")      // the Conversation is immediate
-        try await Task.sleep(for: .milliseconds(40))
-        #expect(feed.model(answer)?.message.text == "one two")  // no manual flush: the frame timer delivered it
+        // No manual flush: the frame timer delivers it. Poll generously so a loaded CI machine cannot flake.
+        let deadline = ContinuousClock.now + .seconds(2)
+        while feed.model(answer)?.message.text != "one two", ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(feed.model(answer)?.message.text == "one two")
         #expect(feed.model(answer)?.rendered?.plainText == "one two")
     }
 

@@ -3,15 +3,6 @@ import Testing
 @testable import CompanionCore
 
 @Suite struct ReplyMarkdownTests {
-    @Test func splitsBlocks() {
-        let md = "# Title\nFirst line\nsecond line\n\n- one\n2. two\n> quoted\n```swift\nlet x = 1\n```\nafter\n```\nunterminated"
-        #expect(ReplyMarkdown.blocks(md) == [
-            .heading(level: 1, text: "Title"), .paragraph("First line\nsecond line"), .bullet("one"),
-            .numbered(marker: "2.", text: "two"), .quote("quoted"), .code(language: "swift", text: "let x = 1"),
-            .paragraph("after"), .code(language: nil, text: "unterminated"),
-        ])
-    }
-
     @Test func removesLinksAndImagesAndShowsTheTarget() {
         let s = ReplyMarkdown.inline("Read [the docs](https://evil.example/x) ![pixel](https://evil.example/p.png) now", root: nil)
         #expect(String(s.characters) == "Read the docs (https://evil.example/x) pixel now")

@@ -14,7 +14,7 @@ final class RenderLog: Sendable {
         RenderCache(limits: limits) { chunk, _ in
             log.add(chunk.text)
             // Code blocks, so assembly never merges them (paragraph merging is tested on the real renderer).
-            return RenderedChunk(blocks: [.code(language: nil, text: chunk.text, isOpen: false)], plainText: chunk.text,
+            return RenderedChunk(blocks: [.code(CodeModel(language: nil, text: chunk.text, isOpen: false, lineCount: 1, reference: nil))], plainText: chunk.text,
                                  cost: chunk.text.utf8.count)
         }
     }
@@ -119,7 +119,7 @@ final class RenderLog: Sendable {
     @Test func aCancelledPrewarmStopsInserting() async {
         let c = RenderCache { chunk, _ in
             withUnsafeCurrentTask { $0?.cancel() }   // cancel the prewarming task during its first render
-            return RenderedChunk(blocks: [.code(language: nil, text: chunk.text, isOpen: false)], plainText: chunk.text, cost: 1)
+            return RenderedChunk(blocks: [.code(CodeModel(language: nil, text: chunk.text, isOpen: false, lineCount: 1, reference: nil))], plainText: chunk.text, cost: 1)
         }
         await Task { c.prewarm(["A", "B", "C"], root: nil) }.value
         #expect(c.count == 1)

@@ -14,7 +14,7 @@ import Testing
     @Test func plainStripsMarkdownButKeepsCode() {
         let md = "# Title\n\nSome **bold** and `x` text.\n\n- one\n- two\n\n2. step\n\n> quoted\n\n```swift\nlet a = **1**\n```"
         let out = CopyFormat.plain(msg(.assistant, md))
-        #expect(out == "Title\n\nSome bold and x text.\n\n• one\n\n• two\n\n2. step\n\nquoted\n\nlet a = **1**")
+        #expect(out == "Title\n\nSome bold and x text.\n\n• one\n• two\n\n2. step\n\nquoted\n\nlet a = **1**")
         #expect(!out.contains("```"))
     }
 

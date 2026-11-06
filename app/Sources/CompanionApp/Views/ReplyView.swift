@@ -23,8 +23,20 @@ struct ReplyView: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                case .code(let language, let code, _):
-                    CodeBlockView(language: language, code: code)
+                case .heading(_, let text):
+                    Text(text)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .code(let code):
+                    CodeBlockView(language: code.language, code: code.text)
+                case .list, .quote, .table, .rule, .math:
+                    // Minimal until the block views land: readable plain text.
+                    Text(verbatim: ReplyMarkdown.plainText([b.block]))
+                        .font(.body)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

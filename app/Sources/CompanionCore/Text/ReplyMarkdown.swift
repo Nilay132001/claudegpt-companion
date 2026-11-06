@@ -1,129 +1,37 @@
 import Foundation
 
-public enum ReplyBlock: Equatable, Sendable {
-    case paragraph(String)
-    case heading(level: Int, text: String)
-    case bullet(String)
-    case numbered(marker: String, text: String)
-    case quote(String)
-    case code(language: String?, text: String)
-}
-
-/// What a piece of a prose run is, so the view can style it (fonts live in the app, not here).
-public enum ProseRole: Equatable, Sendable { case paragraph, heading(level: Int), bullet, numbered, quote, gap }
-
-/// A reply split for display: consecutive non-code blocks become ONE attributed string (one selectable Text),
-/// so a selection can cross paragraphs, headings and list items.
-public enum ReplySegment: Equatable, Sendable {
-    case prose(AttributedString)
-    case code(language: String?, text: String)
-}
+/// What a piece of an answer is, so the app can style it (fonts live in the app, not here).
+public enum ProseRole: Equatable, Sendable { case paragraph, heading(level: Int), listItem, quote, tableCell, gap }
 
 /// The only place GPT reply text is parsed as Markdown (SourceRulesTests enforces it).
 public enum ReplyMarkdown {
-    /// Splits a reply into prose runs and code blocks. `style` is called once per piece (and per gap between
-    /// blocks) so the caller can set fonts and colours; list items in a row are joined by one newline, other blocks
-    /// by a `.gap` piece ("\n\n") the caller can make shorter than a full line.
-    public static func segments(_ markdown: String, root: String?,
-                                style: (ProseRole, inout AttributedString) -> Void = { _, _ in }) -> [ReplySegment] {
-        var out: [ReplySegment] = []
-        var run: AttributedString?
-        var lastWasList = false
-        func flush() {
-            if let r = run { out.append(.prose(r)) }
-            run = nil
-            lastWasList = false
-        }
-        for block in blocks(markdown) {
-            let role: ProseRole
-            var piece: AttributedString
-            switch block {
-            case .code(let lang, let text):
-                flush()
-                out.append(.code(language: lang, text: text))
-                continue
-            case .paragraph(let t): role = .paragraph; piece = inline(t, root: root)
-            case .heading(let level, let t): role = .heading(level: level); piece = inline(t, root: root)
-            case .bullet(let t): role = .bullet; piece = AttributedString("•  ") + inline(t, root: root)
-            case .numbered(let marker, let t): role = .numbered; piece = AttributedString(marker + "  ") + inline(t, root: root)
-            case .quote(let t): role = .quote; piece = inline(t, root: root)
-            }
-            style(role, &piece)
-            let isList = role == .bullet || role == .numbered
-            if var r = run {
-                if isList && lastWasList {
-                    r.append(AttributedString("\n"))
-                } else {
-                    var gap = AttributedString("\n\n")
-                    style(.gap, &gap)
-                    r.append(gap)
-                }
-                r.append(piece)
-                run = r
-            } else {
-                run = piece
-            }
-            lastWasList = isList
-        }
-        flush()
-        return out
-    }
-
-    public static func blocks(_ markdown: String) -> [ReplyBlock] {
-        var out: [ReplyBlock] = []
-        var para: [String] = []
-        var fence: (lang: String?, lines: [String])?
-        func flush() {
-            if !para.isEmpty { out.append(.paragraph(para.joined(separator: "\n"))); para = [] }
-        }
-        for raw in markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            let isFence = line.hasPrefix("```") || line.hasPrefix("~~~")
-            if var f = fence {
-                if isFence {
-                    out.append(.code(language: f.lang, text: f.lines.joined(separator: "\n")))
-                    fence = nil
-                } else {
-                    f.lines.append(raw)
-                    fence = f
-                }
-                continue
-            }
-            if isFence {
-                flush()
-                let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                fence = (lang.isEmpty ? nil : lang, [])
-                continue
-            }
-            if line.isEmpty { flush(); continue }
-            if let m = line.firstMatch(of: /^(#{1,6})\s+(.*)$/) { flush(); out.append(.heading(level: m.1.count, text: String(m.2))); continue }
-            if let m = line.firstMatch(of: /^[-*+]\s+(.*)$/) { flush(); out.append(.bullet(String(m.1))); continue }
-            if let m = line.firstMatch(of: /^(\d{1,3}[.)])\s+(.*)$/) { flush(); out.append(.numbered(marker: String(m.1), text: String(m.2))); continue }
-            if let m = line.firstMatch(of: /^>\s?(.*)$/) { flush(); out.append(.quote(String(m.1))); continue }
-            para.append(line)
-        }
-        flush()
-        if let f = fence { out.append(.code(language: f.lang, text: f.lines.joined(separator: "\n"))) }
-        return out
-    }
-
     /// Inline Markdown (emphasis, code spans) with every link and image removed, then `path:line` links added.
     public static func inline(_ text: String, root: String?) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             allowsExtendedAttributes: false, interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible)
         let parsed = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        return clean(parsed, root: root)
+    }
+
+    /// Removes links and images (their URL is shown once, as text), then links `path:line` inside the root.
+    static func clean(_ parsed: AttributedString, root: String?) -> AttributedString {
         var out = AttributedString()
         // A link may span several runs (e.g. [**a** b](u)); its URL is shown once, after the last of them.
         var open: (url: URL, text: String)?
         func closeLink() {
-            if let o = open, o.url.absoluteString != o.text { out.append(AttributedString(" (\(o.url.absoluteString))")) }
+            if let o = open, o.url.absoluteString != o.text {
+                var url = AttributedString(" (\(o.url.absoluteString))")
+                url[AnswerAttributes.SpeechSkip.self] = true
+                out.append(url)
+            }
             open = nil
         }
         for run in parsed.runs {
             var piece = AttributedString(parsed[run.range])
             let target = run.link
             if open != nil && open?.url != target { closeLink() }
+            if run.imageURL != nil { piece[AnswerAttributes.SpeechSkip.self] = true }
             piece.link = nil
             piece.imageURL = nil
             out.append(piece)
@@ -141,18 +49,50 @@ public enum ReplyMarkdown {
         return out
     }
 
-    /// The reply as plain text: headings, bullets and quotes flattened, inline marks removed, code verbatim.
-    public static func plainText(_ markdown: String) -> String {
-        func flat(_ s: String) -> String { String(inline(s, root: nil).characters) }
-        return blocks(markdown).map { block -> String in
-            switch block {
-            case .paragraph(let t), .quote(let t): flat(t)
-            case .heading(_, let t): flat(t)
-            case .bullet(let t): "• " + flat(t)
-            case .numbered(let marker, let t): marker + " " + flat(t)
-            case .code(_, let t): t
+    public static func blocks(_ markdown: String, root: String?) -> [AnswerBlock] {
+        render(markdown, root: root).blocks.map(\.block)
+    }
+
+    public static func plainText(_ markdown: String) -> String { render(markdown, root: nil).plainText }
+
+    public static func plainText(_ blocks: [AnswerBlock]) -> String {
+        blocks.map(plain).joined(separator: "\n\n")
+    }
+
+    static func plain(_ block: AnswerBlock) -> String {
+        switch block {
+        case .paragraphs(let s): return String(s.characters)
+        case .heading(_, let s): return String(s.characters)
+        case .list(let l): return listLines(l, indent: "").joined(separator: "\n")
+        case .quote(let bs): return plainText(bs)
+        case .code(let c): return c.text
+        case .table(let t):
+            return ([t.header] + t.rows).map { $0.map { String($0.characters) }.joined(separator: "\t") }.joined(separator: "\n")
+        case .rule: return "—"
+        case .math(let m): return m
+        }
+    }
+
+    private static func listLines(_ list: ListModel, indent: String) -> [String] {
+        var lines: [String] = []
+        for item in list.items {
+            let check = item.check.map { $0 == .done ? " [x]" : " [ ]" } ?? ""
+            var first = true
+            for block in item.content {
+                if case .list(let nested) = block {
+                    lines += listLines(nested, indent: indent + "  ")
+                    first = false
+                    continue
+                }
+                for (n, line) in plain(block).split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                    if first && n == 0 { lines.append(indent + item.marker + check + " " + line) }
+                    else { lines.append(indent + "  " + line) }
+                }
+                first = false
             }
-        }.joined(separator: "\n\n")
+            if first { lines.append(indent + item.marker + check) }
+        }
+        return lines
     }
 }
 
@@ -173,6 +113,7 @@ extension ReplyMarkdown {
         var out: [MarkdownChunk] = []
         var lines: [Substring] = []
         var fence: Substring?        // the opening marker, "```" or "~~~" (or longer)
+        var mathClose: Substring?    // a line that is exactly `$$` or `\[` opens a block closed by `$$` or `\]`
         var sawBlank = false
         var inList = false
         func flush() {
@@ -190,6 +131,11 @@ extension ReplyMarkdown {
                 if trimmed.hasPrefix(f), trimmed.drop(while: { $0 == f.first }).allSatisfy(\.isWhitespace) { fence = nil }
                 continue
             }
+            if let close = mathClose {
+                lines.append(line)
+                if trimmed == close { mathClose = nil }
+                continue
+            }
             if trimmed.isEmpty { sawBlank = true; lines.append(line); continue }
             let indented = trimmed.count != line.count
             let listItem = !indented && line.firstMatch(of: /^([-*+]|\d{1,9}[.)])(\s|$)/) != nil
@@ -197,24 +143,84 @@ extension ReplyMarkdown {
             sawBlank = false
             if !indented { inList = listItem }
             if let m = trimmed.firstMatch(of: /^(`{3,}|~{3,})/) { fence = m.1 }
+            if trimmed == "$$" { mathClose = "$$" } else if trimmed == "\\[" { mathClose = "\\]" }
             lines.append(line)
         }
-        let open = fence != nil
+        let open = fence != nil || mathClose != nil
         flush()
         if open, let last = out.popLast() { out.append(MarkdownChunk(text: last.text, isOpen: true)) }
         return out
     }
 
-    /// Task 3: M8's block parser per chunk. Task 5 replaces the body with the full-syntax parser.
-    public static func renderChunk(_ chunk: MarkdownChunk, root: String?, style: Styler) -> RenderedChunk {
-        let segments = segments(chunk.text, root: root, style: style)
-        let blocks: [AnswerBlock] = segments.enumerated().map { i, s in
-            switch s {
-            case .prose(let a): .paragraphs(a)
-            case .code(let lang, let text): .code(language: lang, text: text, isOpen: chunk.isOpen && i == segments.count - 1)
+        static let full = AttributedString.MarkdownParsingOptions(
+        allowsExtendedAttributes: false, interpretedSyntax: .full, failurePolicy: .returnPartiallyParsedIfPossible)
+
+    /// One chunk, parsed once with Foundation's full syntax; the plain text comes from the same blocks.
+    public static func renderChunk(_ chunk: MarkdownChunk, root: String?, style: @escaping Styler) -> RenderedChunk {
+        let text = preprocess(chunk.text)
+        var blocks: [AnswerBlock]
+        if let doc = try? AttributedString(markdown: text, options: full) {
+            let builder = BlockBuilder(root: root, style: style)
+            blocks = builder.build(doc)
+            if chunk.isOpen, let last = blocks.last, case .code(var c) = last {
+                c.isOpen = true
+                blocks[blocks.count - 1] = .code(c)
+            }
+            blocks = mergeParagraphs(blocks, style: style)
+        } else {
+            blocks = [.paragraphs(AttributedString(chunk.text))]
+        }
+        return RenderedChunk(blocks: blocks, plainText: plainText(blocks), cost: chunk.text.utf8.count * 4 + 256)
+    }
+
+    /// Top-level paragraphs in a row become one run, so a selection crosses them.
+    static func mergeParagraphs(_ blocks: [AnswerBlock], style: Styler) -> [AnswerBlock] {
+        var out: [AnswerBlock] = []
+        for block in blocks {
+            if case .paragraphs(let next) = block, let last = out.last, case .paragraphs(var run) = last {
+                var gap = AttributedString("\n\n")
+                style(.gap, &gap)
+                run.append(gap)
+                run.append(next)
+                out[out.count - 1] = .paragraphs(run)
+            } else {
+                out.append(block)
             }
         }
-        return RenderedChunk(blocks: blocks, plainText: plainText(chunk.text), cost: chunk.text.utf8.count * 4 + 256)
+        return out
+    }
+
+    /// Math blocks become a `math` fence; fences are copied as they are; inline `$x$` becomes a code span on lines
+    /// without a backtick ("$5 and $10" is not math).
+    static func preprocess(_ text: String) -> String {
+        var out: [String] = []
+        var fence: String?
+        var mathIndent: String?
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            let indent = String(raw.prefix { $0 == " " || $0 == "\t" })
+            if let f = fence {
+                out.append(raw)
+                if t.hasPrefix(f), t.drop(while: { $0 == f.first }).allSatisfy(\.isWhitespace) { fence = nil }
+                continue
+            }
+            if let i = mathIndent {
+                if t == "$$" || t == "\\]" { out.append(i + "```"); mathIndent = nil } else { out.append(raw) }
+                continue
+            }
+            if let m = t.firstMatch(of: /^(`{3,}|~{3,})/) { fence = String(m.1); out.append(raw); continue }
+            if t == "$$" || t == "\\[" { out.append(indent + "```math"); mathIndent = indent; continue }
+            if let m = t.firstMatch(of: /^\$\$(.+)\$\$$/) {
+                out += [indent + "```math", indent + String(m.1).trimmingCharacters(in: .whitespaces), indent + "```"]
+                continue
+            }
+            out.append(raw.contains("$") && !raw.contains("`")
+                ? raw.replacingOccurrences(of: #"(?<![\\$\w])\$(?=\S)([^$\n]+?)(?<=\S)\$(?![\w$])"#, with: "`$1`",
+                                           options: .regularExpression)
+                : raw)
+        }
+        if let i = mathIndent { out.append(i + "```") }
+        return out.joined(separator: "\n")
     }
 
     /// Joins rendered chunks; adjacent `.paragraphs` blocks become one run, so a selection crosses them (P1).
@@ -237,7 +243,135 @@ extension ReplyMarkdown {
     }
 
     /// Uncached render of a whole answer (tests, Copy, speech).
-    public static func render(_ markdown: String, root: String?, style: Styler = noStyle) -> RenderedAnswer {
+    public static func render(_ markdown: String, root: String?, style: @escaping Styler = noStyle) -> RenderedAnswer {
         assemble(chunks(markdown).map { renderChunk($0, root: root, style: style) }, style: style)
     }
+}
+
+/// Turns Foundation's flat runs (each carrying its block path) into `AnswerBlock`s. Foundation lists a run's
+/// `components` innermost first; reversed they read outermost first, and consecutive runs are grouped by the
+/// identity of their component at each depth.
+struct BlockBuilder {
+    let root: String?
+    let style: ReplyMarkdown.Styler
+
+    struct Piece {
+        let path: [PresentationIntent.IntentType]
+        let text: AttributedString
+    }
+
+    func build(_ doc: AttributedString) -> [AnswerBlock] {
+        let pieces = doc.runs.map { run -> Piece in
+            var t = AttributedString(doc[run.range])
+            t.presentationIntent = nil
+            return Piece(path: Array((run.presentationIntent?.components ?? []).reversed()), text: t)
+        }
+        return build(pieces[...], depth: 0, listDepth: 0, role: .paragraph)
+    }
+
+    private func groups(_ pieces: ArraySlice<Piece>, depth: Int) -> [(PresentationIntent.IntentType?, ArraySlice<Piece>)] {
+        var out: [(PresentationIntent.IntentType?, ArraySlice<Piece>)] = []
+        guard var start = pieces.indices.first else { return out }
+        for i in pieces.indices.dropFirst() where pieces[i].path[safe: depth]?.identity != pieces[start].path[safe: depth]?.identity {
+            out.append((pieces[start].path[safe: depth], pieces[start..<i]))
+            start = i
+        }
+        out.append((pieces[start].path[safe: depth], pieces[start...]))
+        return out
+    }
+
+    private func build(_ pieces: ArraySlice<Piece>, depth: Int, listDepth: Int, role: ProseRole) -> [AnswerBlock] {
+        var out: [AnswerBlock] = []
+        for (intent, group) in groups(pieces, depth: depth) {
+            switch intent?.kind {
+            case .header(let level)?:
+                out.append(.heading(level: level, text: inline(group, role: .heading(level: level))))
+            case .orderedList?:
+                out.append(.list(list(group, depth: depth, ordered: true, listDepth: listDepth)))
+            case .unorderedList?:
+                out.append(.list(list(group, depth: depth, ordered: false, listDepth: listDepth)))
+            case .blockQuote?:
+                out.append(.quote(build(group, depth: depth + 1, listDepth: listDepth, role: .quote)))
+            case .codeBlock(let hint)?:
+                out.append(code(group, hint: hint))
+            case .thematicBreak?:
+                out.append(.rule)
+            case .table(let columns)?:
+                out.append(.table(table(group, depth: depth, columns: columns)))
+            default:
+                out.append(.paragraphs(inline(group, role: role)))
+            }
+        }
+        return out
+    }
+
+    private func inline(_ group: ArraySlice<Piece>, role: ProseRole) -> AttributedString {
+        var joined = AttributedString()
+        for p in group { joined.append(p.text) }
+        var s = ReplyMarkdown.clean(joined, root: root)
+        style(role, &s)
+        return s
+    }
+
+    private func list(_ group: ArraySlice<Piece>, depth: Int, ordered: Bool, listDepth: Int) -> ListModel {
+        var items: [ListItem] = []
+        for (intent, itemGroup) in groups(group, depth: depth + 1) {
+            var ordinal = items.count + 1
+            if case .listItem(let o)? = intent?.kind { ordinal = o }
+            var content = build(itemGroup, depth: depth + 2, listDepth: listDepth + 1, role: .listItem)
+            var check: ListItem.Check?
+            if case .paragraphs(var s)? = content.first {
+                let text = String(s.characters)
+                for (prefix, value) in [("[ ] ", ListItem.Check.open), ("[x] ", .done), ("[X] ", .done)] where text.hasPrefix(prefix) {
+                    s.removeSubrange(s.startIndex..<s.characters.index(s.startIndex, offsetBy: 4))
+                    content[0] = .paragraphs(s)
+                    check = value
+                    break
+                }
+            }
+            let marker = ordered ? "\(ordinal)." : ["•", "◦", "▪"][min(listDepth, 2)]
+            items.append(ListItem(marker: marker, check: check, content: content))
+        }
+        return ListModel(ordered: ordered, items: items)
+    }
+
+    private func code(_ group: ArraySlice<Piece>, hint: String?) -> AnswerBlock {
+        var text = group.map { String($0.text.characters) }.joined()
+        if text.hasSuffix("\n") { text.removeLast() }
+        let words = (hint ?? "").split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        let language = words.first.map(String.init)
+        if language == "math" { return .math(text) }
+        let rest = words.count > 1 ? String(words[1]) : ""
+        let reference = FileReferences.find(in: rest, root: root).first?.reference
+        let lines = text.isEmpty ? 0 : text.split(separator: "\n", omittingEmptySubsequences: false).count
+        return .code(CodeModel(language: language, text: text, isOpen: false, lineCount: lines, reference: reference))
+    }
+
+    private func table(_ group: ArraySlice<Piece>, depth: Int, columns: [PresentationIntent.TableColumn]) -> TableModel {
+        let count = columns.count
+        var alignments: [TableModel.Alignment] = columns.map {
+            switch $0.alignment { case .center: .center; case .right: .trailing; default: .leading }
+        }
+        var header = Array(repeating: AttributedString(), count: count)
+        var rows: [[AttributedString]] = []
+        for (rowIntent, rowGroup) in groups(group, depth: depth + 1) {
+            var cells = Array(repeating: AttributedString(), count: count)   // Foundation emits no run for an empty cell
+            for (cellIntent, cellGroup) in groups(rowGroup, depth: depth + 2) {
+                guard case .tableCell(let column)? = cellIntent?.kind, column >= 0, column < count else { continue }
+                cells[column] = inline(cellGroup, role: .tableCell)
+            }
+            if case .tableHeaderRow? = rowIntent?.kind { header = cells } else { rows.append(cells) }
+        }
+        // Foundation reports an unaligned column as .left; a column of numbers reads better trailing.
+        let numeric = /^[-+]?[$€£]?\d[\d,]*(\.\d+)?%?$/
+        for c in 0..<count where alignments[c] == .leading {
+            let texts = rows.map { String($0[c].characters) }.filter { !$0.isEmpty }
+            if !texts.isEmpty, texts.allSatisfy({ $0.wholeMatch(of: numeric) != nil }) { alignments[c] = .trailing }
+        }
+        return TableModel(alignments: alignments, header: header, rows: rows)
+    }
+}
+
+extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }

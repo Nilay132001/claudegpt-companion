@@ -58,6 +58,7 @@ import Testing
             #expect(!f.text.contains("LocalizedStringKey("), "\(f.name) builds a LocalizedStringKey")
             if f.name != "ReplyMarkdown.swift" {
                 #expect(!f.text.contains("AttributedString(markdown"), "\(f.name) parses markdown")
+                #expect(!f.text.contains("interpretedSyntax"), "\(f.name) configures a markdown parse")
             }
         }
     }

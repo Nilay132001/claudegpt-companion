@@ -9,7 +9,9 @@ enum AnswerStyle {
         case .quote: s.foregroundColor = .secondary
         // A short line between blocks: a caption2 line, relative to Dynamic Type.
         case .gap: s.font = .caption2
-        case .paragraph, .bullet, .numbered: break
+        case .paragraph, .listItem, .tableCell: break
         }
+        let code = s.runs.filter { $0.inlinePresentationIntent?.contains(.code) == true }.map(\.range)
+        for r in code { s[r].backgroundColor = Color.primary.opacity(0.06) }
     }
 }
