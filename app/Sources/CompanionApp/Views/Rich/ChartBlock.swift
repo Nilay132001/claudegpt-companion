@@ -19,7 +19,7 @@ struct ChartBlock: View {
         VStack(alignment: .leading, spacing: Design.Space.s) {
             Text(verbatim: spec.title).font(.headline)
             chart
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: spec.kind == .metric ? nil : Self.plotHeight)
                 .accessibilityChartDescriptor(ChartDescriptor(spec: spec))
             DisclosureGroup(isExpanded: Binding(get: { showData ?? voiceOver }, set: { showData = $0 })) {
