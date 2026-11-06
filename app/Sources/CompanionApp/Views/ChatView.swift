@@ -109,7 +109,7 @@ private struct ChatScroll: View {
                 tracker.viewport(top: m.top, height: m.height)
                 publish()
                 // A restore in progress ends once its scroll has landed (or the reader scrolls, or it times out).
-                tracker.restoreStep(offset: m.offset)
+                tracker.restoreStep()
                 // Following, and the bottom moved away without the reader scrolling up (the answer grew, the panel
                 // was resized, a row above was measured): back to the bottom. Nothing else pins the bottom, so a
                 // reader above it is never moved.
@@ -123,6 +123,7 @@ private struct ChatScroll: View {
                 // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last
                 // id; a session switch swaps the feed, and onChange(of: ShownChat) restores that chat's position.
                 if old.feed == new.feed, feed.isRunning {
+                    tracker.endRestore("newTurn")
                     follow.state.followAgain()
                     publish()
                     Self.note("newTurn")
@@ -131,9 +132,17 @@ private struct ChatScroll: View {
             }
             // The reader taking hold of the scroll view ends a restore in progress: it never pulls them back.
             .onScrollPhaseChange { _, phase in
-                if phase == .tracking || phase == .interacting || phase == .decelerating { tracker.readerScrolled() }
+                #if DEBUG
+                PerfProbe.count("phase.\(phase)")
+                #endif
+                if phase == .tracking || phase == .interacting || phase == .decelerating { tracker.endRestore("reader") }
             }
             .onAppear {
+                // When a restore ends (for any reason), a reader who is at the bottom follows again.
+                tracker.onRestoreEnd = { [follow] in
+                    follow.state.released()
+                    follow.publish()
+                }
                 if let restore { scroll(to: restore, proxy) }
             }
             .onChange(of: ShownChat(session: sessionKey, feed: ObjectIdentifier(feed))) { _, new in
@@ -159,6 +168,7 @@ private struct ChatScroll: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 JumpToLatest(follow: follow) { animated in
+                    tracker.endRestore("jump")
                     follow.state.followAgain()
                     publish()
                     if animated != nil { follow.jumpUntil = .now + .milliseconds(400) }
@@ -184,8 +194,13 @@ private struct ChatScroll: View {
         // a marker `inset` points into it) put the chat in the right place, but SwiftUI did not report that second
         // scroll as a geometry change, so the tracker kept the turn top as the reading position and saved it on the
         // next switch (the position driver's same=false on every build).
-        proxy.scrollTo(anchor.turn, anchor: UnitPoint(x: 0, y: anchor.unitY))
-        tracker.restore(anchor)
+        // y from the heights now: the reading area's current height, the turn's current height when it is laid out
+        // (else the saved one), clamped so a height error moves the line by at most that error.
+        let h = tracker.turnHeight(anchor.turn) ?? anchor.turnHeight
+        let H = tracker.viewportHeight ?? anchor.viewportHeight
+        let y = anchor.unitY(turnHeight: h, viewportHeight: H)
+        proxy.scrollTo(anchor.turn, anchor: UnitPoint(x: 0, y: y))
+        tracker.restore(anchor, expectedInset: ChatScrollAnchor.landedInset(unitY: y, turnHeight: h, viewportHeight: H))
     }
 }
 
@@ -268,25 +283,51 @@ private struct ChatScroll: View {
     }
 
     /// A restore scrolled to `anchor.turn` (ChatScroll.scroll(to:)); it is in progress until RestoreProgress ends.
-    func restore(_ anchor: ChatScrollAnchor) { restoring = RestoreProgress(anchor: anchor, deadline: .now + .seconds(3)) }
-
-    var isRestoring: Bool { restoring != nil }
-
-    /// The reader started scrolling: a restore in progress ends where they are.
-    func readerScrolled() {
-        #if DEBUG
-        if restoring != nil { PerfProbe.count("restore.end.reader") }
-        #endif
-        restoring = nil
+    func restore(_ anchor: ChatScrollAnchor, expectedInset: Double) {
+        restoring = RestoreProgress(anchor: anchor, expectedInset: expectedInset, deadline: .now + .seconds(3))
+        restoreToken += 1
+        let token = restoreToken
+        // The deadline also ends it without a geometry change (a restore that never lands, a chat that is still).
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, self.restoreToken == token else { return }
+            self.endRestore("deadline")
+        }
     }
 
-    func restoreStep(offset: Double) {
+    private var restoreToken = 0
+    var isRestoring: Bool { restoring != nil }
+    /// Called whenever a restore ends: ChatScroll re-checks following (ScrollFollow.released).
+    var onRestoreEnd: (() -> Void)?
+
+    /// The reader took over (a scroll phase, Jump to latest, ⌘↓, a new question) or the deadline passed.
+    func endRestore(_ reason: String) {
         guard var r = restoring else { return }
-        r.step(offset: offset, firstVisible: firstVisible, now: .now)
+        r.end(reason)
+        finish(r)
+    }
+
+    func restoreStep() {
+        guard var r = restoring else { return }
+        r.step(firstVisible: firstVisible, now: .now)
+        if r.finished { finish(r) } else { restoring = r }
+    }
+
+    private func finish(_ r: RestoreProgress) {
         #if DEBUG
-        if r.finished { PerfProbe.count("restore.end." + (r.endReason ?? "?")) }
+        PerfProbe.count("restore.end." + (r.endReason ?? "?"))
         #endif
-        restoring = r.finished ? nil : r
+        restoring = nil
+        restoreToken += 1
+        onRestoreEnd?()
+    }
+
+    /// The reading area's current height (nil before the first geometry).
+    var viewportHeight: Double? { height > 0 ? height : nil }
+    /// The turn's current height, when it is laid out in the chat shown.
+    func turnHeight(_ id: UUID) -> Double? {
+        guard let s = session, let f = frames[s]?.frame(id) else { return nil }
+        return f.maxY - f.minY
     }
 
     func remove(_ id: UUID) {

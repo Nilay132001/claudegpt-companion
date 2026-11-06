@@ -204,19 +204,60 @@ import Testing
 
     @Test func unitYPutsTheReadingTopInsetPointsIntoTheTurn() {
         // turnTop + y·h = y·H with turnTop = −inset.
-        let a = ChatScrollAnchor(turn: UUID(), inset: 1844, turnHeight: 3397, viewportHeight: 884)
-        let y = a.unitY
-        #expect(abs((-a.inset + y * a.turnHeight) - y * a.viewportHeight) < 1e-9)
+        let a = ChatScrollAnchor(turn: UUID(), inset: 1844)
+        let y = a.unitY(turnHeight: 3397, viewportHeight: 884)
         #expect(abs(y - 1844.0 / (3397 - 884)) < 1e-12)
-        // A turn shorter than the reading area: y is negative and still satisfies the alignment.
-        let s = ChatScrollAnchor(turn: UUID(), inset: 100, turnHeight: 300, viewportHeight: 884)
-        #expect(abs((-s.inset + s.unitY * s.turnHeight) - s.unitY * s.viewportHeight) < 1e-9)
+        #expect(abs(ChatScrollAnchor.landedInset(unitY: y, turnHeight: 3397, viewportHeight: 884) - 1844) < 1e-9)
+        // A turn shorter than the reading area: y is negative and still lands on the inset.
+        let s = ChatScrollAnchor(turn: UUID(), inset: 100)
+        let ys = s.unitY(turnHeight: 300, viewportHeight: 884)
+        #expect(ys < 0 && abs(ChatScrollAnchor.landedInset(unitY: ys, turnHeight: 300, viewportHeight: 884) - 100) < 1e-9)
     }
 
     @Test func unitYIsTheTopWithoutAnInsetOrHeights() {
-        #expect(ChatScrollAnchor(turn: UUID(), inset: 0, turnHeight: 3000, viewportHeight: 884).unitY == 0)
-        #expect(ChatScrollAnchor(turn: UUID(), inset: 300).unitY == 0)
-        #expect(ChatScrollAnchor(turn: UUID(), inset: 300, turnHeight: 884.5, viewportHeight: 884).unitY == 0)
+        let a = ChatScrollAnchor(turn: UUID(), inset: 300)
+        #expect(ChatScrollAnchor(turn: UUID(), inset: 0).unitY(turnHeight: 3000, viewportHeight: 884) == 0)
+        #expect(a.unitY(turnHeight: 0, viewportHeight: 884) == 0)
+        #expect(a.unitY(turnHeight: 884.5, viewportHeight: 884) == 0)
+        #expect(a.unitY(turnHeight: 900, viewportHeight: 884) == 0)   // within ambiguousSpan
+    }
+
+    @Test func unitYIsClampedWhereItWouldMagnifyErrors() {
+        // A turn 40 pt taller than the reading area: inset 600 would need y = 15.
+        let a = ChatScrollAnchor(turn: UUID(), inset: 600)
+        let y = a.unitY(turnHeight: 924, viewportHeight: 884)
+        #expect(ChatScrollAnchor.unitYRange.contains(y) && y == 2)
+        // The clamp lands nearer the saved line than the turn's top does.
+        #expect(abs(600 - ChatScrollAnchor.landedInset(unitY: y, turnHeight: 924, viewportHeight: 884)) < 600)
+    }
+
+    @Test func driftInTheTurnOrViewportHeightMovesTheRestoredLineALittle() {
+        // The restore computes y from the reading area's current height and the turn's saved height (its current
+        // one is used when it is laid out); the turn may have changed by up to ±20 pt, the saved viewport by ±40 pt
+        // (which the restore does not use). The line must land near where exact heights put it.
+        let H = 884.0
+        let cases: [(h: Double, inset: Double)] = [
+            (300, 100), (500, 300), (850, 600), (870, 600), (900, 600), (920, 600), (884, 400), (1200, 200), (1200, 900),
+            (3397, 1844), (3397, 3300), (4696, 4162), (6000, 10)]
+        for (h, inset) in cases {
+            for dh in [-20.0, 0, 20] { for dH in [-40.0, 0, 40] {
+                let saved = ChatScrollAnchor(turn: UUID(), inset: inset, turnHeight: h + dh, viewportHeight: H + dH)
+                let y = saved.unitY(turnHeight: saved.turnHeight, viewportHeight: H)
+                let exactY = saved.unitY(turnHeight: h, viewportHeight: H)
+                let landed = ChatScrollAnchor.landedInset(unitY: y, turnHeight: h, viewportHeight: H)
+                let ideal = ChatScrollAnchor.landedInset(unitY: exactY, turnHeight: h, viewportHeight: H)
+                // Within 25 pt where |y| ≤ 1.25 (the error is 20 pt × |y|), 40 pt up to |y| = 2. A turn within
+                // ambiguousSpan + 20 pt of the reading area's height: the ±20 pt error can make it look within
+                // ambiguousSpan, the turn is shown at its top, and the line is off by at most 2 × |h − H| < 80 pt.
+                let ambiguous = abs(h - H) < ChatScrollAnchor.ambiguousSpan + 20
+                let bound = ambiguous ? 2 * (ChatScrollAnchor.ambiguousSpan + 20) : abs(exactY) > 1.25 ? 40.0 : 25.0
+                #expect(abs(landed - ideal) <= bound, "h \(h) inset \(inset) dh \(dh) dH \(dH): \(landed) vs \(ideal)")
+                // Where the line is reachable with y in range, the ideal is the saved line itself.
+                if ChatScrollAnchor.unitYRange.contains(inset / (h - H)) && abs(h - H) >= ChatScrollAnchor.ambiguousSpan {
+                    #expect(abs(ideal - inset) < 1e-6)
+                }
+            } }
+        }
     }
 
     @Test func firstVisibleRecordsTheHeightsForTheRestore() {
@@ -229,30 +270,53 @@ import Testing
 
     @Test func aRestoreEndsWhenItsScrollHasLanded() {
         var (r, id) = restore()
-        let other = UUID()
-        r.step(offset: 5000, firstVisible: ChatScrollAnchor(turn: other, inset: 10), now: .now)
+        r.step(firstVisible: ChatScrollAnchor(turn: UUID(), inset: 10), now: .now)
         #expect(!r.finished)
-        r.step(offset: 2400, firstVisible: ChatScrollAnchor(turn: id, inset: 400), now: .now)
+        r.step(firstVisible: ChatScrollAnchor(turn: id, inset: 400), now: .now)
         #expect(r.finished && r.endReason == "landed")
     }
 
-    @Test func aRestoreIsNotFooledByTheGeometryBeforeItsScroll() {
-        // Before the scroll is applied the saved turn may be first visible at another inset: still in progress.
+    @Test func aRestoreIsNotEndedByAnIntermediateLayoutPass() {
+        // The scroll lands in two passes; the first shows the turn first visible at another inset. Saving then lost
+        // the line in rapid switch-throughs.
         var (r, id) = restore()
-        r.step(offset: 5000, firstVisible: ChatScrollAnchor(turn: id, inset: 0), now: .now)
+        r.step(firstVisible: ChatScrollAnchor(turn: id, inset: 160), now: .now)
         #expect(!r.finished)
-        r.step(offset: 5400, firstVisible: ChatScrollAnchor(turn: id, inset: 400), now: .now)
+        r.step(firstVisible: ChatScrollAnchor(turn: id, inset: 401.5), now: .now)
         #expect(r.finished && r.endReason == "landed")
     }
 
-    @Test func aScrollPhaseOrTheDeadlineEndsTheRestore() {
-        var (r, id) = restore()
-        r.readerScrolled()
-        #expect(r.finished && r.endReason == "reader")
+    @Test func aRestoreLandsWhereItsClampedScrollAims() {
+        let id = UUID()
+        var r = RestoreProgress(anchor: ChatScrollAnchor(turn: id, inset: 600), expectedInset: 40, deadline: .now + .seconds(3))
+        r.step(firstVisible: ChatScrollAnchor(turn: id, inset: 40), now: .now)
+        #expect(r.finished && r.endReason == "landed")
+    }
+
+    @Test func theReaderJumpingOrTheDeadlineEndsTheRestore() {
+        var (r, _) = restore()
+        r.end("jump")
+        #expect(r.finished && r.endReason == "jump")
         var (r2, id2) = restore()
-        r2.step(offset: 5000, firstVisible: ChatScrollAnchor(turn: id2, inset: 0), now: .now + .seconds(4))
+        r2.step(firstVisible: ChatScrollAnchor(turn: id2, inset: 0), now: .now + .seconds(4))
         #expect(r2.finished && r2.endReason == "deadline")
-        _ = id
+    }
+
+    @Test func releasedAtTheBottomFollowsAgain() {
+        // The reader reached the bottom during the hold with input that has no scroll phase (the keyboard).
+        var f = ScrollFollow(following: false)
+        f.geometry(offset: 4000, distanceFromBottom: 5000, hold: true)
+        f.geometry(offset: 9000, distanceFromBottom: 0, hold: true)
+        #expect(!f.following)
+        f.released()
+        #expect(f.following)
+        f.geometry(offset: 9000, distanceFromBottom: 120)   // the stream grows
+        #expect(f.following && f.shouldStickToBottom)
+        // Released above the bottom: still not following.
+        var g = ScrollFollow(following: false)
+        g.geometry(offset: 4000, distanceFromBottom: 5000, hold: true)
+        g.released()
+        #expect(!g.following)
     }
 
     @Test func holdKeepsARestoredChatFromFollowing() {

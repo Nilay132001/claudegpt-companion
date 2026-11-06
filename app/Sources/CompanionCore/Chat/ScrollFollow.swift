@@ -51,6 +51,12 @@ public struct ScrollFollow: Equatable, Sendable {
         lastDistance = distance
     }
 
+    /// A restore ended (landed, the reader took over, or it timed out): the hold is over. A reader who is at the
+    /// bottom then (they may have got there with input that has no scroll phase, like the keyboard) follows again.
+    public mutating func released() {
+        if distanceFromBottom <= 1 { following = true }
+    }
+
     /// The user sent a question, clicked Jump to latest or pressed ⌘↓.
     public mutating func followAgain() {
         following = true
@@ -59,12 +65,14 @@ public struct ScrollFollow: Equatable, Sendable {
 }
 
 /// Where a reader was in a chat: the first visible turn and how far the reading area's top is below that turn's top.
-/// ChatView restores it by scrolling a marker `inset` points into the turn to the top, so the same line comes back.
+/// ChatView restores it with one scroll to the turn, anchored so the reading area's top lands `inset` points into it
+/// (unitY(turnHeight:viewportHeight:)).
 public struct ChatScrollAnchor: Equatable, Sendable {
     public let turn: UUID
     /// Points from the turn's top down to the reading area's top (0: the turn starts at the top edge).
     public let inset: Double
-    /// The turn's and the reading area's heights when saved (0: unknown): they turn `inset` into a scroll anchor.
+    /// The turn's and the reading area's heights when saved (0: unknown). The restore uses the current heights
+    /// when it knows them (see unitY(turnHeight:viewportHeight:)).
     public let turnHeight: Double
     public let viewportHeight: Double
 
@@ -75,53 +83,74 @@ public struct ChatScrollAnchor: Equatable, Sendable {
         self.viewportHeight = viewportHeight
     }
 
-    /// The unit-point y for `scrollTo(turn, anchor:)` that puts the reading area's top `inset` points into the
-    /// turn in one scroll. scrollTo aligns the turn's point at y with the reading area's point at y:
-    /// turnTop + y·turnHeight = y·viewportHeight with turnTop = −inset, so y = inset / (turnHeight − viewportHeight).
-    /// 0 (the turn's top) when the inset is 0 or the heights are unknown or equal.
-    public var unitY: Double {
-        let span = turnHeight - viewportHeight
-        guard inset > 0.5, turnHeight > 0, viewportHeight > 0, abs(span) >= 1 else { return 0 }
-        return inset / span
+    /// The anchor range used. The line lands at y·(h − H), so an error of e in the turn's height moves it by y·e:
+    /// within this range by at most 2·e. (−1...1 was tried first; it cut a line near the end of a long turn short
+    /// by 350 pt in the streaming position runs, where y was 1.09.)
+    public static let unitYRange: ClosedRange<Double> = -1...2
+    /// A turn within this of the reading area's height is shown at its top: with |y| ≤ 1 the reachable lines are
+    /// within |h − H| of the top anyway, and a height estimate that is off by ~20 pt could flip the sign of h − H
+    /// and put the line on the wrong side of the turn's top.
+    public static let ambiguousSpan: Double = 20
+
+    /// The unit-point y for `scrollTo(turn, anchor:)` that puts the reading area's top `inset` points into the turn,
+    /// computed with the heights at restore time (`turnHeight`: the turn's current height if it is laid out, else
+    /// the saved one; `viewportHeight`: the reading area's current height). scrollTo aligns the turn's point at y
+    /// with the reading area's point at y: turnTop + y·h = y·H with turnTop = −inset, so y = inset / (h − H).
+    /// Outside unitYRange (a turn about as tall as the reading area, or a line near its end) that is ill-conditioned:
+    /// y is clamped, which shows the same turn with its top or bottom edge as near the saved line as that range
+    /// reaches (always at least as near as the turn's top). 0 when the inset is 0, a height is unknown, or the turn is
+    /// within `ambiguousSpan` of the reading area's height.
+    public func unitY(turnHeight h: Double, viewportHeight H: Double) -> Double {
+        guard inset > 0.5, h > 0, H > 0 else { return 0 }
+        let span = h - H
+        guard abs(span) >= Self.ambiguousSpan else { return 0 }
+        return min(Self.unitYRange.upperBound, max(Self.unitYRange.lowerBound, inset / span))
+    }
+
+    /// Where the reading area's top lands inside the turn (points below its top) for anchor `y`, given the turn's
+    /// and the reading area's actual heights.
+    public static func landedInset(unitY y: Double, turnHeight h: Double, viewportHeight H: Double) -> Double {
+        y * (h - H)
     }
 }
 
 /// A restore in progress (ChatView): the chat was scrolled to a saved position in one scroll
-/// (`scrollTo(turn, anchor: ChatScrollAnchor.unitY)`). While it is in progress the follow state holds (the swap to a
-/// restored chat can show its bottom for a moment). It never scrolls by itself, so it cannot fight the reader. It ends:
-/// - when the saved turn is the first visible one after the restore's scroll has moved the chat (or it is already
-///   there: then the geometry before the scroll is never mistaken for the result);
-/// - when the reader scrolls (a scroll phase, `readerScrolled`), or at the deadline.
+/// (`scrollTo(turn, anchor: unitY)`). While it is in progress the follow state holds (the swap to a restored chat can
+/// show its bottom for a moment) and the chat's position is not saved. It never scrolls by itself, so it cannot fight
+/// the reader. It ends:
+/// - when the saved turn is the first visible one at the inset the scroll aims for (`expectedInset`, within 2 pt).
+///   Not on "moved and the turn is first visible": a scroll can land in more than one layout pass, and a position
+///   saved from an intermediate one lost the line (the rapid switch-through trips);
+/// - when the reader scrolls (`end("reader")` on a scroll phase), jumps to the latest or sends a question
+///   (`end("jump")`, `end("newTurn")`), or at the deadline (ChatView also ends it from a timer).
 public struct RestoreProgress: Sendable {
     public let anchor: ChatScrollAnchor
+    /// Where the scroll puts the reading area's top inside the turn (ChatScrollAnchor.landedInset for the y used).
+    public let expectedInset: Double
     public let deadline: ContinuousClock.Instant
     public private(set) var finished = false
-    /// Why it ended (for diagnostics): landed, reader, deadline.
+    /// Why it ended: landed, reader, jump, newTurn, deadline.
     public private(set) var endReason: String?
-    private var moved = false
-    private var lastOffset: Double?
 
-    public init(anchor: ChatScrollAnchor, deadline: ContinuousClock.Instant) {
+    public init(anchor: ChatScrollAnchor, expectedInset: Double? = nil, deadline: ContinuousClock.Instant) {
         self.anchor = anchor
+        self.expectedInset = expectedInset ?? anchor.inset
         self.deadline = deadline
     }
 
-    /// The reader began scrolling (trackpad, wheel, scroller): stop.
-    public mutating func readerScrolled() { finish("reader") }
-
-    /// One scroll geometry.
-    public mutating func step(offset: Double, firstVisible: ChatScrollAnchor?, now: ContinuousClock.Instant) {
+    /// The reader took over (a scroll phase, Jump to latest, ⌘↓, a new question), or the deadline passed.
+    public mutating func end(_ reason: String) {
         guard !finished else { return }
-        if let lastOffset, abs(offset - lastOffset) > 0.5 { moved = true }
-        lastOffset = offset
-        guard now < deadline else { return finish("deadline") }
-        guard let first = firstVisible, first.turn == anchor.turn else { return }
-        if moved || abs(first.inset - anchor.inset) <= 2 { finish("landed") }
-    }
-
-    private mutating func finish(_ reason: String) {
         finished = true
         endReason = reason
+    }
+
+    /// One scroll geometry.
+    public mutating func step(firstVisible: ChatScrollAnchor?, now: ContinuousClock.Instant) {
+        guard !finished else { return }
+        guard now < deadline else { return end("deadline") }
+        guard let first = firstVisible, first.turn == anchor.turn else { return }
+        if abs(first.inset - expectedInset) <= 2 { end("landed") }
     }
 }
 
@@ -134,6 +163,7 @@ public struct VisibleTurns: Sendable {
     public mutating func set(_ id: UUID, minY: Double, maxY: Double) { frames[id] = (minY, maxY) }
     public mutating func remove(_ id: UUID) { frames[id] = nil }
     public var count: Int { frames.count }
+    public func frame(_ id: UUID) -> (minY: Double, maxY: Double)? { frames[id] }
 
     /// The turn under the reading area's top edge (`top`, in content coordinates), else the first turn below it
     /// (`viewportHeight`: the reading area's height; a turn below it is not visible).
