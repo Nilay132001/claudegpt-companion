@@ -29,10 +29,14 @@ public struct ScrollFollow: Equatable, Sendable {
     public var shouldStickToBottom: Bool { following && distanceFromBottom > 0.5 }
 
     /// `offset`: content offset from the top. `distanceFromBottom`: content height minus the visible rect's bottom.
-    public mutating func geometry(offset: Double, distanceFromBottom: Double) {
+    /// `hold`: a restore is moving the chat to a saved position: record the geometry, but do not start (or stop)
+    /// following from it (the swap to a restored chat can land briefly at its bottom).
+    public mutating func geometry(offset: Double, distanceFromBottom: Double, hold: Bool = false) {
         let distance = max(0, distanceFromBottom)
         self.distanceFromBottom = distance
-        if let lastOffset, let lastDistance {
+        if hold {
+            // nothing: the restore owns the position
+        } else if let lastOffset, let lastDistance {
             if offset < lastOffset - Self.epsilon && distance > lastDistance + Self.epsilon {
                 following = false                                   // the reader scrolled up
             } else if distance <= 1 || (offset > lastOffset + Self.epsilon && distance <= Self.nearBottom) {
@@ -60,35 +64,42 @@ public struct ChatScrollAnchor: Equatable, Sendable {
     public let turn: UUID
     /// Points from the turn's top down to the reading area's top (0: the turn starts at the top edge).
     public let inset: Double
+    /// The turn's and the reading area's heights when saved (0: unknown): they turn `inset` into a scroll anchor.
+    public let turnHeight: Double
+    public let viewportHeight: Double
 
-    public init(turn: UUID, inset: Double) {
+    public init(turn: UUID, inset: Double, turnHeight: Double = 0, viewportHeight: Double = 0) {
         self.turn = turn
         self.inset = inset
+        self.turnHeight = turnHeight
+        self.viewportHeight = viewportHeight
+    }
+
+    /// The unit-point y for `scrollTo(turn, anchor:)` that puts the reading area's top `inset` points into the
+    /// turn in one scroll. scrollTo aligns the turn's point at y with the reading area's point at y:
+    /// turnTop + y·turnHeight = y·viewportHeight with turnTop = −inset, so y = inset / (turnHeight − viewportHeight).
+    /// 0 (the turn's top) when the inset is 0 or the heights are unknown or equal.
+    public var unitY: Double {
+        let span = turnHeight - viewportHeight
+        guard inset > 0.5, turnHeight > 0, viewportHeight > 0, abs(span) >= 1 else { return 0 }
+        return inset / span
     }
 }
 
-/// The second step of a restore (ChatView): the saved turn was scrolled to the top; once it is the first visible turn,
-/// the marker `inset` points into it is scrolled to the top. It never fights the reader. It ends:
-/// - when the inset is within 2 pt;
-/// - when the reader scrolls (a scroll phase, `readerScrolled`), or, once the turn has landed, on any offset move it did
-///   not ask for that is not a layout correction (a correction moves offset and content height together, so the
-///   distance from the bottom stays);
-/// - when its own marker scroll moved but missed (it does not keep scrolling);
-/// - when the first visible turn leaves the saved turn after landing, after `maxTries` asks, or at the deadline.
-/// A marker scroll that has not moved anything yet (the marker not laid out) may be asked again.
+/// A restore in progress (ChatView): the chat was scrolled to a saved position in one scroll
+/// (`scrollTo(turn, anchor: ChatScrollAnchor.unitY)`). While it is in progress the follow state holds (the swap to a
+/// restored chat can show its bottom for a moment). It never scrolls by itself, so it cannot fight the reader. It ends:
+/// - when the saved turn is the first visible one after the restore's scroll has moved the chat (or it is already
+///   there: then the geometry before the scroll is never mistaken for the result);
+/// - when the reader scrolls (a scroll phase, `readerScrolled`), or at the deadline.
 public struct RestoreProgress: Sendable {
-    public static let maxTries = 3
     public let anchor: ChatScrollAnchor
     public let deadline: ContinuousClock.Instant
-    public private(set) var tries = 0
     public private(set) var finished = false
-    /// Why it ended (for diagnostics): landed, reader, missed, left, tries, deadline.
+    /// Why it ended (for diagnostics): landed, reader, deadline.
     public private(set) var endReason: String?
-    private var landed = false
-    /// A marker scroll was asked for and no move has been seen since.
-    private var pendingScroll = false
+    private var moved = false
     private var lastOffset: Double?
-    private var lastDistance: Double?
 
     public init(anchor: ChatScrollAnchor, deadline: ContinuousClock.Instant) {
         self.anchor = anchor
@@ -96,41 +107,21 @@ public struct RestoreProgress: Sendable {
     }
 
     /// The reader began scrolling (trackpad, wheel, scroller): stop.
-    public mutating func readerScrolled() { _ = finish("reader") }
+    public mutating func readerScrolled() { finish("reader") }
 
-    /// One scroll geometry. Returns true when the marker should be scrolled to the top now.
-    public mutating func step(offset: Double, distanceFromBottom distance: Double, firstVisible: ChatScrollAnchor?,
-                              now: ContinuousClock.Instant) -> Bool {
-        guard !finished else { return false }
-        var moved = false
-        if let lastOffset, let lastDistance {
-            moved = abs(offset - lastOffset) > 0.5 && abs(distance - lastDistance) > 0.5
-        }
+    /// One scroll geometry.
+    public mutating func step(offset: Double, firstVisible: ChatScrollAnchor?, now: ContinuousClock.Instant) {
+        guard !finished else { return }
+        if let lastOffset, abs(offset - lastOffset) > 0.5 { moved = true }
         lastOffset = offset
-        lastDistance = distance
         guard now < deadline else { return finish("deadline") }
-        var ourMove = false
-        if landed && moved {
-            guard pendingScroll else { return finish("reader") } // a move the restore did not ask for: the reader
-            pendingScroll = false
-            ourMove = true
-        }
-        guard let first = firstVisible, first.turn == anchor.turn else {
-            return landed ? finish("left") : false              // before landing: the turn scroll is under way
-        }
-        landed = true
-        if abs(first.inset - anchor.inset) <= 2 { return finish("landed") }
-        if ourMove { return finish("missed") }
-        guard tries < Self.maxTries else { return finish("tries") }
-        tries += 1
-        pendingScroll = true
-        return true
+        guard let first = firstVisible, first.turn == anchor.turn else { return }
+        if moved || abs(first.inset - anchor.inset) <= 2 { finish("landed") }
     }
 
-    private mutating func finish(_ reason: String) -> Bool {
+    private mutating func finish(_ reason: String) {
         finished = true
         endReason = reason
-        return false
     }
 }
 
@@ -150,7 +141,8 @@ public struct VisibleTurns: Sendable {
         let candidates = frames.filter { $0.value.maxY > top + 0.5 }
         guard let (id, f) = candidates.min(by: { $0.value.minY < $1.value.minY }),
               f.minY < top + viewportHeight else { return nil }
-        return ChatScrollAnchor(turn: id, inset: max(0, top - f.minY))
+        return ChatScrollAnchor(turn: id, inset: max(0, top - f.minY), turnHeight: f.maxY - f.minY,
+                                viewportHeight: viewportHeight)
     }
 }
 

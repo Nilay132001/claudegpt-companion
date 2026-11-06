@@ -30,8 +30,6 @@ private struct ChatScroll: View {
     let readOnly: Bool
     /// Where the reader was in the chat this view first shows, or nil to start at the bottom.
     let restore: ChatScrollAnchor?
-    /// The position being restored (the first chat's, then each chat switched to), for the marker in its turn.
-    @State private var restoring: ChatScrollAnchor?
 
     /// The follow state changes on every scroll and resize frame; a @State struct would start a SwiftUI transaction
     /// (a second graph update in the frame) each time, and re-run this body. Only the Jump button observes it, and
@@ -46,8 +44,7 @@ private struct ChatScroll: View {
         self.sessionKey = sessionKey
         self.readOnly = readOnly
         self.restore = restore
-        _follow = State(initialValue: FollowBox(ScrollFollow(following: restore == nil)))
-        _restoring = State(initialValue: restore)
+        _follow = State(initialValue: FollowBox(ScrollFollow(following: restore == nil), session: sessionKey))
     }
 
     private static var initialAnchor: UnitPoint {
@@ -73,6 +70,9 @@ private struct ChatScroll: View {
         // the tracker still holds the old chat's frames: save the old chat's position now (only if its rows and
         // viewport were reported since it was shown; otherwise its saved position stays as it was).
         let _ = tracker.bind(session: sessionKey, feed: feed) { old, anchor in
+            // The follow state is reset for a chat by the ShownChat onChange, which runs after this body: in a rapid
+            // switch-through it can still be another chat's. Then it says nothing about `old`: keep its position.
+            guard follow.session == old else { return }
             model.scrollMemory.save(session: old, anchor: anchor, following: follow.state.following)
         }
         // No .scrollPosition binding (M9 Task 4b): with one, SwiftUI kept the bottom edge pinned while content grew
@@ -83,7 +83,7 @@ private struct ChatScroll: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
-                    TurnList(feed: feed, readOnly: readOnly, tracker: tracker, restore: restoring)
+                    TurnList(feed: feed, readOnly: readOnly, tracker: tracker)
                     Color.clear.frame(height: 1).id(Self.bottomID)
                 }
                 .coordinateSpace(.named(TurnTracker.space))
@@ -104,15 +104,12 @@ private struct ChatScroll: View {
                                      height: g.visibleRect.height - g.contentInsets.top - g.contentInsets.bottom,
                                      distance: g.contentSize.height - g.visibleRect.maxY)
             } action: { _, m in
-                follow.state.geometry(offset: m.offset, distanceFromBottom: m.distance)
+                // While a restore moves the chat to its saved line, the geometry does not start following.
+                follow.state.geometry(offset: m.offset, distanceFromBottom: m.distance, hold: tracker.isRestoring)
                 tracker.viewport(top: m.top, height: m.height)
                 publish()
-                // A restore in progress: once the saved turn is the first visible one, put the marker (that many
-                // points into it) at the top, and check again on the next geometry until it is there.
-                if tracker.restoreNeedsMarker(offset: m.offset, distance: m.distance) {
-                    Self.note("restore")
-                    proxy.scrollTo(RestoreMarker.id, anchor: .top)
-                }
+                // A restore in progress ends once its scroll has landed (or the reader scrolls, or it times out).
+                tracker.restoreStep(offset: m.offset)
                 // Following, and the bottom moved away without the reader scrolling up (the answer grew, the panel
                 // was resized, a row above was measured): back to the bottom. Nothing else pins the bottom, so a
                 // reader above it is never moved.
@@ -124,7 +121,7 @@ private struct ChatScroll: View {
             }
             .onChange(of: LastTurn(feed: ObjectIdentifier(feed), id: feed.turns.last?.id)) { old, new in
                 // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last
-                // id; a session switch swaps the feed, and onChange(of: sessionKey) restores that chat's position.
+                // id; a session switch swaps the feed, and onChange(of: ShownChat) restores that chat's position.
                 if old.feed == new.feed, feed.isRunning {
                     follow.state.followAgain()
                     publish()
@@ -139,12 +136,14 @@ private struct ChatScroll: View {
             .onAppear {
                 if let restore { scroll(to: restore, proxy) }
             }
-            .onChange(of: sessionKey) { _, new in
-                // Another session's chat in the same scroll view: its saved line, or its bottom.
-                let r = model.scrollMemory.position(for: new)
+            .onChange(of: ShownChat(session: sessionKey, feed: ObjectIdentifier(feed))) { _, new in
+                // Another session's chat in the same scroll view: its saved line, or its bottom. Keyed on the session
+                // and its feed together, so the action runs once the view holds that session's feed (a rapid
+                // switch-through can change the key before the feed).
+                let r = model.scrollMemory.position(for: new.session)
                 follow.state = ScrollFollow(following: r == nil)
+                follow.session = new.session
                 publish()
-                restoring = r
                 if let r {
                     scroll(to: r, proxy)
                 } else {
@@ -153,7 +152,7 @@ private struct ChatScroll: View {
                 }
             }
             .onDisappear {
-                if tracker.isFresh {
+                if tracker.isFresh && !tracker.isRestoring && follow.session == sessionKey {
                     model.scrollMemory.save(session: sessionKey, anchor: tracker.firstVisible,
                                             following: follow.state.following)
                 }
@@ -173,15 +172,19 @@ private struct ChatScroll: View {
     private static let bottomID = "chat.bottom"
 
     private struct LastTurn: Equatable { let feed: ObjectIdentifier; let id: UUID? }
+    private struct ShownChat: Equatable { let session: String; let feed: ObjectIdentifier }
 
     private func publish() { follow.publish() }
 
-    /// Back to where the reader was: first the saved turn (the lazy list lays it out), then, once it has a frame,
-    /// the marker `inset` points into it, so the same line is at the top as before.
+    /// Back to where the reader was: the saved turn, as far into it as before, in one scroll (see below).
     private func scroll(to anchor: ChatScrollAnchor, _ proxy: ScrollViewProxy) {
         guard feed.turns.contains(where: { $0.id == anchor.turn }) else { return }
         Self.note("restore")
-        proxy.scrollTo(anchor.turn, anchor: .top)
+        // One scroll, anchored inside the turn (ChatScrollAnchor.unitY). A second scroll (to the turn's top, then to
+        // a marker `inset` points into it) put the chat in the right place, but SwiftUI did not report that second
+        // scroll as a geometry change, so the tracker kept the turn top as the reading position and saved it on the
+        // next switch (the position driver's same=false on every build).
+        proxy.scrollTo(anchor.turn, anchor: UnitPoint(x: 0, y: anchor.unitY))
         tracker.restore(anchor)
     }
 }
@@ -189,11 +192,16 @@ private struct ChatScroll: View {
 /// ScrollFollow in a reference (see ChatScroll.follow): `state` is not observed; `showsJump` is, by the Jump button.
 @MainActor @Observable final class FollowBox {
     @ObservationIgnored var state: ScrollFollow
+    /// The chat `state` belongs to.
+    @ObservationIgnored var session: String
     /// An animated Jump to latest is scrolling until then; sticking to the bottom would cut it short.
     @ObservationIgnored var jumpUntil: ContinuousClock.Instant?
     var jumping: Bool { jumpUntil.map { ContinuousClock.now < $0 } ?? false }
     private(set) var showsJump = false
-    init(_ state: ScrollFollow) { self.state = state }
+    init(_ state: ScrollFollow, session: String) {
+        self.state = state
+        self.session = session
+    }
 
     /// Copies the Jump button's visibility from `state`, only when it changes.
     func publish() {
@@ -234,7 +242,9 @@ private struct ChatScroll: View {
         self.feed = feed
         defer { session = new }
         guard let old = session, old != new else { return }
-        if isFresh(old) { save(old, anchor(for: old)) }
+        // While a restore of `old` is still under way, the geometry shows where the chat was before it scrolled (a
+        // rapid switch-through): its stored position is the one being restored, so it is kept.
+        if isFresh(old) && restoring == nil { save(old, anchor(for: old)) }
         restoring = nil
     }
 
@@ -257,27 +267,26 @@ private struct ChatScroll: View {
         report()
     }
 
-    /// A restore scrolled to `anchor.turn`; the marker step follows from the geometry (RestoreProgress), within 3 s
-    /// (laying out a just-loaded chat can take a second).
+    /// A restore scrolled to `anchor.turn` (ChatScroll.scroll(to:)); it is in progress until RestoreProgress ends.
     func restore(_ anchor: ChatScrollAnchor) { restoring = RestoreProgress(anchor: anchor, deadline: .now + .seconds(3)) }
+
+    var isRestoring: Bool { restoring != nil }
 
     /// The reader started scrolling: a restore in progress ends where they are.
     func readerScrolled() {
         #if DEBUG
-        if restoring != nil { PerfProbe.count("restore.end.phase") }
+        if restoring != nil { PerfProbe.count("restore.end.reader") }
         #endif
         restoring = nil
     }
 
-    /// True when the marker should be scrolled to the top now (RestoreProgress decides; it ends on its own).
-    func restoreNeedsMarker(offset: Double, distance: Double) -> Bool {
-        guard var r = restoring else { return false }
-        let ask = r.step(offset: offset, distanceFromBottom: distance, firstVisible: firstVisible, now: .now)
+    func restoreStep(offset: Double) {
+        guard var r = restoring else { return }
+        r.step(offset: offset, firstVisible: firstVisible, now: .now)
         #if DEBUG
         if r.finished { PerfProbe.count("restore.end." + (r.endReason ?? "?")) }
         #endif
         restoring = r.finished ? nil : r
-        return ask
     }
 
     func remove(_ id: UUID) {
@@ -327,7 +336,6 @@ private struct TurnList: View {
     let feed: ChatFeed
     let readOnly: Bool
     let tracker: TurnTracker
-    let restore: ChatScrollAnchor?
 
     var body: some View {
         #if DEBUG
@@ -344,9 +352,6 @@ private struct TurnList: View {
                         tracker.set(turn.id, frame: f)
                     }
                     .onDisappear { tracker.remove(turn.id) }
-                    .overlay(alignment: .top) {
-                        if let restore, restore.turn == turn.id { RestoreMarker(inset: restore.inset) }
-                    }
                     .modifier(EntranceTransition(enabled: latest))
             }
         }
@@ -361,22 +366,6 @@ private struct TurnList: View {
         .padding(.horizontal, Design.Space.l)
         .padding(.top, Design.Space.m)
         .padding(.bottom, Design.Space.l)
-    }
-}
-
-/// An invisible point `inset` below the top of the turn being restored: scrolling it to the top restores the exact
-/// reading position.
-private struct RestoreMarker: View {
-    static let id = "chat.restore"
-    let inset: Double
-    var body: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(height: inset)
-            Color.clear.frame(height: 1).id(Self.id)
-        }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
 
