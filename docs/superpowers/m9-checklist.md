@@ -83,5 +83,13 @@ expected result happens exactly. Note anything else next to the step.
     then show their average runtime as a bar chart with the source." Then scroll the chat while the answer streams.
     *Expected:* the table and chart render at the end of the stream without the chat jumping. The chart has a "Source:"
     line. Scrolling stays smooth while text streams in.
+16. [ ] **A chat never opens or jumps past its last row (external display).** Needs a non-Retina external display
+    (scale 1). Move the panel onto it. Run `COMPANION_DEMO=rich COMPANION_DEMO_ANCHOR=bottom COMPANION_DEMO_WIDTH=300`,
+    then `COMPANION_DEMO=perf-table COMPANION_DEMO_WIDTH=300`, then each again at 360, 449 and 600 pt. In each one,
+    scroll to the top and press ⌘↓, then click "Jump to latest".
+    *Expected:* the chat opens showing its last answer, never an empty area between the header and the composer.
+    After each jump, the last answer is on screen and its actions row sits just above the composer, with the same gap
+    as on the built-in display. (On a scale-1 display, before this fix, `rich` at 300 pt opened blank.) The harness
+    can check the same thing: `COMPANION_PERF=idle` gives `drawsAtLoad`, and `COMPANION_PERF=jump` gives `draws`.
 
 If anything fails, note the step number, the scene, the panel width and light or dark mode.
