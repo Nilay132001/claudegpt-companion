@@ -737,7 +737,7 @@ app's environment never reach it. The daemon's stderr is discarded; the app logs
   `path:line` references inside the bound root open in the editor. The chat shows the turns of the current
   app run; earlier turns stay in the Codex thread (until a daemon history method exists).
   *M9 (v3.8):* answers are parsed once into cached blocks (headings, nested lists, task lists, quotes, rules,
-  tables), code blocks scroll sideways with a Wrap toggle (default: no wrap, choice kept), and a `chart` block
+  tables), code blocks scroll sideways with a Wrap toggle (default: no wrap, choice kept), and a `companion-chart` block
   renders only from a validated data block.
 - Each reply: 🔊 play / pause / resume / stop, speed 0.5×–2×, voice in settings, optional auto-play.
   Speech text strips markdown and says "code block omitted" unless "read code" is chosen.

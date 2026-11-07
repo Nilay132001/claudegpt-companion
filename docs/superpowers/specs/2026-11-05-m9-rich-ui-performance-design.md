@@ -1,8 +1,9 @@
 # M9 — Rich answers and scrolling performance: design
 
-Status: phase 1 (investigation + design). No product behaviour changed in this phase. The only code added is the
-DEBUG-only profiling harness (`app/Sources/CompanionApp/Demo/PerfHarness.swift`, `PerfContent.swift`, and `#if DEBUG`
-probe lines in the chat views).
+Status: implemented (M9, release 0.9.0). §1–§10 are the design as approved; §11 has the results and the rulings made
+during implementation, including the blank-chat fix. The perf numbers in §11 were measured at af5d7bf; the scroll
+commits after it (a90953f, c422149, 00a294e, 6c3295c and the final-review fix) were checked with the harness
+drivers listed in §11, and their interleaved perf A/B is listed there as pending until it runs on an unlocked Mac.
 
 **Audience.** The owner, who decides the open rulings in §9, and the M9 implementers, who build §5–§8 in the order of
 §10. Read §2–§3 first. They say what is actually slow and why, with the measurements.
@@ -504,12 +505,59 @@ through the window.
 - before (db5c26b): `before-long-*`.
 
 Every after shot of the rich, rich-tables, rich-charts, chat, context, status and history scenes was reviewed. No
-clipping, overlap or horizontal overflow was found outside the code and table scrollers. Two demo defects remain:
-- `rich-top` does not show the top. At 360–600 pt it shows the same bottom view as `rich-bottom`.
-- At 300 pt, `rich` with the top anchor shows an empty chat. Light, dark and long names all do this, in 3 of 3
-  attempts, at 3 s and 6 s. `rich-bottom` at 300 pt renders. The real app always opens at the bottom (or at a
-  restored anchor with following off), so this combination of top anchor and following is demo-only. Its cause is not
-  established.
+clipping, overlap or horizontal overflow was found outside the code and table scrollers. The `rich-top` and
+`rich-bottom` shots were retaken at 87f2ef0 (built-in display, 1x): `rich-top` now shows the top of the chat (a chat
+opened at its top no longer starts following: `ScrollFollow.opening`).
+
+**The blank chat (a real bug, not a demo artefact).** An earlier note here called a blank `rich` chat at 300 pt
+demo-only. It was not:
+- *Cause.* Bottom seeks scroll to a 1 pt marker after the `LazyVStack`. That marker sits at the content's *estimated*
+  end. When the rows between the viewport and the end have never been measured, the estimate can run more than a
+  viewport over their real height (a tall code or table turn among short ones). The scroll then stops past the last row
+  with nothing laid out, and no row is ever measured to correct it. After an instant jump from the top of a long chat
+  the estimated end was 4–16k pt below the last row.
+- *Where it showed.* `rich` at 300 pt on a scale-1 display; an instant Jump to latest from the top of perf-table (blank
+  in 15 of 24 runs by the harness's pixel check); asking a question after a restore or a jump (final review I1).
+- *Fix.* Moving the marker into the lazy stack (the first attempt) blanked perf-table at load at every width, and
+  making every bottom seek row-anchored cost streaming frames and sometimes stopped the stream updating, so neither
+  shipped. Instead:
+  - Jump to latest and ⌘↓ scroll to the **last turn's row** (`scrollTo(lastTurn, anchor: .bottom)`), which makes the
+    stack lay that row out and place it exactly. Until the jump ends, every re-seek goes to that row, never to the
+    marker, also while its answer streams (`RowJump`, CompanionCore, unit-tested). It ends when the reader moves up
+    or stops following, a new turn arrives, or the chat switches. A bounded safety net re-scrolls to the row if no
+    turn is visible after the jump (at most twice; it never fired in 96 measured jumps and nudges).
+  - Every other bottom seek (following a stream, a new question, a switch to a following chat, the first open) keeps
+    the marker. Two frames after it, and again 150 ms later, if no turn is in the reading area, the chat falls back to
+    the last row and starts a `RowJump`. When rows are drawn nothing changes. A new question is checked only when the
+    reader was not following at the bottom before it (after a restore, while reading, or after a jump): at load the
+    tracker can see no turn on a drawn chat for a moment, and checking there put a normal stream on the row path
+    (30 re-sticks per 10 s against 12); for the same reason a new turn cancels a pending check from the open. While a row seek settles (250 ms) the follow state is
+    held, so the seek's own move up from the estimated end is not taken for the reader scrolling up.
+  - Last resort: if the row seek and its two retries still show no turn, the turn list is rebuilt once and the chat
+    goes to the row again. After a restore, asking a question at 360 pt needed this: the lazy stack's estimates no
+    longer matched the content, and every scroll to the row landed where nothing was laid out. Rebuilding resets
+    per-row view state (a text selection, a code block's horizontal scroll); disclosures live in the feed and stay.
+  - Re-arming following counts the nearer of the content's end and the last row's real end, so a reader who jumps,
+    scrolls up and comes back down follows again and never scrolls into the empty tail. A jump ends when the reader
+    moves up (the offset smaller and the row lower on screen by as much), even while ScrollFollow still reads 0 pt
+    from the end: before, seeking the row pulled a wheel reader back on every notch.
+  - **Deviation (round 2).** The ruling allowed handing back to the marker once the stream had finished and the
+    estimated end matched the row. Doing so, a 1 pt resize re-estimated the end and blanked the 300 pt chat in 3 of 6
+    nudge runs, so a jump never hands back; it ends only as above.
+- *Harness gates (built-in display, scale 2).* Load: 80/80 drawn (5 scenes × 4 widths × 2 anchors × overlay/legacy),
+  plus 40/40 with legacy scrollers forced. Jump from the top, perf-table: 48/48 drawn (animated and instant).
+  Jump + nudge (wheel down, still, 1 pt resize): 48/48 drawn, 0 past the last row. Jump during a stream: 24/24 drawn,
+  the stream updated on screen in every run, 0 past the last row; re-sticks 10–44 per 10 s after a jump against 12 for
+  a normal follow (12 per 10 s, unchanged by these fixes). Restore → send, jump → send and jump → up → down
+  (perf-table, 4 widths × overlay/legacy): 24/24 drawn throughout, 0 past the last row; after the restore the
+  marker seek left no turn in view in 6 of 8 runs and the fallback placed the row (once, at 360 pt, only after the
+  turn list was rebuilt); after the jump → up → down, following re-armed and Jump to latest hid in 8/8.
+- *Not yet measured.* The interleaved perf A/B of these scroll commits against 0464aa5 (stream, position,
+  stream-scroll, long-scroll at 449 pt): PENDING (the Mac's screen was locked). The scale-1 external display case is
+  owner checklist row 18.
+- *Known limits.* Restore edge paths (the deadline timer, `onRestoreEnd`, a lazily re-measured turn ending only at the
+  3 s timer) are not unit-tested. After a jump, re-sticks run at up to about 3.5× a normal follow until the next new
+  turn.
 
 ### Rulings during implementation
 

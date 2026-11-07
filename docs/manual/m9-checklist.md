@@ -27,5 +27,7 @@ for the installed release app only.
 | 16 | Jira read (if set up) still answers. GPT still cannot write files or run commands (ask it to; it declines) | Owner | Result: |
 | 17 | VoiceOver: an answer, a table and a chart are read sensibly, and Jump to latest is reachable | Owner | Result: |
 | 18 | A chat never opens or jumps past its last row on an external display. Needs a non-Retina external display (scale 1). Move the panel onto it, open a long chat, and at panel widths of about 300, 360, 449 and 600 pt scroll to the top, then press ⌘↓ and click "Jump to latest". The chat opens showing its last answer, never an empty area between the header and the composer. After each jump the last answer is on screen and its actions row sits just above the composer, with the same gap as on the built-in display | Owner | Result: |
+| 19 | In a long chat, read in the middle, switch to another session and back (the chat returns to the same line), then ask a question. Then scroll to the top, press ⌘↓ and ask again. Each time the new question and its answer are on screen, never an empty area between the header and the composer | Owner | Result: |
+| 20 | After ⌘↓ from the top of a long chat, scroll up about one screen with the mouse wheel, then back down to the last line. Scrolling up is never pulled back; at the last line "Jump to latest" disappears and the chat follows again; you cannot scroll past the last answer into empty space | Owner | Result: |
 
 Every row needs the owner at the Mac. Rows 3, 8, 12 and 17 need eyes and ears, not only the app's state.
