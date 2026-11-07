@@ -11,6 +11,9 @@ import Foundation
 /// bottom, reaches the bottom, sends a question or jumps to the latest.
 public struct ScrollFollow: Equatable, Sendable {
     public static let nearBottom: Double = 80
+    /// How far the content's estimated end must run past the last row's real end before the row's end counts for
+    /// re-arming (`geometry`, `lastRowDistance`). Measured overshoots after a jump were 4–16k pt.
+    public static let overshoot: Double = 200
     /// "Jump to latest" shows once a reader who is not following is more than this above the bottom.
     public static let jumpThreshold: Double = 2
     /// Smallest offset or distance change that counts as movement (layout noise is below it).
@@ -51,7 +54,11 @@ public struct ScrollFollow: Equatable, Sendable {
     public mutating func geometry(offset: Double, distanceFromBottom: Double, hold: Bool = false,
                                   lastRowDistance: Double? = nil) {
         let distance = max(0, distanceFromBottom)
-        let rearm = min(distance, max(0, lastRowDistance ?? distance))
+        // The row's end counts only when the content's end is an overshoot past it (more than `overshoot`). Otherwise
+        // the two agree, and the row's frame can lag the scroll by a tick while its answer streams: a reader who
+        // scrolled up 40 pt read as 0 pt from the row's (stale) end, re-armed, and was pulled back on every delta.
+        let byRow = lastRowDistance.map { distance - max(0, $0) > Self.overshoot } ?? false
+        let rearm = byRow ? max(0, lastRowDistance!) : distance
         self.distanceFromBottom = distance
         let wasFollowing = following
         if hold {
@@ -59,8 +66,12 @@ public struct ScrollFollow: Equatable, Sendable {
         } else if let lastOffset, let lastDistance {
             if offset < lastOffset - Self.epsilon && distance > lastDistance + Self.epsilon {
                 following = false                                   // the reader scrolled up
-            } else if rearm <= 1 || (offset > lastOffset + Self.epsilon && rearm <= Self.nearBottom) {
-                following = true                                    // at the bottom, or scrolled down near it
+            } else if offset > lastOffset + Self.epsilon && rearm <= Self.nearBottom {
+                // Only the reader scrolling down to near the end re-arms, never the end coming to them: a lazy
+                // re-measure that shrank the content under a reader 40 pt up put the viewport 666 pt past the end for
+                // a tick, and after Page Up the content shrank by 17 pt with the offset unchanged; both read as "at
+                // the bottom", re-armed, and the next stick pulled the reader down.
+                following = true
             }
         } else if rearm <= Self.nearBottom {
             // The first geometry of a chat (also one restored with following: false): within 80 pt of the bottom
@@ -68,7 +79,7 @@ public struct ScrollFollow: Equatable, Sendable {
             following = true
         }
         // Re-armed, but the content's own distance would not have done it.
-        let byContent = distance <= 1 || distance <= Self.nearBottom
+        let byContent = distance <= Self.nearBottom
         rearmedByRow = !wasFollowing && following && !byContent
         lastOffset = offset
         lastDistance = distance
@@ -79,6 +90,17 @@ public struct ScrollFollow: Equatable, Sendable {
     public mutating func released() {
         if distanceFromBottom <= 1 { following = true }
     }
+
+    /// The distance `geometry` takes: from the reading area's bottom (the visible rect's bottom minus the composer's
+    /// inset) down to the content's end. Measured to the visible rect's bottom it was -88 pt at rest, so a reader up
+    /// to 88 pt above the end neither unfollowed nor counted as above the bottom, and the next stick pulled them back.
+    public static func distance(contentHeight: Double, visibleMaxY: Double, bottomInset: Double) -> Double {
+        contentHeight - (visibleMaxY - bottomInset)
+    }
+
+    /// The reader moved up, seen by another rule than this one's (RowJump: input without a scroll phase while a row
+    /// seek settles and the geometry is held).
+    public mutating func readerMovedUp() { following = false }
 
     /// The user sent a question, clicked Jump to latest or pressed ⌘↓.
     public mutating func followAgain() {

@@ -18,6 +18,8 @@ import Testing
         // ScrollFollow still says following (its distance is 0 for the first ~88 pt above the end).
         var up = j
         do { let r = up.update(lastTurn: turn, following: true, offset: 960, gapBelow: -40, now: t0); #expect(!r) }
+        #expect(up.endedByReader)
+        #expect(!unfollow.endedByReader && !newTurn.endedByReader)
         // The row not reported: the offset alone decides.
         var unreported = j
         do { let r = unreported.update(lastTurn: turn, following: true, offset: 960, gapBelow: nil, now: t0); #expect(!r) }
@@ -30,6 +32,9 @@ import Testing
         do { let r = j.update(lastTurn: turn, following: true, offset: 1000, gapBelow: -60, now: t0); #expect(r) }
         // A row above is measured smaller: the offset drops, the row stays where it is on screen.
         do { let r = j.update(lastTurn: turn, following: true, offset: 700, gapBelow: -60, now: t0); #expect(r) }
+        // Both in one tick (a re-measure above while a delta arrives): the offset drops 300, the row's bottom 20.
+        do { let r = j.update(lastTurn: turn, following: true, offset: 400, gapBelow: -80, now: t0); #expect(r) }
+        #expect(!j.endedByReader)
     }
 
     @Test func itsOwnSeekIsNotTheReaderWhileItSettles() {
@@ -39,8 +44,32 @@ import Testing
         do { let r = j.update(lastTurn: turn, following: true, offset: 1100, gapBelow: 100, now: t0 + .milliseconds(16)); #expect(r) }
         do { let r = j.update(lastTurn: turn, following: true, offset: 1000, gapBelow: 0, now: t0 + .milliseconds(100)); #expect(r) }
         #expect(j.settling(at: t0 + .milliseconds(100)) && !j.settling(at: t0 + .milliseconds(300)))
+        var animated = RowJump(turn: turn, at: t0)
+        animated.seeked(at: t0, running: .milliseconds(400))
+        #expect(animated.settling(at: t0 + .milliseconds(600)) && !animated.settling(at: t0 + .milliseconds(700)))
+        // Just after the animation the chat settles up by itself, row and offset together: not the reader.
+        do { let r = animated.update(lastTurn: turn, following: true, offset: 1000, gapBelow: 0, now: t0 + .milliseconds(400)); #expect(r) }
+        do { let r = animated.update(lastTurn: turn, following: true, offset: 846, gapBelow: -154, now: t0 + .milliseconds(434)); #expect(r) }
+        #expect(!animated.endedByReader)
         // After the settle time, the same kind of move is the reader.
         do { let r = j.update(lastTurn: turn, following: true, offset: 960, gapBelow: -40, now: t0 + .milliseconds(300)); #expect(!r) }
+    }
+
+    @Test func aMoveUpWithoutAScrollPhaseEndsItEvenWhileASeekSettles() {
+        // Final re-review N1: Page Up, arrows, VoiceOver report no scroll phase, and a seek's settle time used to
+        // swallow their move, so the next seek pulled them back.
+        var j = RowJump(turn: turn, at: t0)
+        do { let r = j.update(lastTurn: turn, following: true, offset: 1000, gapBelow: 0, now: t0); #expect(r) }
+        j.seeked(at: t0)
+        // Within the settle time: up 300 pt (Page Up), the row's bottom 300 pt below the reading area's bottom.
+        do { let r = j.update(lastTurn: turn, following: true, offset: 700, gapBelow: -300, now: t0 + .milliseconds(50)); #expect(!r) }
+        #expect(j.endedByReader)
+        // While a seek settles, its own move toward the band (from past the row) is not the reader.
+        var k = RowJump(turn: turn, at: t0)
+        do { let r = k.update(lastTurn: turn, following: true, offset: 1300, gapBelow: 300, now: t0); #expect(r) }
+        k.seeked(at: t0)
+        do { let r = k.update(lastTurn: turn, following: true, offset: 1000, gapBelow: 0, now: t0 + .milliseconds(50)); #expect(r) }
+        #expect(!k.endedByReader)
     }
 
     @Test func whileItsAnswerStreamsTheRowIsFollowedByItsBottom() {

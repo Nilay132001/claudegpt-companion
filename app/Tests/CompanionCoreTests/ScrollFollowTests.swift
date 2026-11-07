@@ -47,6 +47,27 @@ import Testing
         #expect(f.showsJumpToLatest)
     }
 
+    @Test func aReaderJustAboveTheEndIsAboveTheBottomDespiteTheComposerInset() {
+        // Final re-review: measured to the visible rect's bottom (which runs 88 pt under the composer) the distance
+        // was -88 at rest and still clamped to 0 after 40 pt up: following stayed on and the stick pulled back.
+        #expect(ScrollFollow.distance(contentHeight: 10_000, visibleMaxY: 10_088, bottomInset: 88) == 0)
+        #expect(ScrollFollow.distance(contentHeight: 10_000, visibleMaxY: 10_048, bottomInset: 88) == 40)
+        var f = ScrollFollow()
+        f.geometry(offset: 9000, distanceFromBottom: ScrollFollow.distance(contentHeight: 10_000, visibleMaxY: 10_088, bottomInset: 88))
+        f.geometry(offset: 8960, distanceFromBottom: ScrollFollow.distance(contentHeight: 10_000, visibleMaxY: 10_048, bottomInset: 88))
+        #expect(!f.following && !f.shouldStickToBottom)
+        #expect(f.showsJumpToLatest)
+        // Text arriving below while they read: they stay where they are.
+        f.geometry(offset: 8960, distanceFromBottom: ScrollFollow.distance(contentHeight: 10_200, visibleMaxY: 10_048, bottomInset: 88))
+        #expect(!f.following && !f.shouldStickToBottom)
+    }
+
+    @Test func aReaderMoveSeenElsewhereStopsFollowing() {
+        var f = ScrollFollow()
+        f.readerMovedUp()
+        #expect(!f.following && !f.shouldStickToBottom)
+    }
+
     @Test func reArmsAtTheLastRowsRealEndWhenTheEstimatedEndIsFarBelow() {
         // After a Jump to latest the content's estimated end was 4–16k pt below the last row (final review I2).
         var f = ScrollFollow()
@@ -62,14 +83,40 @@ import Testing
         #expect(f.shouldStickToBottom) // the content distance is kept: the view sticks to the row (RowJump), not the marker
     }
 
+    @Test func aContentShrinkUnderAReaderIsNotTheBottom() {
+        // perf-stream, 40 pt up: a re-measure put the viewport 666 pt past the end for a tick, then the offset was
+        // clamped back. Neither re-arms; the reader stays where they are.
+        var f = ScrollFollow()
+        f.geometry(offset: 301_627, distanceFromBottom: 0)
+        f.geometry(offset: 301_587, distanceFromBottom: 40)
+        #expect(!f.following)
+        f.geometry(offset: 301_587, distanceFromBottom: -666)
+        #expect(!f.following)
+        f.geometry(offset: 300_921, distanceFromBottom: 0)
+        #expect(!f.following)
+        f.geometry(offset: 300_921, distanceFromBottom: 21)
+        #expect(!f.following && f.showsJumpToLatest)
+    }
+
+    @Test func withoutAnOvershootTheRowsEndDoesNotReArm() {
+        // While an answer streams the row's frame can lag a tick: 40 pt up read as 0 pt from its stale end. With the
+        // content's end close to the row's (no overshoot), only the content distance counts.
+        var f = ScrollFollow()
+        f.geometry(offset: 9000, distanceFromBottom: 0, lastRowDistance: 0)
+        f.geometry(offset: 8960, distanceFromBottom: 40, lastRowDistance: 0)   // the reader, 40 pt up; stale row end
+        #expect(!f.following)
+        f.geometry(offset: 8960, distanceFromBottom: 120, lastRowDistance: 0)  // a delta arrives: still up there
+        #expect(!f.following && !f.rearmedByRow)
+    }
+
     @Test func neverReArmsAboveTheLastRowsRealEnd() {
         var f = ScrollFollow(following: false)
         f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 900)
         #expect(!f.following)
-        // Not scrolling down (a still tick), 2 pt above the row's end: only "at the bottom" (1 pt) re-arms.
-        f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 2)
-        #expect(!f.following)
+        // Not scrolling down (a still tick), even at the row's end: no re-arm. Scrolling down to it: re-arm.
         f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 1)
+        #expect(!f.following)
+        f.geometry(offset: 5001, distanceFromBottom: 5999, lastRowDistance: 0)
         #expect(f.following && f.rearmedByRow)
         // Scrolling down but 81 pt above it: no.
         var g = ScrollFollow(following: false)
@@ -145,10 +192,14 @@ import Testing
         #expect(f.following)
     }
 
-    @Test func reachingTheBottomFollowsAgain() {
+    @Test func reachingTheBottomFollowsAgainButTheEndComingToTheReaderDoesNot() {
+        // The end coming to the reader (the content shrinking, the panel growing) does not re-arm: after Page Up the
+        // content shrank 17 pt under the reader, which read as the bottom and pulled them down (final re-review).
         var f = ScrollFollow(following: false)
         f.geometry(offset: 500, distanceFromBottom: 400)
         f.geometry(offset: 500, distanceFromBottom: 0.5)
+        #expect(!f.following)
+        f.geometry(offset: 520, distanceFromBottom: 0)   // the reader scrolls to the end
         #expect(f.following)
     }
 

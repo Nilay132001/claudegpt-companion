@@ -526,43 +526,69 @@ demo-only. It was not:
     marker, also while its answer streams (`RowJump`, CompanionCore, unit-tested). It ends when the reader moves up
     or stops following, a new turn arrives, or the chat switches. A bounded safety net re-scrolls to the row if no
     turn is visible after the jump (at most twice; it never fired in 96 measured jumps and nudges).
-  - Every other bottom seek (following a stream, a new question, a switch to a following chat, the first open) keeps
-    the marker. Two frames after it, and again 150 ms later, if no turn is in the reading area, the chat falls back to
-    the last row and starts a `RowJump`. When rows are drawn nothing changes. A new question is checked only when the
+  - Jump to latest is animated only from within two reading areas of the end; from further up it is instant. Animated
+    from far up, it crossed unmeasured rows and on legacy scrollers the chat then settled 150–1,250 pt up by itself and
+    could stop following a stream (2 of 6 runs); instant jumps never did.
+  - Every other bottom seek (a new question, a switch to a following chat, the first open) keeps the marker. Two
+    frames after it, and again 150 ms later, if no turn is in the reading area, the chat falls back to the last row and
+    starts a `RowJump`. The follow stick is not checked: a chat following at its bottom has its last rows measured, and
+    at load the check saw no turn on a drawn chat in 2 of 6 perf-stream runs. When rows are drawn nothing changes. A new question is checked only when the
     reader was not following at the bottom before it (after a restore, while reading, or after a jump): at load the
     tracker can see no turn on a drawn chat for a moment, and checking there put a normal stream on the row path
-    (30 re-sticks per 10 s against 12); for the same reason a new turn cancels a pending check from the open. While a row seek settles (250 ms) the follow state is
-    held, so the seek's own move up from the estimated end is not taken for the reader scrolling up.
-  - Last resort: if the row seek and its two retries still show no turn, the turn list is rebuilt once and the chat
-    goes to the row again. After a restore, asking a question at 360 pt needed this: the lazy stack's estimates no
-    longer matched the content, and every scroll to the row landed where nothing was laid out. Rebuilding resets
-    per-row view state (a text selection, a code block's horizontal scroll); disclosures live in the feed and stay.
-  - Re-arming following counts the nearer of the content's end and the last row's real end, so a reader who jumps,
-    scrolls up and comes back down follows again and never scrolls into the empty tail. A jump ends when the reader
-    moves up (the offset smaller and the row lower on screen by as much), even while ScrollFollow still reads 0 pt
-    from the end: before, seeking the row pulled a wheel reader back on every notch.
+        (30 re-sticks per 10 s against 12); for the same reason a new turn cancels a pending check from the open. While a
+    row seek settles (250 ms) the follow state is held unless the reader scrolls (a scroll phase), so the seek's own
+    move up from the estimated end is not taken for the reader scrolling up. A move up that takes the row's bottom
+    below the reading area's bottom is still the reader, even inside that time and without a scroll phase (the
+    keyboard, VoiceOver, scroller arrows): the jump ends and following stops.
+  - Last resort: if the row seek and its two retries still show no turn, the turn list is rebuilt, at most once per
+    chat per 10 s, and the chat goes to the row again. After a restore, asking a question at 360 pt needed this: the
+    lazy stack's estimates no longer matched the content, and every scroll to the row landed where nothing was laid
+    out. Rebuilding resets per-row view state: a text selection, a code block's horizontal scroll and its "Show all"
+    state, a table's hover. The Context sent and chart Data disclosures live on the models and stay.
+  - Re-arming following counts the last row's real end instead of the content's end when the content's end overshoots
+    it by more than 200 pt, so a reader who jumps, scrolls up and comes back down follows again and never scrolls into
+    the empty tail. (Without an overshoot the row's frame, which can lag a tick while it streams, is not used.) A jump
+    ends when the reader moves up: the offset smaller and the row lower on screen (the direction, not the amount).
+  - **The follow distance is measured to the reading area's bottom** (final re-review). It was measured to the visible
+    rect's bottom, which runs 88 pt under the composer, so it read about -88 pt at rest: a reader up to 88 pt above
+    the end neither unfollowed nor counted as above the bottom, and the next stick pulled them back. Only when the
+    stick fires still uses the visible rect's bottom (text may grow under the composer before a stick), so a normal
+    stream's re-sticks stay at 12–13 per 10 s (59 when sticking at the reading area's bottom). Following also
+    re-arms only when the reader scrolls down to within 80 pt of the end (or sends, or jumps), never when the end comes
+    to them: a lazy re-measure that shrank the content under a reader 40 pt up put the viewport 666 pt past the end for
+    a tick, and after Page Up the content shrank 17 pt under the reader; both used to read as the bottom.
   - **Deviation (round 2).** The ruling allowed handing back to the marker once the stream had finished and the
     estimated end matched the row. Doing so, a 1 pt resize re-estimated the end and blanked the 300 pt chat in 3 of 6
     nudge runs, so a jump never hands back; it ends only as above.
-- *Harness gates (built-in display, scale 2).* Load: 80/80 drawn (5 scenes × 4 widths × 2 anchors × overlay/legacy),
-  plus 40/40 with legacy scrollers forced. Jump from the top, perf-table: 48/48 drawn (animated and instant).
-  Jump + nudge (wheel down, still, 1 pt resize): 48/48 drawn, 0 past the last row. Jump during a stream: 24/24 drawn,
-  the stream updated on screen in every run, 0 past the last row; re-sticks 10–44 per 10 s after a jump against 12 for
-  a normal follow (12 per 10 s, unchanged by these fixes). Restore → send, jump → send and jump → up → down
-  (perf-table, 4 widths × overlay/legacy): 24/24 drawn throughout, 0 past the last row; after the restore the
-  marker seek left no turn in view in 6 of 8 runs and the fallback placed the row (once, at 360 pt, only after the
-  turn list was rebuilt); after the jump → up → down, following re-armed and Jump to latest hid in 8/8.
+- *Harness gates (built-in display, scale 2; final code; "legacy" forced with `-AppleShowScrollBars Always`).*
+  - Load: 80/80 drawn (5 scenes × 4 widths × 2 anchors × overlay/legacy), plus 40/40 with legacy forced.
+  - Jump from the top, perf-table, 4 widths × 3 runs × overlay/legacy: 48/48 drawn; jump + nudge (wheel down, still,
+    1 pt resize): 48/48 drawn, 0 past the last row; safety-net retries 0.
+  - Jump during a stream, 4 widths × 3 runs × overlay/legacy: 24/24 drawn throughout, the stream updated on screen in
+    every run, 0 past the last row; re-sticks 18.4–42.5 per 10 s after a jump, against 12 for a normal follow of the
+    same scene (12 per 10 s, as before these fixes).
+  - Restore → send, jump → send, jump → up → down (perf-table, 4 widths × overlay/legacy): 24/24 drawn throughout,
+    0 past the last row; restore → send fell back to the row in 6 of 8 runs and rebuilt the list once; after
+    jump → up → down, following re-armed and Jump to latest hid in 8/8.
+  - During a stream, one wheel notch (40 pt) or Page Up, from a normal follow or after a jump (4 widths ×
+    overlay/legacy): the chat stayed put in 32/32, with 0 pulls and 0 app scrolls, following off and Jump to latest
+    shown. (At 600 pt the pixel check read one such end state as blank; a snapshot showed it drawn.)
+  - The far-below re-arm (an overshoot of about 900 pt at 300 pt, legacy) re-armed through the row (a RowJump) in 2/2
+    runs before far jumps became instant; with the final code the two runs re-armed through the content distance.
 - *Not yet measured.* The interleaved perf A/B of these scroll commits against 0464aa5 (stream, position,
   stream-scroll, long-scroll at 449 pt): PENDING (the Mac's screen was locked). The scale-1 external display case is
   owner checklist row 18.
 - *Known limits.* Restore edge paths (the deadline timer, `onRestoreEnd`, a lazily re-measured turn ending only at the
   3 s timer) are not unit-tested. After a jump, re-sticks run at up to about 3.5× a normal follow until the next new
-  turn.
+  turn. The list rebuild resets per-row view state. Text may still grow up to the composer's height under it before a
+  stick (the stick fires at the visible rect's bottom, as before). A keyboard move up within 650 ms after an animated
+  jump is left to the geometry after it.
 
 ### Rulings during implementation
 
-- **Following the stream.** Any upward scroll stops following at once, whatever the distance. Following re-arms only
-  when the reader is back at the bottom, by scrolling there or with Jump to latest (⌘↓).
+- **Following the stream.** Any upward scroll stops following at once, whatever the distance (measured to the
+  reading area's bottom, above the composer). Following re-arms only when the reader scrolls back down to the end, or
+  with Jump to latest (⌘↓) or a new question.
 - **Live resize.** Text selection is off while the panel is being live-resized, and comes back when the drag ends.
   Selection overlays were the per-frame cost of a resize.
 - **Restoring a reading position.** The restore is a single anchored scroll to the saved turn and its offset. It is not

@@ -53,7 +53,9 @@ enum PerfFlags {
     }
     static var isPerfScene: Bool { turns != nil }
     /// The drivers that read ChatView's follow state (PerfProbe.following, jumpShown).
-    static var tracksFollow: Bool { ["jump", "jumpstream", "jumpsend", "restoresend", "jumpupdown"].contains(mode ?? "") }
+    static var tracksFollow: Bool {
+        ["jump", "jumpstream", "jumpsend", "restoresend", "jumpupdown", "upstay"].contains(mode ?? "")
+    }
 }
 
 /// Counters and signposts the views call (DEBUG only, and only while a perf driver runs).
@@ -224,6 +226,7 @@ enum PerfFlags {
             case "jumpsend": await self.sendAfter(model, restore: false)
             case "restoresend": await self.sendAfter(model, restore: true)
             case "jumpupdown": await self.jumpUpDown(model)
+            case "upstay": await self.upStay(model)
             default: try? await Task.sleep(for: .seconds(PerfFlags.seconds)) // stream, idle
             }
             self.measuring = false
@@ -624,17 +627,66 @@ enum PerfFlags {
                            "markerFallbacks": (PerfProbe.counts["scroll.markerFallback"] ?? 0) - fallbacks0, "end": end]
     }
 
+    /// perf-stream: 2 s into the stream, a reader moves up a little and must stay put while the answer keeps growing
+    /// (final re-review). COMPANION_PERF_UPKIND=wheel (default): one 40 pt wheel notch, no scroll phase. =page: the
+    /// scroll view's Page Up, as the keyboard does. COMPANION_PERF_UPAFTER=jump: first scroll to the top and Jump to
+    /// latest, so the chat follows the stream on the row path (RowJump) when the reader moves.
+    private func upStay(_ model: AppModel) async {
+        guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
+        let clip = sv.contentView
+        for _ in 0..<240 { await nextFrame() }
+        if PerfFlags.env["COMPANION_PERF_UPAFTER"] == "jump" {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+            sv.reflectScrolledClipView(clip)
+            for _ in 0..<60 { await nextFrame() }
+            PerfProbe.jumpToLatest?(false)
+            for _ in 0..<120 { await nextFrame() }
+        }
+        let before: [String: Any] = ["following": PerfProbe.following, "streaming": model.currentFeed?.isRunning ?? false]
+        let y0 = clip.bounds.origin.y
+        if PerfFlags.env["COMPANION_PERF_UPKIND"] == "page" { sv.pageUp(nil) } else { _ = chatWheel(sv, by: -40) }
+        await nextFrame(); await nextFrame()
+        let y1 = clip.bounds.origin.y
+        let prog0 = PerfProbe.programmaticScrolls
+        var pulls = 0, last = y1, maxDrift: CGFloat = 0
+        for _ in 0..<600 {
+            await nextFrame()
+            let y = clip.bounds.origin.y
+            if y > last + 1 { pulls += 1 }          // moved down under the reader: pulled toward the bottom
+            maxDrift = max(maxDrift, abs(y - y1))
+            last = y
+        }
+        // COMPANION_PERF_SHOT=<png>: the window at the end, to look at what the pixel check saw.
+        if let p = PerfFlags.env["COMPANION_PERF_SHOT"] { DemoShot.write(to: URL(fileURLWithPath: p)) }
+        summary["upStay"] = ["kind": PerfFlags.env["COMPANION_PERF_UPKIND"] ?? "wheel",
+                             "afterJump": PerfFlags.env["COMPANION_PERF_UPAFTER"] == "jump", "before": before,
+                             "movedUp": Double(y0 - y1), "pulls": pulls, "maxDrift": Double(maxDrift),
+                             "appScrolls": PerfProbe.programmaticScrolls - prog0,
+                             "following": PerfProbe.following, "jumpShown": PerfProbe.jumpShown,
+                             "streamingAtEnd": model.currentFeed?.isRunning ?? false, "draws": chatDrawsSomething()]
+    }
+
     /// Jump (instant) from the top, scroll up about one screen, then back down to the end with wheel notches (final
     /// review I2): following must re-arm and Jump to latest hide, with the chat drawn throughout.
     private func jumpUpDown(_ model: AppModel) async {
         guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
         let clip = sv.contentView
+        // COMPANION_PERF_PREJUMP=1: an animated jump and back to the top first, as the jump driver does before its
+        // instant jump (that instant jump left the estimated end ~11,500 pt below the last row at 300 pt).
+        if PerfFlags.env["COMPANION_PERF_PREJUMP"] == "1" {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+            sv.reflectScrolledClipView(clip)
+            for _ in 0..<60 { await nextFrame() }
+            PerfProbe.jumpToLatest?(true)
+            for _ in 0..<120 { await nextFrame() }
+        }
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
         sv.reflectScrolledClipView(clip)
         for _ in 0..<60 { await nextFrame() }
         PerfProbe.jumpToLatest?(false)
         for _ in 0..<60 { await nextFrame() }
-        let atJump = jumpSample(sv, model)
+        var atJump = jumpSample(sv, model)
+        atJump["following"] = PerfProbe.following
         let screen = clip.bounds.height
         var moved: CGFloat = 0, tries = 0
         while moved < screen * 0.9 && tries < 60 {

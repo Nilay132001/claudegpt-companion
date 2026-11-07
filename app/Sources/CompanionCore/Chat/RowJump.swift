@@ -35,25 +35,51 @@ public struct RowJump: Equatable, Sendable {
     }
 
     /// One geometry update. False when the jump has ended: `lastTurn` is another turn (a new one arrived), the
-    /// reader is no longer following, or the reader moved up. Moving up is the chat's offset getting smaller *and* the
-    /// row's bottom moving down in the reading area by as much (`gapBelow` smaller), outside a seek's settle time
-    /// (`seeked`): right after a jump the visible rect runs past the content's end (the composer's inset), so
-    /// ScrollFollow's distance stays 0 for the first ~88 pt up and does not unfollow, and seeking the row then pulled
-    /// a wheel reader back on every notch. A row growing (its answer streaming) moves its bottom down with the offset
+    /// reader is no longer following, or the reader moved up (`endedByReader` then true: the view stops following).
+    /// Moving up is the chat's offset getting smaller *and* the row's bottom moving down in the reading area
+    /// (`gapBelow` smaller). That catches input without a scroll phase too (the keyboard, VoiceOver, scroller arrows),
+    /// which nothing else reports. A row growing (its answer streaming) moves its bottom down with the offset
     /// unchanged; a row above being measured changes the offset with the row unmoved on screen; neither ends it.
-    /// With the row not reported (`gapBelow` nil), the offset alone decides.
+    /// While a seek settles (`seeked`) its own moves are not the reader's: a seek only brings the row's bottom toward
+    /// the reading area's bottom, so a move up that takes the row's bottom below it (`gapBelow` < -0.5) is still the
+    /// reader. With the row not reported (`gapBelow` nil), the offset alone decides, outside the settle time.
     public mutating func update(lastTurn: UUID?, following: Bool, offset: Double, gapBelow: Double?,
                                 now: ContinuousClock.Instant) -> Bool {
         defer { lastOffset = offset; lastGap = gapBelow }
         guard lastTurn == turn, following else { return false }
-        if let ownSeekUntil, now < ownSeekUntil { return true }
         guard let last = lastOffset, offset < last - 0.5 else { return true }
-        if let g = gapBelow, let lg = lastGap { return !(g < lg - 0.5) }
+        // The row moved down on screen by about what the offset moved: a scroll. A row above re-measured during a
+        // stream moves the offset while the row's own growth moves its bottom, by unrelated amounts; read as the
+        // reader, that ended animated jumps on legacy scrollers and stopped the chat following.
+        let dOffset = offset - last
+        let rowDown: Bool? = gapBelow.flatMap { g in lastGap.map { lg in
+            let dGap = g - lg
+            return dGap < -0.5 && abs(dGap - dOffset) <= max(2, 0.25 * abs(dOffset))
+        } }
+        if let ownSeekUntil, now < ownSeekUntil {
+            // After an animated seek the chat itself settles upward by 150–1,250 pt just after the animation (legacy
+            // scrollers, 4 of 6 runs), moving the row down with the offset exactly as a reader would: within that
+            // seek's settle time nothing is taken for the reader. (Keyboard input in those 650 ms is left to the
+            // geometry after it.)
+            guard !ownSeekAnimated, rowDown == true, let g = gapBelow, g < -0.5 else { return true }
+        } else if rowDown == false {
+            return true
+        }
+        endedByReader = true
         return false
     }
 
-    /// The view scrolled to the row (a seek): moves in the next `seekSettle` are not the reader's.
-    public mutating func seeked(at now: ContinuousClock.Instant) { ownSeekUntil = now + Self.seekSettle }
+    /// The jump ended because the reader moved up (`update`).
+    public private(set) var endedByReader = false
+
+    /// The view scrolled to the row (a seek): moves in the next `seekSettle` are not the reader's, after the seek's own
+    /// animation (`running`: an animated Jump to latest runs 400 ms; legacy scrollers' corrections during it ended the
+    /// jump as if the reader had moved up, and the chat stopped following the stream).
+    public mutating func seeked(at now: ContinuousClock.Instant, running: Duration = .zero) {
+        ownSeekUntil = now + running + Self.seekSettle
+        ownSeekAnimated = running > .zero
+    }
+    private var ownSeekAnimated = false
 
     /// A seek of this jump is still settling: the view holds ScrollFollow meanwhile, so the seek's own move up (from
     /// past the row) is not taken for the reader scrolling up.

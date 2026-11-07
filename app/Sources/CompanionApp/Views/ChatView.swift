@@ -108,14 +108,21 @@ private struct ChatScroll: View {
                 let top = g.visibleRect.minY + g.contentInsets.top
                 return ScrollMetrics(offset: g.contentOffset.y, top: top,
                                      height: g.visibleRect.height - g.contentInsets.top - g.contentInsets.bottom,
-                                     distance: g.contentSize.height - g.visibleRect.maxY, visibleBottom: g.visibleRect.maxY)
+                                     // To the reading area's bottom, not the visible rect's: that one includes the
+                                     // composer's inset (88 pt), so a reader up to 88 pt above the end still read as
+                                     // at the bottom, kept following and was pulled back by the next stick.
+                                     distance: ScrollFollow.distance(contentHeight: g.contentSize.height,
+                                                                     visibleMaxY: g.visibleRect.maxY,
+                                                                     bottomInset: g.contentInsets.bottom),
+                                     readingBottom: g.visibleRect.maxY - g.contentInsets.bottom,
+                                     visibleDistance: g.contentSize.height - g.visibleRect.maxY)
             } action: { _, m in
                 // While a restore moves the chat to its saved line, the geometry does not start following. Nor while
                 // an animated Jump to latest runs, unless the reader scrolls (layout corrections during the animation
                 // read as an upward move: an animated jump ended unfollowed, 832 pt up). For re-arming, the last
                 // row's real end counts too (ScrollFollow.geometry, lastRowDistance).
                 let lastRowDistance = feed.turns.last.flatMap { tracker.frameMaxY($0.id) }
-                    .map { $0 + Self.belowLastRow - m.visibleBottom }
+                    .map { $0 + Self.belowLastRow - m.readingBottom }
                 // Nor while a row seek settles: the fallback's scroll up from the estimated end to the row read as
                 // the reader scrolling up, unfollowed, and the chat stayed blank (restore → send at 360 pt).
                 let settling = follow.rowJump?.settling(at: .now) ?? false
@@ -139,8 +146,21 @@ private struct ChatScroll: View {
                 // jumped-to row, anchored at its bottom, also while its answer streams; never to the marker
                 // (RowJump.seeksRow).
                 if var j = follow.rowJump {
-                    follow.rowJump = j.update(lastTurn: feed.turns.last?.id, following: follow.state.following,
-                                              offset: m.offset, gapBelow: tracker.gapBelow(j.turn), now: .now) ? j : nil
+                    #if DEBUG
+                    if !follow.state.following { PerfProbe.count("rowJump.endedByUnfollow") }
+                    #endif
+                    let active = j.update(lastTurn: feed.turns.last?.id, following: follow.state.following,
+                                          offset: m.offset, gapBelow: tracker.gapBelow(j.turn), now: .now)
+                    follow.rowJump = active ? j : nil
+                    // The reader moved up while the geometry was held (a seek settling) or by input ScrollFollow
+                    // could not see: they stop following, so neither the row nor the marker pulls them back.
+                    if !active && j.endedByReader {
+                        #if DEBUG
+                        PerfProbe.count("rowJump.endedByReader")
+                        #endif
+                        follow.state.readerMovedUp()
+                        publish()
+                    }
                 }
                 #if DEBUG
                 if PerfProbe.enabled && PerfFlags.tracksFollow {
@@ -157,8 +177,15 @@ private struct ChatScroll: View {
                         Self.note("follow")
                         proxy.scrollTo(j.turn, anchor: .bottom)
                     }
-                } else if follow.state.shouldStickToBottom && !follow.jumping {
-                    markerSeek(proxy, reason: "follow")
+                } else if follow.state.shouldStickToBottom && m.visibleDistance > 0.5 && !follow.jumping {
+                    // Following: stick once the text has grown past the visible rect's bottom (under the composer),
+                    // as before the follow distance moved to the reading area's bottom. Sticking at every line past
+                    // the reading area's bottom raised a normal stream's re-sticks from 12 to 59 per 10 s.
+                    // No check after it: a chat following at its bottom has its last rows measured, and at load the
+                    // check saw no turn on a drawn chat in 2 of 6 perf-stream runs (the tracker had not caught up),
+                    // which put the normal stream on the row path (30 re-sticks per 10 s against 13). A risky new turn
+                    // is checked when it arrives.
+                    markerSeek(proxy, reason: "follow", check: false)
                 }
             }
             .onChange(of: LastTurn(feed: ObjectIdentifier(feed), id: feed.turns.last?.id)) { old, new in
@@ -253,7 +280,12 @@ private struct ChatScroll: View {
     /// (the stack's bottom padding and the marker), so until the jump ends (RowJump) the chat follows from the row,
     /// and every re-stick goes to the row, never to the marker. Following a stream, a new question, the first open
     /// and a switch keep the marker.
-    private func jumpToLatest(_ proxy: ScrollViewProxy, _ animated: Animation?) {
+    private func jumpToLatest(_ proxy: ScrollViewProxy, _ requested: Animation?) {
+        // Animated only from within two reading areas of the end. From further up the animation crossed rows that
+        // were never measured, and on legacy scrollers the chat then settled 150–1,250 pt up by itself and could stop
+        // following a stream (jump during a stream, animated, 2 of 6 runs); an instant jump never did (0 of 72).
+        let far = follow.state.distanceFromBottom > 2 * (tracker.viewportHeight ?? 0)
+        let animated = far ? nil : requested
         tracker.endRestore("jump")
         follow.state.followAgain()
         publish()
@@ -270,7 +302,7 @@ private struct ChatScroll: View {
     /// fallback after a marker seek that left no turn in view (`reason`, counted as a programmatic scroll).
     private func startRowJump(_ last: UUID, _ proxy: ScrollViewProxy, animated: Animation?, reason: String?) {
         var jump = RowJump(turn: last, at: .now)
-        jump.seeked(at: .now)
+        jump.seeked(at: .now, running: animated == nil ? .zero : .milliseconds(400))
         follow.rowJump = jump
         if let reason { Self.note(reason) }
         withAnimation(animated) { proxy.scrollTo(last, anchor: .bottom) }
@@ -295,8 +327,11 @@ private struct ChatScroll: View {
             // Still no turn after the retries: the lazy stack is placing rows from estimates that no longer match
             // the content (after a restore, a scroll to the row landed where nothing was laid out, every time:
             // restore → send at 360 pt). Rebuild the turn list once, then go to the row again.
+            // At most once per chat per 10 s, whatever ends and starts jumps meanwhile.
             guard !Task.isCancelled, follow.rowJump?.turn == last, follow.state.following, !tracker.readerScrolling,
-                  !tracker.isRestoring, tracker.showsNoTurn else { return }
+                  !tracker.isRestoring, tracker.showsNoTurn,
+                  follow.lastRelayout[sessionKey].map({ ContinuousClock.now - $0 >= .seconds(10) }) ?? true else { return }
+            follow.lastRelayout[sessionKey] = .now
             Self.note("relayout")
             relayout += 1
             try? await Task.sleep(for: settle)
@@ -402,6 +437,8 @@ private struct ChatScroll: View {
     /// The check after a marker seek in flight (ChatScroll.checkMarkerSeek).
     @ObservationIgnored var markerCheck: Task<Void, Never>?
     @ObservationIgnored var markerToken = 0
+    /// When each chat's turn list was last rebuilt (ChatScroll.startRowJump): at most once per chat per 10 s.
+    @ObservationIgnored var lastRelayout: [String: ContinuousClock.Instant] = [:]
     private(set) var showsJump = false
     init(_ state: ScrollFollow, session: String) {
         self.state = state
@@ -629,7 +666,9 @@ private struct TurnList: View {
 }
 
 private struct ScrollMetrics: Equatable {
-    let offset: Double; let top: Double; let height: Double; let distance: Double; let visibleBottom: Double
+    let offset: Double; let top: Double; let height: Double; let distance: Double; let readingBottom: Double
+    /// To the visible rect's bottom (under the composer): only for when the stick fires (see the stick).
+    let visibleDistance: Double
 }
 
 struct TurnView: View {
