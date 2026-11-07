@@ -53,8 +53,10 @@ import Testing
         #expect(texts("Read [the docs](https://example.com/x).") == ["Read the docs."])
         #expect(texts("Go to <https://example.com>.") == ["Go to link."])
     }
-    @Test func markdownSymbolsAreNeverRead() {
-        #expect(texts("a *star* and ~~gone~~ and `tick` and a_b and _lone") == ["a star and gone and tick and a_b and lone"])
+    @Test func markdownSymbolsAreNeverReadButLiteralCharactersAre() {
+        // The parser removes the Markdown; what is left is the answer's own text (final review minor 4).
+        #expect(texts("a *star* and ~~gone~~ and `tick` and a_b and _lone") == ["a star and gone and tick and a_b and _lone"])
+        #expect(texts("Call `__init__` with a \\*b and a | b.") == ["Call __init__ with a *b and a | b."])
     }
     @Test func codeBlockOmittedOrReadLineByLine() {
         #expect(texts("Before.\n\n```ts\nlet a = 1\nlet b = 2\n```") == ["Before.", "Code block omitted."])

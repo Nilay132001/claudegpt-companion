@@ -52,6 +52,8 @@ enum PerfFlags {
         }
     }
     static var isPerfScene: Bool { turns != nil }
+    /// The drivers that read ChatView's follow state (PerfProbe.following, jumpShown).
+    static var tracksFollow: Bool { ["jump", "jumpstream", "jumpsend", "restoresend", "jumpupdown"].contains(mode ?? "") }
 }
 
 /// Counters and signposts the views call (DEBUG only, and only while a perf driver runs).
@@ -68,6 +70,7 @@ enum PerfFlags {
     static var contentInsetBottom = 0.0
     /// ChatView's follow state and whether a row jump is active, for the `jump` driver.
     static var following = "-"
+    static var jumpShown = false
     /// The laid-out rows' frames in the content, as the rows last reported them (not cleared on a session switch).
     static var rowFrames: [UUID: ClosedRange<Double>] = [:]
     /// ChatView's Jump to latest (animated or not), for the `jump` driver.
@@ -218,6 +221,9 @@ enum PerfFlags {
             case "wheel": await self.wheel()
             case "jump": await self.jump(model)
             case "jumpstream": await self.jumpStream(model)
+            case "jumpsend": await self.sendAfter(model, restore: false)
+            case "restoresend": await self.sendAfter(model, restore: true)
+            case "jumpupdown": await self.jumpUpDown(model)
             default: try? await Task.sleep(for: .seconds(PerfFlags.seconds)) // stream, idle
             }
             self.measuring = false
@@ -563,6 +569,102 @@ enum PerfFlags {
             "pastLastRowDuring": samples.filter { ($0["pastLastRow"] as? Bool) == true }.count,
             "lastVisibleDuring": samples.filter { ($0["lastTurnVisible"] as? Bool) == true }.count,
             "samples": samples.count, "end": end]
+    }
+
+    /// restore→send / jump→send (final review I1), perf-table with COMPANION_DEMO_MODE=automatic. restore: scroll s1 to
+    /// the middle, switch to s2 and back (s1 restores to its line). jump: scroll to the top and Jump to latest
+    /// (instant). Then ask a question, and sample twice a second until its answer has finished, and once after.
+    private func sendAfter(_ model: AppModel, restore: Bool) async {
+        guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
+        let clip = sv.contentView
+        if restore {
+            // With the wheel, as a reader would (a clip move was not adopted here: the chat stayed at its bottom,
+            // following, and nothing was saved to restore).
+            let mid = max(0, ((sv.documentView?.frame.height ?? 0) - clip.bounds.height) / 2)
+            var tries = 0
+            while abs(clip.bounds.origin.y - mid) > 150 && tries < 400 {
+                let y0 = clip.bounds.origin.y
+                chatWheel(sv, by: mid - y0)
+                await nextFrame()
+                learnWheel(moved: clip.bounds.origin.y - y0)
+                tries += 1
+            }
+            for _ in 0..<30 { await nextFrame() }
+            summary["restoreFrom"] = ["clipY": Double(clip.bounds.origin.y), "following": PerfProbe.following]
+            await model.pin("s2")
+            for _ in 0..<30 { await nextFrame() }
+            await model.pin("s1")
+            for _ in 0..<90 { await nextFrame() }
+        } else {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+            sv.reflectScrolledClipView(clip)
+            for _ in 0..<60 { await nextFrame() }
+            PerfProbe.jumpToLatest?(false)
+            for _ in 0..<60 { await nextFrame() }
+        }
+        guard let rsv = chatScrollView() else { summary["error"] = "no scroll view after the switch"; return }
+        let before = jumpSample(rsv, model)
+        summary["restores"] = PerfProbe.counts["scroll.restore"] ?? 0
+        let fallbacks0 = PerfProbe.counts["scroll.markerFallback"] ?? 0
+        let asked = await model.ask("A follow-up question from the send driver.")
+        var samples: [[String: Any]] = []
+        let t0 = DispatchTime.now()
+        repeat {
+            for _ in 0..<60 { await nextFrame() }
+            samples.append(jumpSample(rsv, model))
+        } while model.currentFeed?.isRunning == true && Self.ms(since: t0) < 30_000
+        for _ in 0..<60 { await nextFrame() }
+        var end = jumpSample(rsv, model)
+        end["following"] = PerfProbe.following
+        end["jumpShown"] = PerfProbe.jumpShown
+        summary["send"] = ["restore": restore, "asked": asked, "before": before, "samples": samples.count,
+                           "drawnAll": samples.allSatisfy { ($0["draws"] as? Bool) == true },
+                           "lastVisibleAll": samples.allSatisfy { ($0["lastTurnVisible"] as? Bool) == true },
+                           "pastLastRow": samples.filter { ($0["pastLastRow"] as? Bool) == true }.count,
+                           "markerFallbacks": (PerfProbe.counts["scroll.markerFallback"] ?? 0) - fallbacks0, "end": end]
+    }
+
+    /// Jump (instant) from the top, scroll up about one screen, then back down to the end with wheel notches (final
+    /// review I2): following must re-arm and Jump to latest hide, with the chat drawn throughout.
+    private func jumpUpDown(_ model: AppModel) async {
+        guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
+        let clip = sv.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+        sv.reflectScrolledClipView(clip)
+        for _ in 0..<60 { await nextFrame() }
+        PerfProbe.jumpToLatest?(false)
+        for _ in 0..<60 { await nextFrame() }
+        let atJump = jumpSample(sv, model)
+        let screen = clip.bounds.height
+        var moved: CGFloat = 0, tries = 0
+        while moved < screen * 0.9 && tries < 60 {
+            let y0 = clip.bounds.origin.y
+            _ = chatWheel(sv, by: -40)
+            await nextFrame()
+            moved += y0 - clip.bounds.origin.y
+            tries += 1
+        }
+        for _ in 0..<30 { await nextFrame() }
+        var up = jumpSample(sv, model)
+        up["following"] = PerfProbe.following
+        up["jumpShown"] = PerfProbe.jumpShown
+        up["movedUp"] = Double(moved)
+        var drawnAll = true
+        tries = 0
+        // Back down, 40 pt a notch, until following re-arms or 2 screens' worth of notches (past the real end).
+        while tries < Int(screen * 2 / 40) {
+            _ = chatWheel(sv, by: 40)
+            await nextFrame(); await nextFrame()
+            if !chatDrawsSomething() { drawnAll = false }
+            tries += 1
+            if PerfProbe.following.hasPrefix("true") { break }
+        }
+        for _ in 0..<60 { await nextFrame() }
+        var end = jumpSample(sv, model)
+        end["following"] = PerfProbe.following
+        end["jumpShown"] = PerfProbe.jumpShown
+        end["notches"] = tries
+        summary["jumpUpDown"] = ["atJump": atJump, "up": up, "end": end, "drawnAll": drawnAll && (end["draws"] as? Bool) == true]
     }
 
     /// The jump driver's sample: drawn (pixels), the last turn in the reading area, and the reading area's bottom

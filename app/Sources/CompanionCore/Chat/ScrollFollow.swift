@@ -19,6 +19,9 @@ public struct ScrollFollow: Equatable, Sendable {
     public private(set) var distanceFromBottom: Double = 0
     private var lastOffset: Double?
     private var lastDistance: Double?
+    /// The last geometry re-armed following only because the last row's bottom was near (`lastRowDistance`), while
+    /// the content's (estimated) end was still too far: the view then sticks to that row, not to the marker.
+    public private(set) var rearmedByRow = false
 
     public init(following: Bool = true) { self.following = following }
 
@@ -38,22 +41,35 @@ public struct ScrollFollow: Equatable, Sendable {
     /// `offset`: content offset from the top. `distanceFromBottom`: content height minus the visible rect's bottom.
     /// `hold`: a restore is moving the chat to a saved position: record the geometry, but do not start (or stop)
     /// following from it (the swap to a restored chat can land briefly at its bottom).
-    public mutating func geometry(offset: Double, distanceFromBottom: Double, hold: Bool = false) {
+    ///
+    /// `lastRowDistance`: the same distance measured to the last row's real end (its bottom plus the space below it),
+    /// when the row is laid out. The content's end is an estimate while rows above are unmeasured, and after a Jump to
+    /// latest it was 4–16k pt below the last row: a reader who scrolled up and back down could never get within 80 pt
+    /// of it, so following never re-armed. For re-arming only, the nearer of the two counts. It never re-arms a
+    /// reader who is above the row's real end by more than the same 80 pt (1 pt when not scrolling down), the rule
+    /// for the content's end. Unfollowing, the stick and Jump to latest keep the content's distance.
+    public mutating func geometry(offset: Double, distanceFromBottom: Double, hold: Bool = false,
+                                  lastRowDistance: Double? = nil) {
         let distance = max(0, distanceFromBottom)
+        let rearm = min(distance, max(0, lastRowDistance ?? distance))
         self.distanceFromBottom = distance
+        let wasFollowing = following
         if hold {
             // nothing: the restore owns the position
         } else if let lastOffset, let lastDistance {
             if offset < lastOffset - Self.epsilon && distance > lastDistance + Self.epsilon {
                 following = false                                   // the reader scrolled up
-            } else if distance <= 1 || (offset > lastOffset + Self.epsilon && distance <= Self.nearBottom) {
+            } else if rearm <= 1 || (offset > lastOffset + Self.epsilon && rearm <= Self.nearBottom) {
                 following = true                                    // at the bottom, or scrolled down near it
             }
-        } else if distance <= Self.nearBottom {
+        } else if rearm <= Self.nearBottom {
             // The first geometry of a chat (also one restored with following: false): within 80 pt of the bottom
             // the reader is treated as at the bottom and follows.
             following = true
         }
+        // Re-armed, but the content's own distance would not have done it.
+        let byContent = distance <= 1 || distance <= Self.nearBottom
+        rearmedByRow = !wasFollowing && following && !byContent
         lastOffset = offset
         lastDistance = distance
     }

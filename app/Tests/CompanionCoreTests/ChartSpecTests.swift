@@ -112,6 +112,13 @@ import Testing
         #expect(reason(with(#""units":"s""#, #""units":"⁦s""#)) == "units has a control or text-direction character")
         #expect(reason(with(#""name":"main""#, #""name":"ma\nin""#)) == "series 1 name has a control or text-direction character")
         #expect(reason(with(#""label":"Package""#, #""label":"Pack\u0085age""#)) == "x label has a control or text-direction character")
+        // Direction marks, zero-width characters and the line and paragraph separators (final review minor 3).
+        #expect(reason(with(#""label":"csv""#, #""label":"Q1\u200F-Q2""#)) == "point 2 label has a control or text-direction character")
+        #expect(reason(with(#""label":"csv""#, #""label":"Q1\u200E-Q2""#)) == "point 2 label has a control or text-direction character")
+        #expect(reason(with(#""label":"csv""#, #""label":"Q1\u061C-Q2""#)) == "point 2 label has a control or text-direction character")
+        #expect(reason(with(#""title":"Test runtime by package""#, #""title":"a\u200Bb""#)) == "title has a control or text-direction character")
+        #expect(reason(with(#""title":"Test runtime by package""#, #""title":"a\u2028b""#)) == "title has a control or text-direction character")
+        #expect(reason(with(#""title":"Test runtime by package""#, #""title":"a\u2029b""#)) == "title has a control or text-direction character")
         // One character, many scalars (combining marks): capped at 4 × the limit.
         let zalgo = "a" + String(repeating: "\u{0301}", count: 400)
         #expect(reason(with(#""title":"Test runtime by package""#, "\"title\":\"\(zalgo)\"")) == "title must be 1–80 characters")

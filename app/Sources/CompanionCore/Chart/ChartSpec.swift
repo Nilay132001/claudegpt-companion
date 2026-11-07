@@ -118,10 +118,15 @@ public struct ChartSpec: Equatable, Sendable {
         }
     }
 
-    /// C0/C1 controls and the bidi embedding, override and isolate controls: they would hide or reorder what is shown.
+    /// C0/C1 controls, format characters (the direction marks LRM, RLM and ALM, the bidi embedding, override and
+    /// isolate controls, zero-width characters) and the line and paragraph separators: they would hide, split or
+    /// reorder what is shown, so a label could read differently from its data row.
     static func hasControl(_ s: String) -> Bool {
         s.unicodeScalars.contains { u in
-            u.properties.generalCategory == .control || (0x202A...0x202E).contains(u.value) || (0x2066...0x2069).contains(u.value)
+            switch u.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: true
+            default: (0x202A...0x202E).contains(u.value) || (0x2066...0x2069).contains(u.value)
+            }
         }
     }
 

@@ -47,6 +47,47 @@ import Testing
         #expect(f.showsJumpToLatest)
     }
 
+    @Test func reArmsAtTheLastRowsRealEndWhenTheEstimatedEndIsFarBelow() {
+        // After a Jump to latest the content's estimated end was 4–16k pt below the last row (final review I2).
+        var f = ScrollFollow()
+        f.geometry(offset: 10_000, distanceFromBottom: 5000, lastRowDistance: 0)
+        f.geometry(offset: 9700, distanceFromBottom: 5300, lastRowDistance: 300) // the reader scrolls up 300 pt
+        #expect(!f.following)
+        f.geometry(offset: 9800, distanceFromBottom: 5200, lastRowDistance: 200) // back down, still 200 pt above
+        #expect(!f.following && !f.rearmedByRow)
+        #expect(f.showsJumpToLatest)
+        f.geometry(offset: 9990, distanceFromBottom: 5010, lastRowDistance: 10)  // down, within 80 pt of the row's end
+        #expect(f.following && f.rearmedByRow)
+        #expect(!f.showsJumpToLatest)
+        #expect(f.shouldStickToBottom) // the content distance is kept: the view sticks to the row (RowJump), not the marker
+    }
+
+    @Test func neverReArmsAboveTheLastRowsRealEnd() {
+        var f = ScrollFollow(following: false)
+        f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 900)
+        #expect(!f.following)
+        // Not scrolling down (a still tick), 2 pt above the row's end: only "at the bottom" (1 pt) re-arms.
+        f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 2)
+        #expect(!f.following)
+        f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 1)
+        #expect(f.following && f.rearmedByRow)
+        // Scrolling down but 81 pt above it: no.
+        var g = ScrollFollow(following: false)
+        g.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 900)
+        g.geometry(offset: 5100, distanceFromBottom: 5900, lastRowDistance: 81)
+        #expect(!g.following)
+    }
+
+    @Test func withoutTheRowOnlyTheContentDistanceCounts() {
+        var f = ScrollFollow(following: false)
+        f.geometry(offset: 5000, distanceFromBottom: 6000)
+        f.geometry(offset: 5100, distanceFromBottom: 5900, lastRowDistance: nil)
+        #expect(!f.following && !f.rearmedByRow)
+        // The content near its end re-arms by itself: not by the row.
+        f.geometry(offset: 10_900, distanceFromBottom: 0, lastRowDistance: 0)
+        #expect(f.following && !f.rearmedByRow)
+    }
+
     @Test func aChatOpenedAtItsTopDoesNotChaseTheBottom() {
         // The `rich` demo opened at its top (300 pt): it started following, so its first geometry (offset 0, 1967 pt
         // above the bottom) scrolled it to the bottom, and the top shots showed the end of the chat.

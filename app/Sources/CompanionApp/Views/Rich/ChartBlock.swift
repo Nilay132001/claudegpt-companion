@@ -14,6 +14,8 @@ struct ChartBlock: View {
     /// Where the block sits in the answer: its disclosure key.
     let path: String
     @State private var localOpen: Bool?
+    /// The block's width: a pie's legend goes below it when narrow (final review minor 14).
+    @State private var width: CGFloat = 0
 
     /// Constant per kind; metric tiles take their own height.
     static func plotHeight(_ kind: ChartSpec.Kind) -> CGFloat? {
@@ -34,6 +36,7 @@ struct ChartBlock: View {
             chart
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: Self.plotHeight(spec.kind))
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
                 .accessibilityChartDescriptor(ChartDescriptor(spec: spec))
             DisclosureGroup(isExpanded: Binding(get: { isOpen }, set: { setOpen($0) })) {
                 dataTable(size: Design.Typography.tableCell * scale)
@@ -93,7 +96,9 @@ struct ChartBlock: View {
                 SectorMark(angle: .value("Value", p.value), innerRadius: .ratio(0.5), angularInset: 1)
                     .foregroundStyle(by: .value("Label", p.label))
             }
-            .chartLegend(position: .trailing, alignment: .center)
+            // Beside the donut it can squeeze it to almost nothing in a narrow panel (8 labels of 40 characters at
+            // 300 pt): below it there, under the 360 pt panel's answer column (P8: panel − 32 pt).
+            .chartLegend(position: width > 0 && width < 328 ? .bottom : .trailing, alignment: .center)
         case .metric:
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: Design.Space.l) { metricTiles }

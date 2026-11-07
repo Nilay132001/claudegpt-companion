@@ -107,7 +107,7 @@ struct AnswerView: View {
         .accessibilityAction(named: "Copy") { Design.copy(CopyFormat.markdown(message)) }
         .accessibilityAction(named: "Copy as plain text") { Design.copy(CopyFormat.plain(message)) }
         .accessibilityAction(named: speech.phase != .idle ? "Pause or resume reading" : "Read aloud") {
-            readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered)
+            readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered ?? render(message))
         }
         .accessibilityActions {
             if speech.phase != .idle {
@@ -175,7 +175,7 @@ struct AnswerView: View {
         if !message.text.isEmpty && !message.isRunning {
             Divider()
             Button(phase != .idle ? "Pause or Resume Reading" : "Read Aloud") {
-                readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered)
+                readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered ?? render(message))
             }
             if phase != .idle { Button("Stop Reading") { readAloud.stop() } }
         }
@@ -213,7 +213,7 @@ struct AnswerView: View {
             .accessibilityLabel("Copy answer")
             IconButton(symbol: Self.icon(phase),
                        label: phase != .idle ? "Pause or resume reading" : "Read aloud") {
-                readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered)
+                readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered ?? render(message))
             }
             if phase != .idle {
                 IconButton(symbol: "stop.fill", label: "Stop reading") { readAloud.stop() }

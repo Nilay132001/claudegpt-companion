@@ -18,6 +18,11 @@ public struct RowJump: Equatable, Sendable {
     public let turn: UUID
     public let started: ContinuousClock.Instant
     public private(set) var retries = 0
+    private var lastOffset: Double?
+    private var lastGap: Double?
+    private var ownSeekUntil: ContinuousClock.Instant?
+    /// After a seek, moves within this long are the seek's (it can land over several layout passes).
+    public static let seekSettle: Duration = .milliseconds(250)
 
     /// Retries of the safety net, at most.
     public static let maxRetries = 2
@@ -29,19 +34,38 @@ public struct RowJump: Equatable, Sendable {
         self.started = now
     }
 
-    /// One geometry update. False when the jump has ended: `lastTurn` is another turn (a new one arrived) or the
-    /// reader is no longer following. Neither the row growing (its answer streaming) nor a re-measure ends it.
-    public func update(lastTurn: UUID?, following: Bool) -> Bool {
-        lastTurn == turn && following
+    /// One geometry update. False when the jump has ended: `lastTurn` is another turn (a new one arrived), the
+    /// reader is no longer following, or the reader moved up. Moving up is the chat's offset getting smaller *and* the
+    /// row's bottom moving down in the reading area by as much (`gapBelow` smaller), outside a seek's settle time
+    /// (`seeked`): right after a jump the visible rect runs past the content's end (the composer's inset), so
+    /// ScrollFollow's distance stays 0 for the first ~88 pt up and does not unfollow, and seeking the row then pulled
+    /// a wheel reader back on every notch. A row growing (its answer streaming) moves its bottom down with the offset
+    /// unchanged; a row above being measured changes the offset with the row unmoved on screen; neither ends it.
+    /// With the row not reported (`gapBelow` nil), the offset alone decides.
+    public mutating func update(lastTurn: UUID?, following: Bool, offset: Double, gapBelow: Double?,
+                                now: ContinuousClock.Instant) -> Bool {
+        defer { lastOffset = offset; lastGap = gapBelow }
+        guard lastTurn == turn, following else { return false }
+        if let ownSeekUntil, now < ownSeekUntil { return true }
+        guard let last = lastOffset, offset < last - 0.5 else { return true }
+        if let g = gapBelow, let lg = lastGap { return !(g < lg - 0.5) }
+        return false
     }
+
+    /// The view scrolled to the row (a seek): moves in the next `seekSettle` are not the reader's.
+    public mutating func seeked(at now: ContinuousClock.Instant) { ownSeekUntil = now + Self.seekSettle }
+
+    /// A seek of this jump is still settling: the view holds ScrollFollow meanwhile, so the seek's own move up (from
+    /// past the row) is not taken for the reader scrolling up.
+    public func settling(at now: ContinuousClock.Instant) -> Bool { ownSeekUntil.map { now < $0 } ?? false }
 
     /// Whether the stick scrolls to the row now: following, no animated jump running, and the row not at the bottom
     /// (`atBottom`). Whatever the distance to the content's (estimated) end says: a re-measure (a 1 pt resize at
     /// 300 pt) left the chat at that end, blank, at a distance of 0; and while the answer streams the row grows past
     /// the reading area's bottom and is followed by its bottom.
-    public func seeksRow(following: Bool, jumping: Bool, gapBelow: Double?, slack: Double,
+    public func seeksRow(following: Bool, jumping: Bool, readerScrolling: Bool = false, gapBelow: Double?, slack: Double,
                          now: ContinuousClock.Instant) -> Bool {
-        following && !jumping && !atBottom(gapBelow: gapBelow, slack: slack, now: now)
+        following && !jumping && !readerScrolling && !atBottom(gapBelow: gapBelow, slack: slack, now: now)
     }
 
     /// Whether the chat is at its bottom for the stick: the row's bottom from 0.5 pt below to `slack` above the
@@ -57,6 +81,13 @@ public struct RowJump: Equatable, Sendable {
     /// `maxRetries` times. It is a safety net: it retried 0 times in 96 measured jumps and nudges (the row scroll
     /// alone placed the row each time). A retry is a scroll to the row's bottom, which is harmless if the chat is
     /// already there.
+    /// After a bottom seek to the marker (a new turn, the stick, a switch to a following chat, the first open): whether
+    /// to fall back to the last turn's row because no turn is in the reading area (the marker was past the last row).
+    /// The same guards as the safety net. When rows are drawn this is false and nothing changes.
+    public static func fallsBack(following: Bool, readerScrolling: Bool, restoring: Bool, noTurnVisible: Bool) -> Bool {
+        following && !readerScrolling && !restoring && noTurnVisible
+    }
+
     public mutating func takeRetry(following: Bool, readerScrolling: Bool, restoring: Bool, noTurnVisible: Bool) -> Bool {
         guard retries < Self.maxRetries, following, !readerScrolling, !restoring, noTurnVisible else { return false }
         retries += 1

@@ -63,7 +63,9 @@ enum DemoFlags {
     }
 
     var mode: String {
-        switch scene {
+        // COMPANION_DEMO_MODE=automatic: the scene's questions send without the preview sheet (the send drivers).
+        if let m = ProcessInfo.processInfo.environment["COMPANION_DEMO_MODE"], m == "automatic" { return m }
+        return switch scene {
         case "streaming", "error", "perf-stream": "automatic"
         default: "ask"
         }

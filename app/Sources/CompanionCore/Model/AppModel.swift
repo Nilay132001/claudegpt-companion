@@ -225,6 +225,12 @@ public final class AppModel {
         let old = snapshot?.selection.sessionId
         snapshot = new
         guard let id = new.selection.sessionId else { return }
+        // Only the shown session's feed keeps its renders (final review minor 6): the one left drops them, and one
+        // shown again that is already loaded is prewarmed again (a load prewarms by itself).
+        if let old, old != id {
+            feeds[old]?.dropRenders()
+            if loadedChats.contains(id), let f = feeds[id] { prewarm(store[id]?.messages ?? [], into: f) }
+        }
         if id != old || !loadedChats.contains(id) { chatLoad = Task { await self.loadCurrentChat(sessionId: id) } }
         guard id != old || worktrees[id] == nil else { return }
         detailLoad = Task { await self.loadDetail(id) }

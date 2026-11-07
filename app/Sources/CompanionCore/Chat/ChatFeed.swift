@@ -19,6 +19,9 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
     public private(set) var root: String?
     /// The answer's open chart Data disclosures: outside the lazy row, so they survive the row being recycled.
     @ObservationIgnored public let chartDisclosures = ChartDisclosures()
+    /// The turn's "Context sent" disclosure (on its answer's model): outside the lazy row, so an expanded list
+    /// survives the row being recycled when it scrolls far away.
+    @ObservationIgnored public let contextDisclosure = ContextDisclosure()
 
     init(_ message: ChatMessage, root: String?, rendered: RenderedAnswer?) {
         id = message.id
@@ -34,6 +37,16 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
     }
 
     func setRendered(_ r: RenderedAnswer) { if rendered != r { rendered = r } }
+    func clearRendered() { if rendered != nil { rendered = nil } }
+}
+
+/// A turn's "Context sent" disclosure: the item list and the raw block, each open or closed.
+@MainActor @Observable public final class ContextDisclosure {
+    public var expanded = false
+    public var showRaw = false
+    /// Set once the first view has given it its initial state (DEBUG demo scenes open one).
+    @ObservationIgnored public var seeded = false
+    public init() {}
 }
 
 /// Which chart Data disclosures of one answer are open, by block path ("chunk.index", then ".i" per nesting level).
@@ -111,6 +124,15 @@ public struct TurnRef: Identifiable, Equatable, Sendable {
         }
         let running = messages.contains { $0.isRunning }
         if running != isRunning { isRunning = running }
+    }
+
+    /// The feed is no longer shown: drop its settled answers' renders (and stop its prewarm), so memory does not grow
+    /// with every session viewed. The RenderCache keeps the chunks it can within its bound; showing the feed again
+    /// prewarms it again, and a row renders from the cache on demand meanwhile. A streaming answer keeps its render.
+    public func dropRenders() {
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        for m in models.values where !m.message.isRunning { m.clearRendered() }
     }
 
     /// A background render finished; applied only if the message still has that text and the feed still renders

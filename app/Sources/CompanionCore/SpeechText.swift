@@ -40,6 +40,15 @@ public enum SpeechText {
         return t.trimmingCharacters(in: .whitespaces)
     }
 
+    /// Text that came from the parser: its Markdown is already gone, so a literal `*`, `|`, backtick or edge `_` (an
+    /// escaped `\*`, `a | b`, `__init__`) is the answer's own text and is read. Only a bare address becomes "link".
+    static func parsed(_ text: String) -> String {
+        var t = text
+        t = t.replacingOccurrences(of: #"<?https?://[^\s<>)\]]*[^\s<>)\].,;:!?'"]>?"#, with: "link", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
     private static let abbreviations: Set<String> = ["e.g.", "i.e.", "etc.", "vs.", "mr.", "mrs.", "ms.", "dr.", "no.", "approx.", "cf.", "fig."]
 
     /// Splits on . ! ? followed by whitespace, not after an abbreviation. "1.2.3" and "parser.ts" have no space after the dot.
@@ -92,10 +101,10 @@ extension SpeechText {
                 switch b {
                 case .paragraphs(let s):
                     for para in spoken(s).components(separatedBy: "\n\n") {
-                        emit(sentences(in: prefix + inline(para.replacingOccurrences(of: "\n", with: " "))))
+                        emit(sentences(in: prefix + parsed(para.replacingOccurrences(of: "\n", with: " "))))
                         prefix = ""
                     }
-                case .heading(_, let s): emit(sentences(in: inline(spoken(s))))
+                case .heading(_, let s): emit(sentences(in: parsed(spoken(s))))
                 case .list(let l):
                     for item in l.items { walk(item.content, prefix: item.check.map { $0 == .done ? "Done: " : "To do: " } ?? "") }
                 case .quote(let bs): walk(bs)
@@ -104,7 +113,7 @@ extension SpeechText {
                 case .table(let t):
                     let n = t.rows.count
                     emit(n <= 6 ? ["A table with \(n) row\(n == 1 ? "" : "s")."] : ["A table with \(n) rows is shown on screen."])
-                    if n <= 6 { for r in t.spokenRows { emit([inline(r)]) } }
+                    if n <= 6 { for r in t.spokenRows { emit([parsed(r)]) } }
                 case .rule: break
                 case .math: emit(["A formula is shown on screen."])
                 case .chart(.valid(let s)): emit([s.spokenSummary])

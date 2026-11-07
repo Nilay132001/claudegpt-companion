@@ -73,14 +73,18 @@ struct CodeBlock: View {
             // The shown text first, then (a previewed block) the full text, so Show all is instant.
             let language = model.language
             for text in shown == model.text ? [shown] : [shown, model.text] {
+                // Above the highlighter's limit it returns no tokens, so there is nothing to compute or cache.
+                guard text.utf8.count <= CodeHighlighter.maxBytes else { continue }
                 let key = HighlightCacheKey(language: language, text: text)
                 if Self.highlightCache.value(for: key) == nil {
                     // Off the main actor; the task is cancelled when the key changes, so a stale result is dropped.
-                    let (styled, nanos) = await Task.detached(priority: .userInitiated) { () -> (AttributedString, UInt64) in
+                    let work = Task.detached(priority: .userInitiated) { () -> (AttributedString, UInt64) in
                         let t0 = DispatchTime.now().uptimeNanoseconds
                         let out = Self.highlight(text, language: language)
                         return (out, DispatchTime.now().uptimeNanoseconds - t0)
-                    }.value
+                    }
+                    // The view's task being cancelled cancels the detached work too (CodeHighlighter stops at a line).
+                    let (styled, nanos) = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
                     #if DEBUG
                     PerfProbe.record("parse.highlight", nanos: nanos)
                     #else

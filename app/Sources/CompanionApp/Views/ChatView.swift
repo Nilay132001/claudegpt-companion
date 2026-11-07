@@ -38,6 +38,8 @@ private struct ChatScroll: View {
     /// The laid-out turns' frames and the viewport, written by the rows and the scroll geometry; read when the chat
     /// goes away. Not observed: scrolling never re-renders a view through it.
     @State private var tracker = TurnTracker()
+    /// Bumped to rebuild the turn list when a row seek still shows no turn (see startRowJump).
+    @State private var relayout = 0
 
     init(feed: ChatFeed, sessionKey: String, readOnly: Bool, restore: ChatScrollAnchor?) {
         self.feed = feed
@@ -86,6 +88,7 @@ private struct ChatScroll: View {
             ScrollView {
                 VStack(spacing: 0) {
                     TurnList(feed: feed, readOnly: readOnly, tracker: tracker)
+                        .id(relayout)
                     Color.clear.frame(height: 1).id(Self.bottomID)
                 }
                 .coordinateSpace(.named(TurnTracker.space))
@@ -105,10 +108,25 @@ private struct ChatScroll: View {
                 let top = g.visibleRect.minY + g.contentInsets.top
                 return ScrollMetrics(offset: g.contentOffset.y, top: top,
                                      height: g.visibleRect.height - g.contentInsets.top - g.contentInsets.bottom,
-                                     distance: g.contentSize.height - g.visibleRect.maxY)
+                                     distance: g.contentSize.height - g.visibleRect.maxY, visibleBottom: g.visibleRect.maxY)
             } action: { _, m in
-                // While a restore moves the chat to its saved line, the geometry does not start following.
-                follow.state.geometry(offset: m.offset, distanceFromBottom: m.distance, hold: tracker.isRestoring)
+                // While a restore moves the chat to its saved line, the geometry does not start following. Nor while
+                // an animated Jump to latest runs, unless the reader scrolls (layout corrections during the animation
+                // read as an upward move: an animated jump ended unfollowed, 832 pt up). For re-arming, the last
+                // row's real end counts too (ScrollFollow.geometry, lastRowDistance).
+                let lastRowDistance = feed.turns.last.flatMap { tracker.frameMaxY($0.id) }
+                    .map { $0 + Self.belowLastRow - m.visibleBottom }
+                // Nor while a row seek settles: the fallback's scroll up from the estimated end to the row read as
+                // the reader scrolling up, unfollowed, and the chat stayed blank (restore → send at 360 pt).
+                let settling = follow.rowJump?.settling(at: .now) ?? false
+                follow.state.geometry(offset: m.offset, distanceFromBottom: m.distance,
+                                      hold: tracker.isRestoring || ((follow.jumping || settling) && !tracker.readerScrolling),
+                                      lastRowDistance: lastRowDistance)
+                // Re-armed at the last row's end while the content's estimated end is still far below it: stick to
+                // that row, not to the marker past it.
+                if follow.state.rearmedByRow, follow.rowJump == nil, let last = feed.turns.last?.id {
+                    follow.rowJump = RowJump(turn: last, at: .now)
+                }
                 tracker.viewport(top: m.top, height: m.height)
                 publish()
                 // A restore in progress ends once its scroll has landed (or the reader scrolls, or it times out).
@@ -120,35 +138,48 @@ private struct ChatScroll: View {
                 // until it ends (RowJump.update: unfollow, a new turn; a switch clears it), the stick goes to the
                 // jumped-to row, anchored at its bottom, also while its answer streams; never to the marker
                 // (RowJump.seeksRow).
-                if let j = follow.rowJump, !j.update(lastTurn: feed.turns.last?.id, following: follow.state.following) {
-                    follow.rowJump = nil
+                if var j = follow.rowJump {
+                    follow.rowJump = j.update(lastTurn: feed.turns.last?.id, following: follow.state.following,
+                                              offset: m.offset, gapBelow: tracker.gapBelow(j.turn), now: .now) ? j : nil
                 }
                 #if DEBUG
-                if PerfProbe.enabled && (PerfFlags.mode == "jump" || PerfFlags.mode == "jumpstream") {
+                if PerfProbe.enabled && PerfFlags.tracksFollow {
                     PerfProbe.following = "\(follow.state.following) jump=\(follow.rowJump != nil) d=\(Int(m.distance))"
+                    PerfProbe.jumpShown = follow.state.showsJumpToLatest
                 }
                 #endif
-                if let j = follow.rowJump {
+                if var j = follow.rowJump {
                     if j.seeksRow(following: follow.state.following, jumping: follow.jumping,
+                                  readerScrolling: tracker.readerScrolling,
                                   gapBelow: tracker.gapBelow(j.turn), slack: Self.rowJumpSlack, now: .now) {
+                        j.seeked(at: .now)
+                        follow.rowJump = j
                         Self.note("follow")
                         proxy.scrollTo(j.turn, anchor: .bottom)
                     }
                 } else if follow.state.shouldStickToBottom && !follow.jumping {
-                    Self.note("follow")
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    markerSeek(proxy, reason: "follow")
                 }
             }
             .onChange(of: LastTurn(feed: ObjectIdentifier(feed), id: feed.turns.last?.id)) { old, new in
                 // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last
                 // id; a session switch swaps the feed, and onChange(of: ShownChat) restores that chat's position.
                 if old.feed == new.feed, feed.isRunning {
+                    // The marker can be past the last row only if the rows near the end were not measured: the
+                    // reader was above the bottom (after a restore, or reading) or had jumped there (RowJump). A chat
+                    // that was following at its bottom is not checked: there the tracker can briefly see no turn on a
+                    // drawn chat (at load, rows not reported yet), and falling back put a normal stream on the row
+                    // path (30 re-sticks per 10 s against 12).
+                    let risky = !follow.state.following || follow.rowJump != nil
+                    // This seek decides; a pending check from the open (perf-stream: the new turn arrives as the chat
+                    // opens, while the rows have not reported yet) is dropped with the rest of that state.
+                    follow.markerCheck?.cancel()
+                    follow.markerCheck = nil
                     follow.rowJump = nil
                     tracker.endRestore("newTurn")
                     follow.state.followAgain()
                     publish()
-                    Self.note("newTurn")
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    markerSeek(proxy, reason: "newTurn", check: risky)
                 }
             }
             // The reader taking hold of the scroll view ends a restore in progress: it never pulls them back.
@@ -157,7 +188,10 @@ private struct ChatScroll: View {
                 PerfProbe.count("phase.\(phase)")
                 #endif
                 tracker.readerScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
-                if tracker.readerScrolling { tracker.endRestore("reader") }
+                if tracker.readerScrolling {
+                    tracker.endRestore("reader")
+                    follow.jumpUntil = nil // the reader takes over an animated jump: their upward move unfollows
+                }
             }
             .onAppear {
                 // When a restore ends (for any reason), a reader who is at the bottom follows again.
@@ -168,7 +202,13 @@ private struct ChatScroll: View {
                 #if DEBUG
                 PerfProbe.jumpToLatest = { animated in jumpToLatest(proxy, animated ? Design.Motion.standard : nil) }
                 #endif
-                if let restore { scroll(to: restore, proxy) }
+                if let restore {
+                    if !scroll(to: restore, proxy) { toBottom(proxy, reason: "staleRestore") }
+                } else if Self.initialAnchor == .bottom {
+                    // defaultScrollAnchor opened the chat at the content's estimated end: the same check as after
+                    // a marker seek (markerSeek), without the scroll.
+                    checkMarkerSeek(proxy, reason: "open")
+                }
             }
             .onChange(of: ShownChat(session: sessionKey, feed: ObjectIdentifier(feed))) { _, new in
                 // Another session's chat in the same scroll view: its saved line, or its bottom. Keyed on the session
@@ -179,16 +219,18 @@ private struct ChatScroll: View {
                 follow.session = new.session
                 follow.rowJump = nil
                 follow.jumpCheck?.cancel()
+                follow.markerCheck?.cancel()
+                follow.markerCheck = nil
                 publish()
                 if let r {
-                    scroll(to: r, proxy)
+                    if !scroll(to: r, proxy) { toBottom(proxy, reason: "staleRestore") }
                 } else {
-                    Self.note("switch")
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    markerSeek(proxy, reason: "switch")
                 }
             }
             .onDisappear {
                 follow.jumpCheck?.cancel()
+                follow.markerCheck?.cancel()
                 if tracker.isFresh && !tracker.isRestoring && follow.session == sessionKey {
                     model.scrollMemory.save(session: sessionKey, anchor: tracker.firstVisible,
                                             following: follow.state.following)
@@ -221,7 +263,16 @@ private struct ChatScroll: View {
             withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             return
         }
-        follow.rowJump = RowJump(turn: last, at: .now)
+        startRowJump(last, proxy, animated: animated, reason: nil)
+    }
+
+    /// Scrolls to the last turn's row and keeps seeking it (RowJump) until the jump ends: Jump to latest, and the
+    /// fallback after a marker seek that left no turn in view (`reason`, counted as a programmatic scroll).
+    private func startRowJump(_ last: UUID, _ proxy: ScrollViewProxy, animated: Animation?, reason: String?) {
+        var jump = RowJump(turn: last, at: .now)
+        jump.seeked(at: .now)
+        follow.rowJump = jump
+        if let reason { Self.note(reason) }
         withAnimation(animated) { proxy.scrollTo(last, anchor: .bottom) }
         // The safety net (RowJump.takeRetry): if no turn is in the reading area once the jump has run, scroll to the
         // row again, at most twice. It retried 0 times in 96 measured jumps and nudges (the row scroll alone placed
@@ -235,11 +286,23 @@ private struct ChatScroll: View {
             while !Task.isCancelled, var j = follow.rowJump, j.turn == last,
                   j.takeRetry(following: follow.state.following, readerScrolling: tracker.readerScrolling,
                               restoring: tracker.isRestoring, noTurnVisible: tracker.showsNoTurn) {
+                j.seeked(at: .now)
                 follow.rowJump = j
                 Self.note("jumpRetry") // counts scroll.jumpRetry (DEBUG)
                 proxy.scrollTo(last, anchor: .bottom)
                 try? await Task.sleep(for: settle)
             }
+            // Still no turn after the retries: the lazy stack is placing rows from estimates that no longer match
+            // the content (after a restore, a scroll to the row landed where nothing was laid out, every time:
+            // restore → send at 360 pt). Rebuild the turn list once, then go to the row again.
+            guard !Task.isCancelled, follow.rowJump?.turn == last, follow.state.following, !tracker.readerScrolling,
+                  !tracker.isRestoring, tracker.showsNoTurn else { return }
+            Self.note("relayout")
+            relayout += 1
+            try? await Task.sleep(for: settle)
+            guard !Task.isCancelled, follow.rowJump?.turn == last else { return }
+            if var j = follow.rowJump { j.seeked(at: .now); follow.rowJump = j }
+            proxy.scrollTo(last, anchor: .bottom)
         }
     }
 
@@ -254,9 +317,59 @@ private struct ChatScroll: View {
 
     private func publish() { follow.publish() }
 
-    /// Back to where the reader was: the saved turn, as far into it as before, in one scroll (see below).
-    private func scroll(to anchor: ChatScrollAnchor, _ proxy: ScrollViewProxy) {
-        guard feed.turns.contains(where: { $0.id == anchor.turn }) else { return }
+    /// The space below the last row: the stack's bottom padding and the 1 pt marker.
+    private static let belowLastRow = Double(Design.Space.l) + 1
+
+    /// A bottom seek to the marker (following, a new turn, a switch to a following chat), as before, then the check
+    /// below. When rows are drawn the check does nothing.
+    private func markerSeek(_ proxy: ScrollViewProxy, reason: String, check: Bool = true) {
+        Self.note(reason)
+        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        if check { checkMarkerSeek(proxy, reason: reason) }
+    }
+
+    /// Two frames (at least, at 60 Hz) after a marker seek or the first open: if no turn is in the reading area, the
+    /// marker was past the last row (the content's estimated end over unmeasured rows: after a restore or a jump,
+    /// asking a question did this). Then scroll to the last turn's row and keep seeking it (RowJump) until the next
+    /// turn, a switch or an upward move. One check at a time: the stick seeks on every geometry change while an
+    /// answer streams.
+    private func checkMarkerSeek(_ proxy: ScrollViewProxy, reason: String) {
+        guard follow.markerCheck == nil else { return }
+        follow.markerToken &+= 1
+        let token = follow.markerToken
+        follow.markerCheck = Task { @MainActor in
+            defer { if follow.markerToken == token { follow.markerCheck = nil } } // not a newer check's
+            @MainActor func fallsBack() -> Bool {
+                !Task.isCancelled && follow.rowJump == nil
+                    && RowJump.fallsBack(following: follow.state.following, readerScrolling: tracker.readerScrolling,
+                                         restoring: tracker.isRestoring, noTurnVisible: tracker.showsNoTurn)
+            }
+            try? await Task.sleep(for: .milliseconds(34))
+            guard fallsBack() else { return }
+            // And still so a little later: right after a new turn is inserted (and at load) the rows have not
+            // reported their frames yet, so "no turn" held for a moment on a drawn chat, and falling back then put a
+            // normal stream on the row path (28 re-sticks per 10 s against 12). A real blank stays blank.
+            try? await Task.sleep(for: .milliseconds(150))
+            guard fallsBack(), let last = feed.turns.last?.id else { return }
+            #if DEBUG
+            PerfProbe.count("scroll.markerFallback." + reason)
+            #endif
+            startRowJump(last, proxy, animated: nil, reason: "markerFallback")
+        }
+    }
+
+    /// A saved position whose turn is gone (history cleared, the thread cleared elsewhere): the chat's bottom instead.
+    private func toBottom(_ proxy: ScrollViewProxy, reason: String) {
+        follow.state.followAgain()
+        publish()
+        markerSeek(proxy, reason: reason)
+    }
+
+    /// Back to where the reader was: the saved turn, as far into it as before, in one scroll (see below). False when
+    /// the saved turn is no longer in the chat (nothing was scrolled).
+    @discardableResult
+    private func scroll(to anchor: ChatScrollAnchor, _ proxy: ScrollViewProxy) -> Bool {
+        guard feed.turns.contains(where: { $0.id == anchor.turn }) else { return false }
         Self.note("restore")
         // One scroll, anchored inside the turn (ChatScrollAnchor.unitY). A second scroll (to the turn's top, then to
         // a marker `inset` points into it) put the chat in the right place, but SwiftUI did not report that second
@@ -269,6 +382,7 @@ private struct ChatScroll: View {
         let y = anchor.unitY(turnHeight: h, viewportHeight: H)
         proxy.scrollTo(anchor.turn, anchor: UnitPoint(x: 0, y: y))
         tracker.restore(anchor, expectedInset: ChatScrollAnchor.landedInset(unitY: y, turnHeight: h, viewportHeight: H))
+        return true
     }
 }
 
@@ -285,6 +399,9 @@ private struct ChatScroll: View {
     @ObservationIgnored var rowJump: RowJump?
     /// The Jump to latest safety net in flight.
     @ObservationIgnored var jumpCheck: Task<Void, Never>?
+    /// The check after a marker seek in flight (ChatScroll.checkMarkerSeek).
+    @ObservationIgnored var markerCheck: Task<Void, Never>?
+    @ObservationIgnored var markerToken = 0
     private(set) var showsJump = false
     init(_ state: ScrollFollow, session: String) {
         self.state = state
@@ -407,6 +524,12 @@ private struct ChatScroll: View {
         return (frames[s] ?? VisibleTurns()).first(top: top, viewportHeight: height) == nil
     }
 
+    /// The turn's bottom in the content, when it is laid out in the chat shown.
+    func frameMaxY(_ id: UUID) -> Double? {
+        guard let s = session, viewportSession == s, let f = frames[s]?.frame(id) else { return nil }
+        return f.maxY
+    }
+
     /// Points from the turn's bottom down to the reading area's bottom (negative: the turn ends below it), or nil
     /// when the turn is not laid out in the chat shown.
     func gapBelow(_ id: UUID) -> Double? {
@@ -505,7 +628,9 @@ private struct TurnList: View {
     }
 }
 
-private struct ScrollMetrics: Equatable { let offset: Double; let top: Double; let height: Double; let distance: Double }
+private struct ScrollMetrics: Equatable {
+    let offset: Double; let top: Double; let height: Double; let distance: Double; let visibleBottom: Double
+}
 
 struct TurnView: View {
     let turn: TurnRef
@@ -542,7 +667,7 @@ private struct ContextSentLine: View {
 
     var body: some View {
         if let t = answer.message.turnId, let record = app.records[t] {
-            ContextSentView(record: record)
+            ContextSentView(record: record, disclosure: answer.contextDisclosure)
         }
     }
 }

@@ -35,6 +35,17 @@ import Testing
         #expect(renders == 3)          // q (new), a (new), a (text changed); q unchanged is not re-rendered
     }
 
+    @Test func aFeedNotShownDropsItsSettledRendersButNotAStreamingOne() {
+        // Final review minor 6: memory must not grow with every session viewed.
+        let feed = ChatFeed()
+        let q = msg(.user, "q"), done = msg(.assistant, "done"), q2 = msg(.user, "q2"), live = msg(.assistant, "li", .streaming)
+        feed.sync([q, done, q2, live], render: { _, _ in .empty })
+        #expect(feed.model(done.id)?.rendered != nil && feed.model(live.id)?.rendered != nil)
+        feed.dropRenders()
+        #expect(feed.model(done.id)?.rendered == nil)
+        #expect(feed.model(live.id)?.rendered != nil)
+    }
+
     @Test func removedMessagesDropTheirModels() {
         let feed = ChatFeed()
         let q = msg(.user, "q"), a = msg(.assistant, "a")
