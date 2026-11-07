@@ -66,6 +66,8 @@ enum PerfFlags {
     static var firstVisibleInset: Double?
     static var contentInsetTop = 0.0
     static var contentInsetBottom = 0.0
+    /// ChatView's follow state and whether a row jump is active, for the `jump` driver.
+    static var following = "-"
     /// The laid-out rows' frames in the content, as the rows last reported them (not cleared on a session switch).
     static var rowFrames: [UUID: ClosedRange<Double>] = [:]
     /// ChatView's Jump to latest (animated or not), for the `jump` driver.
@@ -477,17 +479,66 @@ enum PerfFlags {
             for _ in 0..<60 { await nextFrame() }
             let atTop: [String: Any] = ["clipY": Double(clip.bounds.origin.y), "turnVisible": PerfProbe.firstVisibleTurn != nil,
                                         "lastTurnVisible": turnInClip(model.currentFeed?.turns.last?.id)]
-            let retries = PerfProbe.counts["scroll.bottomRetry"] ?? 0
-            PerfProbe.jumpToLatest?(animated)
+            let retries = PerfProbe.counts["scroll.jumpRetry"] ?? 0
+            // Whether the reading area was blank (pixels) just before the safety net's first check.
+            let drawsBeforeNet: Bool
+            if animated {
+                PerfProbe.jumpToLatest?(animated)
+                try? await Task.sleep(for: .milliseconds(420))
+                drawsBeforeNet = chatDrawsSomething()
+            } else {
+                PerfProbe.jumpToLatest?(animated)
+                try? await Task.sleep(for: .milliseconds(25))
+                drawsBeforeNet = chatDrawsSomething()
+            }
             for _ in 0..<120 { await nextFrame() }
-            let docH = sv.documentView?.frame.height ?? 0
-            results.append(["animated": animated, "atTop": atTop, "turnVisible": PerfProbe.firstVisibleTurn != nil,
-                            "turnInClip": turnInClip(), "draws": chatDrawsSomething(),
-                            "lastTurnVisible": turnInClip(model.currentFeed?.turns.last?.id),
-                            "bottomRetries": (PerfProbe.counts["scroll.bottomRetry"] ?? 0) - retries,
-                            "distanceFromBottom": Double(docH - clip.bounds.height - clip.bounds.origin.y)])
+            var r = jumpSample(sv, model)
+            r["animated"] = animated
+            r["atTop"] = atTop
+            r["drawsBeforeNet"] = drawsBeforeNet
+            r["jumpRetries"] = (PerfProbe.counts["scroll.jumpRetry"] ?? 0) - retries
+            // A reader's nudge right after the jump: one wheel tick down (no scroll phase), a still tick, then a lazy
+            // re-measure (the panel 1 pt wider and back). It must land on the last row, never past it.
+            let retries2 = PerfProbe.counts["scroll.jumpRetry"] ?? 0
+            let y0 = sv.contentView.bounds.origin.y
+            _ = chatWheel(sv, by: 40)
+            await nextFrame()
+            let wheelMoved = Double(sv.contentView.bounds.origin.y - y0)
+            for _ in 0..<10 { await nextFrame() }
+            var still = jumpSample(sv, model)
+            still["following"] = PerfProbe.following
+            if let p = panel {
+                var f = p.frame; f.size.width += 1; p.setFrame(f, display: true)
+                await nextFrame()
+                f.size.width -= 1; p.setFrame(f, display: true)
+            }
+            for _ in 0..<60 { await nextFrame() }
+            var n = jumpSample(sv, model)
+            n["jumpRetries"] = (PerfProbe.counts["scroll.jumpRetry"] ?? 0) - retries2
+            n["wheelMoved"] = wheelMoved
+            n["afterStill"] = still
+            n["following"] = PerfProbe.following
+            r["afterNudge"] = n
+            results.append(r)
         }
         summary["jump"] = results
+    }
+
+    /// The jump driver's sample: drawn (pixels), the last turn in the reading area, and the reading area's bottom
+    /// against the last turn's bottom (`pastLastRow`: more than the padding and marker below it, 18 pt).
+    private func jumpSample(_ sv: NSScrollView, _ model: AppModel) -> [String: Any] {
+        let clip = sv.contentView
+        let docH = sv.documentView?.frame.height ?? 0
+        var out: [String: Any] = ["turnVisible": PerfProbe.firstVisibleTurn != nil, "turnInClip": turnInClip(),
+                                  "draws": chatDrawsSomething(),
+                                  "lastTurnVisible": turnInClip(model.currentFeed?.turns.last?.id),
+                                  "distanceFromBottom": Double(docH - clip.bounds.height - clip.bounds.origin.y)]
+        if let last = model.currentFeed?.turns.last?.id, let f = PerfProbe.rowFrames[last] {
+            let gap = Double(clip.bounds.maxY) - PerfProbe.contentInsetBottom - f.upperBound
+            out["gapBelowLastRow"] = gap
+            out["pastLastRow"] = gap > 18.5
+        }
+        return out
     }
 
     /// Scroll to the middle, switch to the other session and back, then open a past chat and close it: the first
