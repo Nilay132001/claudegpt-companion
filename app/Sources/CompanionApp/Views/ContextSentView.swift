@@ -15,9 +15,14 @@ struct ContextSentView: View {
         self.disclosure = disclosure
         #if DEBUG
         if !disclosure.seeded {
+            // `seeded` is not observed. The two observed values are written only when the demo scene opens them:
+            // writing them during a view update (even false over false) invalidated every new row as the chat
+            // scrolled, and the scroll view then wrote its stale offset back (the position driver's chat jumped to
+            // the bottom and lost its reading position).
             disclosure.seeded = true
-            disclosure.expanded = (DemoFlags.is_("context") || DemoFlags.is_("raw")) && record.turnId == "h1"
-            disclosure.showRaw = DemoFlags.is_("raw") && record.turnId == "h1"
+            let open = (DemoFlags.is_("context") || DemoFlags.is_("raw")) && record.turnId == "h1"
+            if open { disclosure.expanded = true }
+            if open && DemoFlags.is_("raw") { disclosure.showRaw = true }
         }
         #endif
     }

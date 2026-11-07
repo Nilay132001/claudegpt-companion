@@ -98,6 +98,16 @@ import Testing
         #expect(!f.following && f.showsJumpToLatest)
     }
 
+    @Test func aRestoreInProgressNeverReArms() {
+        // The position A/B: a restore must never re-arm following, by the content or by the row.
+        var f = ScrollFollow(following: false)
+        f.geometry(offset: 5000, distanceFromBottom: 6000, lastRowDistance: 900)
+        f.geometry(offset: 9000, distanceFromBottom: 0, hold: true, lastRowDistance: 0)   // the restore lands low
+        #expect(!f.following && !f.rearmedByRow)
+        f.geometry(offset: 9100, distanceFromBottom: 10, hold: true, lastRowDistance: 0)
+        #expect(!f.following && !f.rearmedByRow)
+    }
+
     @Test func withoutAnOvershootTheRowsEndDoesNotReArm() {
         // While an answer streams the row's frame can lag a tick: 40 pt up read as 0 pt from its stale end. With the
         // content's end close to the row's (no overshoot), only the content distance counts.

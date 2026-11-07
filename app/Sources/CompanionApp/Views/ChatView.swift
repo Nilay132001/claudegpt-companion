@@ -131,7 +131,7 @@ private struct ChatScroll: View {
                                       lastRowDistance: lastRowDistance)
                 // Re-armed at the last row's end while the content's estimated end is still far below it: stick to
                 // that row, not to the marker past it.
-                if follow.state.rearmedByRow, follow.rowJump == nil, let last = feed.turns.last?.id {
+                if follow.state.rearmedByRow, follow.rowJump == nil, !tracker.isRestoring, let last = feed.turns.last?.id {
                     follow.rowJump = RowJump(turn: last, at: .now)
                 }
                 tracker.viewport(top: m.top, height: m.height)

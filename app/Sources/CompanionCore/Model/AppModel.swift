@@ -228,7 +228,14 @@ public final class AppModel {
         // Only the shown session's feed keeps its renders (final review minor 6): the one left drops them, and one
         // shown again that is already loaded is prewarmed again (a load prewarms by itself).
         if let old, old != id {
-            feeds[old]?.dropRenders()
+            // Not at once: the chat left is still on screen until the view swaps feeds, and its rows re-rendering then
+            // made the scroll view write a stale offset back, so the chat was saved at its bottom and lost its
+            // reading position (position driver, every switch). Two seconds later, if it is still not shown.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, self.selectedSessionId != old, self.pastChat == nil || self.pastRootSession != old else { return }
+                self.feeds[old]?.dropRenders()
+            }
             if loadedChats.contains(id), let f = feeds[id] { prewarm(store[id]?.messages ?? [], into: f) }
         }
         if id != old || !loadedChats.contains(id) { chatLoad = Task { await self.loadCurrentChat(sessionId: id) } }
