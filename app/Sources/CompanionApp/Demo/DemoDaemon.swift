@@ -71,7 +71,7 @@ enum DemoFlags {
 
     static func j<T: Decodable>(_ s: String) -> T { try! JSONDecoder().decode(T.self, from: Data(s.utf8)) }
 
-    func hello() async throws -> HelloResult { Self.j(#"{"protocolVersion":1,"daemonVersion":"0.8.0"}"#) }
+    func hello() async throws -> HelloResult { Self.j(#"{"protocolVersion":1,"daemonVersion":"0.9.0"}"#) }
     func shutdown() async throws {}
     func hostStatus() async throws -> HostState { Self.j(#"{"state":"ready","warnings":[]}"#) }
     func hostRestart() async throws -> HostState { try await hostStatus() }

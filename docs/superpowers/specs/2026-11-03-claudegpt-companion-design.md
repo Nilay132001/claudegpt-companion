@@ -1,6 +1,6 @@
 # ClaudeGPT Companion — design
 
-Status: **v3.7 — M8: UI redesign, kept history, context ranking** · Date: 2026-11-05 (v3:
+Status: **v3.8 — M9: rich answers and scrolling performance** · Date: 2026-11-05 (v3:
 2026-11-03) · Based on: `docs/findings/2026-11-03-phase1-poc.md`
 
 - v1 → v2: owner review (decisions D1–D3, required changes R1–R8, §15).
@@ -30,6 +30,8 @@ Status: **v3.7 — M8: UI redesign, kept history, context ranking** · Date: 202
   - Original app icon (no OpenAI or Anthropic marks).
   - Read Aloud picks the best installed voice (Premium, then Enhanced, then default; no novelty or Personal
     Voice), with a voice picker, Preview and sentence pacing.
+- v3.8 (M9): rich answers and scrolling performance; see 2026-11-05-m9-rich-ui-performance-design.md. The Jump to latest
+  button and ⌘↓ land on the last turn, never past it. *M9 (v3.8)* marks the answer-rendering changes below.
 
 ## 1. Goal and acceptance test
 
@@ -734,6 +736,9 @@ app's environment never reach it. The daemon's stderr is discarded; the app logs
   *M5:* links in replies are not clickable and show their URL as `text (url)`; images are never loaded; only
   `path:line` references inside the bound root open in the editor. The chat shows the turns of the current
   app run; earlier turns stay in the Codex thread (until a daemon history method exists).
+  *M9 (v3.8):* answers are parsed once into cached blocks (headings, nested lists, task lists, quotes, rules,
+  tables), code blocks scroll sideways with a Wrap toggle (default: no wrap, choice kept), and a `chart` block
+  renders only from a validated data block.
 - Each reply: 🔊 play / pause / resume / stop, speed 0.5×–2×, voice in settings, optional auto-play.
   Speech text strips markdown and says "code block omitted" unless "read code" is chosen.
 - Input: text field, 🎙 mic with red recording indicator and live text, editable before send.
