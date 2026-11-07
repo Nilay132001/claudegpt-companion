@@ -116,8 +116,10 @@ private struct ChatScroll: View {
                 // Following, and the bottom moved away without the reader scrolling up (the answer grew, the panel
                 // was resized, a row above was measured): back to the bottom. Nothing else pins the bottom, so a
                 // reader above it is never moved.
-                // Not while an animated Jump to latest is under way: it scrolls there itself.
-                if follow.state.shouldStickToBottom && !follow.jumping {
+                // Not while an animated Jump to latest is under way: it scrolls there itself. Not after a Jump to
+                // latest while its row is still at the bottom (rowJumpAtBottom).
+                if follow.state.shouldStickToBottom && !follow.jumping && !rowJumpAtBottom() {
+                    follow.rowJump = nil
                     Self.note("follow")
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
@@ -126,6 +128,7 @@ private struct ChatScroll: View {
                 // A new live turn (the user just asked): follow it. A restore inserts at the front and keeps the last
                 // id; a session switch swaps the feed, and onChange(of: ShownChat) restores that chat's position.
                 if old.feed == new.feed, feed.isRunning {
+                    follow.rowJump = nil
                     tracker.endRestore("newTurn")
                     follow.state.followAgain()
                     publish()
@@ -138,7 +141,11 @@ private struct ChatScroll: View {
                 #if DEBUG
                 PerfProbe.count("phase.\(phase)")
                 #endif
-                if phase == .tracking || phase == .interacting || phase == .decelerating { tracker.endRestore("reader") }
+                tracker.readerScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+                if tracker.readerScrolling {
+                    follow.rowJump = nil
+                    tracker.endRestore("reader")
+                }
             }
             .onAppear {
                 // When a restore ends (for any reason), a reader who is at the bottom follows again.
@@ -158,6 +165,7 @@ private struct ChatScroll: View {
                 let r = model.scrollMemory.position(for: new.session)
                 follow.state = ScrollFollow(following: r == nil)
                 follow.session = new.session
+                follow.rowJump = nil
                 publish()
                 if let r {
                     scroll(to: r, proxy)
@@ -179,13 +187,55 @@ private struct ChatScroll: View {
     }
 
     /// Jump to latest (the button or ⌘↓): follow again and go to the bottom, animated unless Reduce Motion.
+    ///
+    /// It scrolls to the last turn's row, not to the bottom marker. The marker after the lazy stack marks only the
+    /// content's estimated end. From far above (the top of a long chat), the rows near the end are unmeasured, and
+    /// their estimate can run more than a viewport over their real height: a scroll to the marker then stopped past
+    /// the last row with nothing laid out, and no row was ever measured to correct it. That was a blank chat, for an
+    /// instant jump from the top of perf-table in 15 of 24 runs. A row-anchored scroll makes the stack lay that row
+    /// out and place it exactly. The row's bottom sits Space.l + 1 pt above the content's end (the stack's bottom
+    /// padding and the marker), so the chat follows from there without being stuck back to the marker
+    /// (rowJumpAtBottom). Following a stream, a new question, the first open and a switch keep the marker.
     private func jumpToLatest(_ proxy: ScrollViewProxy, _ animated: Animation?) {
         tracker.endRestore("jump")
         follow.state.followAgain()
         publish()
         if animated != nil { follow.jumpUntil = .now + .milliseconds(400) }
         Self.note("jump")
-        withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+        guard let last = feed.turns.last?.id else {
+            withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            return
+        }
+        follow.rowJump = last
+        withAnimation(animated) { proxy.scrollTo(last, anchor: .bottom) }
+        // The safety net: if no turn is in the reading area two frames after the jump has run, scroll to the row
+        // again, at most twice. Never while the reader scrolls or a restore is in progress, or once the reader has
+        // moved on (rowJump cleared).
+        follow.jumpCheck?.cancel()
+        let frames2 = Duration.milliseconds(34) // two frames at 60 Hz
+        let delay: Duration = animated == nil ? .zero : .milliseconds(400)
+        follow.jumpCheck = Task { @MainActor in
+            try? await Task.sleep(for: delay + frames2)
+            for _ in 0..<2 {
+                guard !Task.isCancelled, follow.rowJump == last, follow.state.following, !tracker.isRestoring,
+                      !tracker.readerScrolling, tracker.showsNoTurn else { return }
+                #if DEBUG
+                PerfProbe.count("scroll.jumpRetry")
+                #endif
+                Self.note("jumpRetry")
+                proxy.scrollTo(last, anchor: .bottom)
+                try? await Task.sleep(for: frames2)
+            }
+        }
+    }
+
+    /// After a Jump to latest, its row is at the bottom: the last turn's bottom within Space.l + 2 pt above the reading
+    /// area's bottom (the padding and marker below it, plus 1 pt), or not reported yet. Then the distance to the
+    /// content's (estimated) end is not the reader being above the bottom, and the chat is not stuck to the marker.
+    private func rowJumpAtBottom() -> Bool {
+        guard let id = follow.rowJump, id == feed.turns.last?.id else { return false }
+        guard let gap = tracker.gapBelow(id) else { return true }
+        return gap >= -0.5 && gap <= Design.Space.l + 2
     }
 
     private static let bottomID = "chat.bottom"
@@ -221,6 +271,11 @@ private struct ChatScroll: View {
     /// An animated Jump to latest is scrolling until then; sticking to the bottom would cut it short.
     @ObservationIgnored var jumpUntil: ContinuousClock.Instant?
     var jumping: Bool { jumpUntil.map { ContinuousClock.now < $0 } ?? false }
+    /// The last turn a Jump to latest scrolled to (its row, not the marker), until the reader scrolls, a new turn
+    /// arrives, the chat switches, or the chat is stuck to the bottom again.
+    @ObservationIgnored var rowJump: UUID?
+    /// The Jump to latest safety net in flight.
+    @ObservationIgnored var jumpCheck: Task<Void, Never>?
     private(set) var showsJump = false
     init(_ state: ScrollFollow, session: String) {
         self.state = state
@@ -332,6 +387,22 @@ private struct ChatScroll: View {
         restoring = nil
         restoreToken += 1
         onRestoreEnd?()
+    }
+
+    /// The reader is scrolling (a tracking, interacting or decelerating scroll phase).
+    var readerScrolling = false
+
+    /// The viewport of the chat shown has been reported and no laid-out turn is in it (a blank chat).
+    var showsNoTurn: Bool {
+        guard let s = session, viewportSession == s, height > 0 else { return false }
+        return (frames[s] ?? VisibleTurns()).first(top: top, viewportHeight: height) == nil
+    }
+
+    /// Points from the turn's bottom down to the reading area's bottom (negative: the turn ends below it), or nil
+    /// when the turn is not laid out in the chat shown.
+    func gapBelow(_ id: UUID) -> Double? {
+        guard let s = session, viewportSession == s, height > 0, let f = frames[s]?.frame(id) else { return nil }
+        return top + height - f.maxY
     }
 
     /// The reading area's current height (nil before the first geometry).
