@@ -3,7 +3,8 @@
 Status: implemented (M9, release 0.9.0). §1–§10 are the design as approved; §11 has the results and the rulings made
 during implementation, including the blank-chat fix. The perf numbers in §11 were measured at af5d7bf; the scroll
 commits after it (a90953f, c422149, 00a294e, 6c3295c and the final-review fix) were checked with the harness
-drivers listed in §11, and their interleaved perf A/B is listed there as pending until it runs on an unlocked Mac.
+drivers listed in §11, and the interleaved perf A/B of 7372f8e against 0464aa5 is in §11 (equal except a position regression, fixed in
+ee88bdc; that commit's own A/B is still to run).
 
 **Audience.** The owner, who decides the open rulings in §9, and the M9 implementers, who build §5–§8 in the order of
 §10. Read §2–§3 first. They say what is actually slow and why, with the measurements.
@@ -575,8 +576,22 @@ demo-only. It was not:
     shown. (At 600 pt the pixel check read one such end state as blank; a snapshot showed it drawn.)
   - The far-below re-arm (an overshoot of about 900 pt at 300 pt, legacy) re-armed through the row (a RowJump) in 2/2
     runs before far jumps became instant; with the final code the two runs re-armed through the content distance.
-- *Not yet measured.* The interleaved perf A/B of these scroll commits against 0464aa5 (stream, position,
-  stream-scroll, long-scroll at 449 pt): PENDING (the Mac's screen was locked). The scale-1 external display case is
+- *Perf A/B of the scroll fixes.* 0464aa5 against 7372f8e, interleaved, release build with the DEBUG harness, 449 pt,
+  built-in display, screen unlocked, `caffeinate`. Values per run, in run order.
+
+| Scenario | 0464aa5: p50 / p95 ms, late frames | 7372f8e: p50 / p95 ms, late frames | Other |
+|---|---|---|---|
+| 200 turns, scroll (`long-scroll`, ×2) | 8.3 / 8.3, 8.3 / 8.3; 14, 16 | 8.3 / 8.3, 8.3 / 8.3; 16, 17 | yanks 0 both |
+| 200 turns + streaming, still (`stream`, ×3) | 8.3 / 8.3, 16.7, 8.3; 53, 58, 50 | 8.3 / 8.3, 8.3, 16.7; 53, 51, 66 | re-sticks 6, 6, 12 → 5, 12, 12; stream updated in every run |
+| 200 turns + streaming, scrolling (`stream-scroll`, ×2) | 8.3 / 8.3, 8.3; 18, 13 | 8.3 / 8.3, 8.3; 32, 17 | `yanksWhileReading` 0 both; by others 3, 4 → 3, 3 |
+| Position, streaming (`position`, perf-stream, ×2) | same on every step; 0 pulls | same on every step; 0 pulls | |
+| Position, 200 turns (`position`, perf-long, ×3) | same on every step; `restore.end.landed` 7 | **lost on every switch** (3 of 3) | regression, fixed in ee88bdc |
+
+  The position regression came from dropping a left chat's renders while it was still on screen (8f2ce3c, Minor 6):
+  its rows re-rendered, the scroll view wrote a stale offset back, and the chat was saved as following. ee88bdc drops
+  them 2 s later instead. Its position gate (perf-long at 449 pt ×3, 300 pt, 449 pt legacy, perf-stream 449 pt) was the
+  same on every step in 6 of 6 runs with `restore.end.landed` 7. The interleaved A/B of ee88bdc itself has not run
+  yet: the screen was locked again. `verify/pending-final-ab.sh` runs it. The scale-1 external display case is
   owner checklist row 18.
 - *Known limits.* Restore edge paths (the deadline timer, `onRestoreEnd`, a lazily re-measured turn ending only at the
   3 s timer) are not unit-tested. After a jump, re-sticks run at up to about 3.5× a normal follow until the next new

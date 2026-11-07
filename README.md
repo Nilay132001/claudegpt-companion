@@ -19,7 +19,7 @@ official Codex app-server. No API keys.
 > M9 (0.9.0): smooth long chats (lazy list, cached parsing), rich answers (tables, task lists, scrolling code,
 > charts from validated data), narrow-panel layouts and listenable answers. Measurements: see §11 of
 > `docs/superpowers/specs/2026-11-05-m9-rich-ui-performance-design.md` (perf numbers measured at af5d7bf; the later
-> scroll fixes are checked there with harness drivers, and their perf A/B is marked pending until run).
+> scroll fixes are checked there with harness drivers and an interleaved A/B).
 
 ## Docs
 
