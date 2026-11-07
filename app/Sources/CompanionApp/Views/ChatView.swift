@@ -44,7 +44,8 @@ private struct ChatScroll: View {
         self.sessionKey = sessionKey
         self.readOnly = readOnly
         self.restore = restore
-        _follow = State(initialValue: FollowBox(ScrollFollow(following: restore == nil), session: sessionKey))
+        _follow = State(initialValue: FollowBox(ScrollFollow.opening(restored: restore != nil, atBottom: Self.initialAnchor == .bottom),
+                                                session: sessionKey))
     }
 
     private static var initialAnchor: UnitPoint {
@@ -97,6 +98,7 @@ private struct ChatScroll: View {
             .onScrollGeometryChange(for: ScrollMetrics.self) { g in
                 #if DEBUG
                 PerfProbe.contentInsetTop = g.contentInsets.top
+                PerfProbe.contentInsetBottom = g.contentInsets.bottom
                 #endif
                 // The reading area is the visible rect minus the insets (the header above, the composer below):
                 // scrollTo(…, anchor: .top) aligns to its top, so the saved position is measured from there too.
@@ -144,6 +146,9 @@ private struct ChatScroll: View {
                     follow.state.released()
                     follow.publish()
                 }
+                #if DEBUG
+                PerfProbe.jumpToLatest = { animated in jumpToLatest(proxy, animated ? Design.Motion.standard : nil) }
+                #endif
                 if let restore { scroll(to: restore, proxy) }
             }
             .onChange(of: ShownChat(session: sessionKey, feed: ObjectIdentifier(feed))) { _, new in
@@ -168,16 +173,19 @@ private struct ChatScroll: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                JumpToLatest(follow: follow) { animated in
-                    tracker.endRestore("jump")
-                    follow.state.followAgain()
-                    publish()
-                    if animated != nil { follow.jumpUntil = .now + .milliseconds(400) }
-                    Self.note("jump")
-                    withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
-                }
+                JumpToLatest(follow: follow) { animated in jumpToLatest(proxy, animated) }
             }
         }
+    }
+
+    /// Jump to latest (the button or ⌘↓): follow again and go to the bottom, animated unless Reduce Motion.
+    private func jumpToLatest(_ proxy: ScrollViewProxy, _ animated: Animation?) {
+        tracker.endRestore("jump")
+        follow.state.followAgain()
+        publish()
+        if animated != nil { follow.jumpUntil = .now + .milliseconds(400) }
+        Self.note("jump")
+        withAnimation(animated) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
     }
 
     private static let bottomID = "chat.bottom"
@@ -280,6 +288,9 @@ private struct ChatScroll: View {
             return
         }
         frames[session ?? "", default: VisibleTurns()].set(id, minY: frame.minY, maxY: frame.maxY)
+        #if DEBUG
+        if PerfProbe.enabled { PerfProbe.rowFrames[id] = frame.minY...max(frame.minY, frame.maxY) }
+        #endif
         report()
     }
 
@@ -332,6 +343,9 @@ private struct ChatScroll: View {
     }
 
     func remove(_ id: UUID) {
+        #if DEBUG
+        PerfProbe.rowFrames[id] = nil
+        #endif
         for k in Array(frames.keys) { frames[k]?.remove(id) }
     }
 

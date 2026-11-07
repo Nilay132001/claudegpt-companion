@@ -65,6 +65,11 @@ enum PerfFlags {
     static var firstVisibleTurn: UUID?
     static var firstVisibleInset: Double?
     static var contentInsetTop = 0.0
+    static var contentInsetBottom = 0.0
+    /// The laid-out rows' frames in the content, as the rows last reported them (not cleared on a session switch).
+    static var rowFrames: [UUID: ClosedRange<Double>] = [:]
+    /// ChatView's Jump to latest (animated or not), for the `jump` driver.
+    static var jumpToLatest: ((Bool) -> Void)?
     /// Scrolls the app itself asked for (following the stream, a new turn, a restore). Counted even when a driver
     /// is not running, so the driver can tell its own moves and lazy-layout corrections from the app's.
     static var programmaticScrolls = 0
@@ -183,9 +188,19 @@ enum PerfFlags {
                     "chatScrollerStyle": self.chatScrollView().map { $0.scrollerStyle == .legacy ? "legacy" : "overlay" } ?? "-",
                     "pointerOverPanel": p.frame.contains(NSEvent.mouseLocation)]
             }
+            // A chat that loaded with turns but none of them in the reading area is blank (the bottom marker outside
+            // the lazy stack left the 300 pt `rich` chat past its last row): every run says whether that happened.
+            self.summary["turnVisibleAtLoad"] = PerfProbe.firstVisibleTurn != nil
+            // The same from AppKit's clip view: the tracker's viewport comes from SwiftUI's scroll geometry, which with
+            // legacy scrollers can miss the clip's last move at load (the scroller narrows the content, rows reflow).
+            self.summary["turnInClipAtLoad"] = self.turnInClip()
+            if Self.pixelChecks { self.summary["drawsAtLoad"] = self.chatDrawsSomething() }
             self.summary["footprintLoadedMB"] = PerfProbe.footprintMB()
             self.summary["loadCounters"] = PerfProbe.diff(since: ([:], [:]))
             try? await Task.sleep(for: .seconds(PerfFlags.settle))
+            self.summary["turnVisibleAfterSettle"] = PerfProbe.firstVisibleTurn != nil
+            self.summary["turnInClipAfterSettle"] = self.turnInClip()
+            if Self.pixelChecks { self.summary["drawsAfterSettle"] = self.chatDrawsSomething() }
             self.startLink()
             let before = PerfProbe.snapshot()
             let cacheBefore = model.renderCache.stats
@@ -199,6 +214,7 @@ enum PerfFlags {
             case "resize": await self.resize()
             case "position": await self.position(model)
             case "wheel": await self.wheel()
+            case "jump": await self.jump(model)
             default: try? await Task.sleep(for: .seconds(PerfFlags.seconds)) // stream, idle
             }
             self.measuring = false
@@ -413,6 +429,65 @@ enum PerfFlags {
             try? await Task.sleep(for: .milliseconds(250))
         }
         summary["switch"] = ["count": sync.count, "syncMs": Self.stats(sync), "toNextFrameMs": Self.stats(toFrame)]
+    }
+
+    /// Whether the chat's reading area (the scroll view minus its insets) draws anything: false when every pixel in it
+    /// is the background's colour (a blank chat). From pixels, so it does not depend on the rows reporting frames
+    /// (an instant scroll across the lazy stack can leave rows on screen that never re-reported).
+    /// The pixel check (cacheDisplay of the chat) only for the drivers that look at visibility: run before a timed
+    /// driver it seemed to cost the following frames (stream A/B, not conclusive at the noise of that window).
+    private static var pixelChecks: Bool { PerfFlags.mode == "idle" || PerfFlags.mode == "jump" }
+
+    private func chatDrawsSomething() -> Bool {
+        guard let sv = chatScrollView() else { return false }
+        let b = sv.bounds
+        let r = NSRect(x: b.minX, y: b.minY + PerfProbe.contentInsetTop, width: b.width,
+                       height: max(1, b.height - PerfProbe.contentInsetTop - PerfProbe.contentInsetBottom))
+        guard let rep = sv.bitmapImageRepForCachingDisplay(in: r) else { return false }
+        sv.cacheDisplay(in: r, to: rep)
+        guard let first = rep.colorAt(x: 0, y: 0) else { return false }
+        for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+                guard let c = rep.colorAt(x: x, y: y) else { continue }
+                if abs(c.redComponent - first.redComponent) + abs(c.greenComponent - first.greenComponent)
+                    + abs(c.blueComponent - first.blueComponent) > 0.06 { return true }
+            }
+        }
+        return false
+    }
+
+    /// Whether a laid-out row overlaps the chat clip view's reading area (its bounds minus the scroll insets).
+    private func turnInClip(_ only: UUID? = nil) -> Bool {
+        guard let c = chatScrollView()?.contentView.bounds else { return false }
+        let top = Double(c.minY) + PerfProbe.contentInsetTop, bottom = Double(c.maxY) - PerfProbe.contentInsetBottom
+        return PerfProbe.rowFrames.contains { id, f in
+            (only == nil || id == only) && f.upperBound > top + 0.5 && f.lowerBound < bottom - 0.5
+        }
+    }
+
+    /// Scroll to the top, then Jump to latest, animated and then instant: the last turn must be in the reading area
+    /// afterwards (a jump that stopped past the last row showed a blank chat).
+    private func jump(_ model: AppModel) async {
+        guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
+        var results: [[String: Any]] = []
+        for animated in [true, false] {
+            let clip = sv.contentView
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+            sv.reflectScrolledClipView(clip)
+            for _ in 0..<60 { await nextFrame() }
+            let atTop: [String: Any] = ["clipY": Double(clip.bounds.origin.y), "turnVisible": PerfProbe.firstVisibleTurn != nil,
+                                        "lastTurnVisible": turnInClip(model.currentFeed?.turns.last?.id)]
+            let retries = PerfProbe.counts["scroll.bottomRetry"] ?? 0
+            PerfProbe.jumpToLatest?(animated)
+            for _ in 0..<120 { await nextFrame() }
+            let docH = sv.documentView?.frame.height ?? 0
+            results.append(["animated": animated, "atTop": atTop, "turnVisible": PerfProbe.firstVisibleTurn != nil,
+                            "turnInClip": turnInClip(), "draws": chatDrawsSomething(),
+                            "lastTurnVisible": turnInClip(model.currentFeed?.turns.last?.id),
+                            "bottomRetries": (PerfProbe.counts["scroll.bottomRetry"] ?? 0) - retries,
+                            "distanceFromBottom": Double(docH - clip.bounds.height - clip.bounds.origin.y)])
+        }
+        summary["jump"] = results
     }
 
     /// Scroll to the middle, switch to the other session and back, then open a past chat and close it: the first

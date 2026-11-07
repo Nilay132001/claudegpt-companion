@@ -22,6 +22,13 @@ public struct ScrollFollow: Equatable, Sendable {
 
     public init(following: Bool = true) { self.following = following }
 
+    /// The state for a chat as it is first shown. One opened at its bottom follows it. One being restored to a saved
+    /// line, or opened at its top (DEBUG demo scenes; the app always opens a chat at its bottom), is a reader above
+    /// the bottom: following from its first geometry would scroll it straight to the bottom.
+    public static func opening(restored: Bool, atBottom: Bool) -> ScrollFollow {
+        ScrollFollow(following: !restored && atBottom)
+    }
+
     /// The "Jump to latest" button (and ⌘↓) is there whenever the reader is not following and above the bottom.
     public var showsJumpToLatest: Bool { !following && distanceFromBottom > Self.jumpThreshold }
 

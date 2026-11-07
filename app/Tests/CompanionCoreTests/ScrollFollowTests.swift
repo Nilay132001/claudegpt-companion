@@ -47,6 +47,22 @@ import Testing
         #expect(f.showsJumpToLatest)
     }
 
+    @Test func aChatOpenedAtItsTopDoesNotChaseTheBottom() {
+        // The `rich` demo opened at its top (300 pt): it started following, so its first geometry (offset 0, 1967 pt
+        // above the bottom) scrolled it to the bottom, and the top shots showed the end of the chat.
+        var top = ScrollFollow.opening(restored: false, atBottom: false)
+        top.geometry(offset: 0, distanceFromBottom: 1967)
+        #expect(!top.following && !top.shouldStickToBottom)
+        #expect(top.showsJumpToLatest)
+        // A chat opened at its bottom (every chat in the app) follows it; a restored one waits for its geometry.
+        var bottom = ScrollFollow.opening(restored: false, atBottom: true)
+        #expect(bottom.following)
+        bottom.geometry(offset: 1967, distanceFromBottom: 0)
+        #expect(bottom.following && !bottom.showsJumpToLatest)
+        #expect(!ScrollFollow.opening(restored: true, atBottom: true).following)
+        #expect(!ScrollFollow.opening(restored: true, atBottom: false).following)
+    }
+
     @Test func aRestoredChatNearTheBottomFollowsOnItsFirstGeometry() {
         // Intended: a chat restored with following: false whose first geometry is within 80 pt of the bottom is
         // treated as at the bottom and follows; further up it stays put.
