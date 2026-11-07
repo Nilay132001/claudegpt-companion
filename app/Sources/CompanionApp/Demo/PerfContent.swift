@@ -239,10 +239,13 @@ import Foundation
             let at = now - Double(count - i) * 120_000
             return TurnRecord(turnId: "\(sessionId)-t\(i)", sessionId: sessionId, threadId: "th-\(sessionId)", sessionTitle: title,
                               mode: .ask, question: question(&r), contextBlock: block, items: items, omitted: 0,
-                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : DemoFlags.is_("perf-table") ? tableAnswer(&r)
+                              answer: DemoFlags.is_("perf-code") ? codeAnswer(&r) : (DemoFlags.is_("perf-table") || tablesInHistory) ? tableAnswer(&r)
                                   : DemoFlags.is_("perf-chart") ? chartAnswer(&r) : answer(&r), sentAt: at, completedAt: at + 60_000)
         }
     }
+
+    /// COMPANION_DEMO_TABLES=1: perf-stream's history is table-heavy, as perf-table's (the jumpstream driver).
+    static let tablesInHistory = ProcessInfo.processInfo.environment["COMPANION_DEMO_TABLES"] == "1"
 
     /// The answer perf-stream streams: long enough (~30 s at the demo rate) to outlast a measurement window.
     static let streamAnswer: String = {

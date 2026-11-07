@@ -5,50 +5,43 @@ import Foundation
 ///
 /// The marker after the lazy stack marks only the content's estimated end. From far above, the rows near the end
 /// are unmeasured, and their estimate can run more than a viewport over their real height: a scroll to the marker
-/// then stops past the last row with nothing laid out (a blank chat). So while a jump is active, every bottom
-/// seek goes to the row. The row's bottom sits a little above the content's (estimated) end (the stack's bottom
-/// padding and the marker, plus any overshoot), so "at the bottom" for the stick is the row's bottom within `slack`
-/// of the reading area's bottom.
+/// then stops past the last row with nothing laid out (a blank chat). After an instant jump that estimated end was
+/// measured 4–16k pt below the last row. So while a jump is active, every bottom seek goes to the row, anchored at
+/// its bottom, including while its answer streams into it. "At the bottom" for the stick is the row's bottom within
+/// `slack` of the reading area's bottom.
 ///
-/// The jump ends (the chat goes back to the marker path) when the reader stops following (any upward move), a new
-/// turn arrives, the chat switches, or the row grows (an answer streaming into it: it is then laid out and the
-/// content's end below it is its real end). A scroll phase alone does not end it: a reader's downward nudge after
-/// the jump must still land on the row, never past it.
+/// The jump ends when the reader stops following (any upward move), a new turn arrives or the chat switches
+/// (`update`; the view clears it on a switch). It does not hand back to the marker when the answer finishes, even
+/// once the content's estimated end is the row's bottom: handing back then, a 1 pt resize re-estimated the end and
+/// left the 300 pt chat blank in 3 of 6 nudge runs. A scroll phase alone does not end it.
 public struct RowJump: Equatable, Sendable {
     public let turn: UUID
     public let started: ContinuousClock.Instant
-    /// The row's height when it was first reported after the jump.
-    public private(set) var landedHeight: Double?
     public private(set) var retries = 0
 
     /// Retries of the safety net, at most.
     public static let maxRetries = 2
     /// How long a row that has not reported a frame still counts as at the bottom.
     public static let unreportedHold: Duration = .seconds(1)
-    /// Row growth that ends the jump (layout noise is below it).
-    public static let growth = 0.5
 
     public init(turn: UUID, at now: ContinuousClock.Instant) {
         self.turn = turn
         self.started = now
     }
 
-    /// One geometry update. False when the jump has ended: `lastTurn` is another turn (a new one arrived),
-    /// the reader is no longer following, or the row grew since it landed while its answer streams (`streaming`).
-    /// Its height, not its position: a row above being measured moves the row without anything growing below it.
-    /// And only while streaming: a width change re-measures the row (its text reflows) without anything arriving,
-    /// and ending the jump then put a 300 pt chat back on the marker path, past its last row (the nudge driver).
-    public mutating func update(lastTurn: UUID?, following: Bool, rowHeight: Double?, streaming: Bool) -> Bool {
-        guard lastTurn == turn, following else { return false }
-        if let h = rowHeight {
-            if let landed = landedHeight {
-                if streaming && h > landed + Self.growth { return false }
-                if !streaming { landedHeight = h }
-            } else {
-                landedHeight = h
-            }
-        }
-        return true
+    /// One geometry update. False when the jump has ended: `lastTurn` is another turn (a new one arrived) or the
+    /// reader is no longer following. Neither the row growing (its answer streaming) nor a re-measure ends it.
+    public func update(lastTurn: UUID?, following: Bool) -> Bool {
+        lastTurn == turn && following
+    }
+
+    /// Whether the stick scrolls to the row now: following, no animated jump running, and the row not at the bottom
+    /// (`atBottom`). Whatever the distance to the content's (estimated) end says: a re-measure (a 1 pt resize at
+    /// 300 pt) left the chat at that end, blank, at a distance of 0; and while the answer streams the row grows past
+    /// the reading area's bottom and is followed by its bottom.
+    public func seeksRow(following: Bool, jumping: Bool, gapBelow: Double?, slack: Double,
+                         now: ContinuousClock.Instant) -> Bool {
+        following && !jumping && !atBottom(gapBelow: gapBelow, slack: slack, now: now)
     }
 
     /// Whether the chat is at its bottom for the stick: the row's bottom from 0.5 pt below to `slack` above the
@@ -61,8 +54,9 @@ public struct RowJump: Equatable, Sendable {
 
     /// The safety net after the jump has run: whether to scroll to the row again. Only while following, never while
     /// the reader scrolls or a restore is in progress, only when no turn is in the reading area, and at most
-    /// `maxRetries` times. The tracker can miss rows that an instant scroll left on screen, so this also fires on a
-    /// chat that is drawn: the retry is then a scroll to where the chat already is, which moves nothing.
+    /// `maxRetries` times. It is a safety net: it retried 0 times in 96 measured jumps and nudges (the row scroll
+    /// alone placed the row each time). A retry is a scroll to the row's bottom, which is harmless if the chat is
+    /// already there.
     public mutating func takeRetry(following: Bool, readerScrolling: Bool, restoring: Bool, noTurnVisible: Bool) -> Bool {
         guard retries < Self.maxRetries, following, !readerScrolling, !restoring, noTurnVisible else { return false }
         retries += 1

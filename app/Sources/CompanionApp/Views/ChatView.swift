@@ -117,24 +117,20 @@ private struct ChatScroll: View {
                 // was resized, a row above was measured): back to the bottom. Nothing else pins the bottom, so a
                 // reader above it is never moved.
                 // Not while an animated Jump to latest is under way: it scrolls there itself. After a Jump to latest,
-                // until it ends (RowJump.update), the stick goes to the jumped-to row, never to the marker, and not
-                // while that row is at the bottom.
-                if var j = follow.rowJump {
-                    let h = tracker.turnHeight(j.turn)
-                    follow.rowJump = j.update(lastTurn: feed.turns.last?.id, following: follow.state.following, rowHeight: h,
-                                             streaming: feed.isRunning) ? j : nil
+                // until it ends (RowJump.update: unfollow, a new turn; a switch clears it), the stick goes to the
+                // jumped-to row, anchored at its bottom, also while its answer streams; never to the marker
+                // (RowJump.seeksRow).
+                if let j = follow.rowJump, !j.update(lastTurn: feed.turns.last?.id, following: follow.state.following) {
+                    follow.rowJump = nil
                 }
                 #if DEBUG
-                if PerfProbe.enabled && PerfFlags.mode == "jump" {
+                if PerfProbe.enabled && (PerfFlags.mode == "jump" || PerfFlags.mode == "jumpstream") {
                     PerfProbe.following = "\(follow.state.following) jump=\(follow.rowJump != nil) d=\(Int(m.distance))"
                 }
                 #endif
                 if let j = follow.rowJump {
-                    // Whenever the jumped-to row is not at the bottom, whatever the distance to the content's
-                    // (estimated) end says: a re-measure (a 1 pt resize at 300 pt) left the chat at that end with the
-                    // row placed above it, blank, at a distance of 0.
-                    if follow.state.following && !follow.jumping
-                        && !j.atBottom(gapBelow: tracker.gapBelow(j.turn), slack: Self.rowJumpSlack, now: .now) {
+                    if j.seeksRow(following: follow.state.following, jumping: follow.jumping,
+                                  gapBelow: tracker.gapBelow(j.turn), slack: Self.rowJumpSlack, now: .now) {
                         Self.note("follow")
                         proxy.scrollTo(j.turn, anchor: .bottom)
                     }
@@ -228,8 +224,8 @@ private struct ChatScroll: View {
         follow.rowJump = RowJump(turn: last, at: .now)
         withAnimation(animated) { proxy.scrollTo(last, anchor: .bottom) }
         // The safety net (RowJump.takeRetry): if no turn is in the reading area once the jump has run, scroll to the
-        // row again, at most twice. It often fires on a chat that is already drawn (the tracker misses rows an instant
-        // scroll left on screen): the retry then scrolls to where the chat already is, which is harmless.
+        // row again, at most twice. It retried 0 times in 96 measured jumps and nudges (the row scroll alone placed
+        // the row each time); a retry is a scroll to the row's bottom, harmless if the chat is already there.
         follow.jumpCheck?.cancel()
         // A bound, not a frame count: at least two frames at 60 Hz (four at 120 Hz). SwiftUI offers no frame clock here.
         let settle = Duration.milliseconds(34)

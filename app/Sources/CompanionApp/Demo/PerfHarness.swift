@@ -217,6 +217,7 @@ enum PerfFlags {
             case "position": await self.position(model)
             case "wheel": await self.wheel()
             case "jump": await self.jump(model)
+            case "jumpstream": await self.jumpStream(model)
             default: try? await Task.sleep(for: .seconds(PerfFlags.seconds)) // stream, idle
             }
             self.measuring = false
@@ -522,6 +523,46 @@ enum PerfFlags {
             results.append(r)
         }
         summary["jump"] = results
+    }
+
+    /// perf-stream (with COMPANION_DEMO_TABLES=1, table-heavy history): 2 s into the stream, scroll to the top, Jump
+    /// to latest (instant; COMPANION_PERF_JUMPANIM=1: animated), then sample twice a second until the answer has
+    /// finished, and once more a second after. Each sample: drawn (pixels), the last turn in the reading area, past the
+    /// last row. Also the re-sticks (scroll.follow) and the streaming answer's body updates while it streamed.
+    private func jumpStream(_ model: AppModel) async {
+        guard let sv = chatScrollView() else { summary["error"] = "no scroll view"; return }
+        let animated = PerfFlags.env["COMPANION_PERF_JUMPANIM"] == "1"
+        for _ in 0..<240 { await nextFrame() }
+        let clip = sv.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+        sv.reflectScrolledClipView(clip)
+        for _ in 0..<60 { await nextFrame() }
+        let streamingAtJump = model.currentFeed?.isRunning ?? false
+        let follows0 = PerfProbe.counts["scroll.follow"] ?? 0, bodies0 = PerfProbe.counts["body.AnswerView.running"] ?? 0
+        let retries0 = PerfProbe.counts["scroll.jumpRetry"] ?? 0
+        let t0 = DispatchTime.now()
+        PerfProbe.jumpToLatest?(animated)
+        var samples: [[String: Any]] = []
+        while model.currentFeed?.isRunning == true && Self.ms(since: t0) < 90_000 {
+            for _ in 0..<60 { await nextFrame() }
+            var s = jumpSample(sv, model)
+            s["t"] = Self.ms(since: t0) / 1000
+            samples.append(s)
+        }
+        let streamSecs = Self.ms(since: t0) / 1000
+        let follows = (PerfProbe.counts["scroll.follow"] ?? 0) - follows0
+        let bodies = (PerfProbe.counts["body.AnswerView.running"] ?? 0) - bodies0
+        for _ in 0..<120 { await nextFrame() }
+        var end = jumpSample(sv, model)
+        end["following"] = PerfProbe.following
+        summary["jumpStream"] = [
+            "animated": animated, "streamingAtJump": streamingAtJump, "streamSecondsAfterJump": streamSecs,
+            "restickPer10s": streamSecs > 0 ? Double(follows) / streamSecs * 10 : -1, "follows": follows,
+            "streamBodyUpdates": bodies, "jumpRetries": (PerfProbe.counts["scroll.jumpRetry"] ?? 0) - retries0,
+            "drawnAll": samples.allSatisfy { ($0["draws"] as? Bool) == true },
+            "pastLastRowDuring": samples.filter { ($0["pastLastRow"] as? Bool) == true }.count,
+            "lastVisibleDuring": samples.filter { ($0["lastTurnVisible"] as? Bool) == true }.count,
+            "samples": samples.count, "end": end]
     }
 
     /// The jump driver's sample: drawn (pixels), the last turn in the reading area, and the reading area's bottom
