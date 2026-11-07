@@ -58,7 +58,15 @@ import Testing
             #expect(!f.text.contains("LocalizedStringKey("), "\(f.name) builds a LocalizedStringKey")
             if f.name != "ReplyMarkdown.swift" {
                 #expect(!f.text.contains("AttributedString(markdown"), "\(f.name) parses markdown")
+                #expect(!f.text.contains("interpretedSyntax"), "\(f.name) configures a markdown parse")
             }
+        }
+    }
+
+    @Test func chartStringsAreAlwaysVerbatim() {
+        guard let f = Self.swiftFiles().first(where: { $0.name == "ChartBlock.swift" }) else { Issue.record("no ChartBlock.swift"); return }
+        for line in f.text.split(separator: "\n") where line.contains("Text(") {
+            #expect(line.contains("Text(verbatim:") || line.contains("Text(\""), "ChartBlock: \(line)")
         }
     }
 }

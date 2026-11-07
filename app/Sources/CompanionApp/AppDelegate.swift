@@ -4,7 +4,7 @@ import SwiftUI
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
-    let readAloud = ReadAloudController(synth: AVSpeechAdapter())
+    let readAloud: ReadAloudController
     let dictation = DictationController(engine: SpeechAnalyzerEngine(), permissions: SystemDictationPermissions())
     let windowStatus: WindowStatus
     let window: WindowCoordinator
@@ -16,8 +16,14 @@ import SwiftUI
 
     override init() {
         #if DEBUG
+        // The readaloud perf driver measures re-renders, not speech: nothing is spoken during measurement.
+        readAloud = ReadAloudController(synth: PerfFlags.mode == "readaloud" ? SilentSynth() : AVSpeechAdapter())
+        #else
+        readAloud = ReadAloudController(synth: AVSpeechAdapter())
+        #endif
+        #if DEBUG
         if let demo = Self.demo {
-            model = AppModel(connector: demo.connector)
+            model = AppModel(connector: demo.connector, renderStyle: AnswerStyle.styler)
             let status = WindowStatus()
             windowStatus = status
             window = WindowCoordinator(status: status)
@@ -28,7 +34,7 @@ import SwiftUI
         model = AppModel(connector: DaemonLocator.live(
             env: ProcessInfo.processInfo.environment,
             configuredNode: { UserDefaults.standard.string(forKey: "nodePath") },
-            resourceURL: Bundle.main.resourceURL), jiraStore: KeychainJiraStore())
+            resourceURL: Bundle.main.resourceURL), jiraStore: KeychainJiraStore(), renderStyle: AnswerStyle.styler)
         let status = WindowStatus()
         windowStatus = status
         window = WindowCoordinator(status: status)
@@ -37,6 +43,9 @@ import SwiftUI
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
+        #if DEBUG
+        PerfDriver.shared.markLaunch()
+        #endif
         let root = SidebarView()
             .environment(model).environment(readAloud).environment(dictation).environment(windowStatus)
         window.install(rootView: root, onWidthChange: { [weak self] w in self?.model.setSetting(\.panelWidth, Double(w)) })
@@ -75,6 +84,7 @@ import SwiftUI
                     model.draft = q
                     await model.submitDraft()
                 }
+                PerfDriver.shared.run(model: model, readAloud: readAloud)
             }
             #endif
         }

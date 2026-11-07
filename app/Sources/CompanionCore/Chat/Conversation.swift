@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// What chat.send needs to send a prepared message (again).
@@ -28,6 +29,18 @@ public struct ChatMessage: Identifiable, Equatable, Sendable {
     /// When the question was sent (restored or live turns); nil for messages that predate this field.
     public var sentAt: Date? = nil
     public var isRunning: Bool { role == .assistant && (status == .sending || status == .streaming) }
+}
+
+extension ChatMessage {
+    /// A stored turn's message id: the same for the same turn and role in every restore and every run, so SwiftUI
+    /// keeps row identity when a chat is restored again (M9 §5.2). Name-based, SHA-256, UUID version 5 layout.
+    public static func storedID(turnId: String, role: Role) -> UUID {
+        let name = "companion.message\u{0}\(turnId)\u{0}\(role == .user ? "user" : "assistant")"
+        var b = Array(SHA256.hash(data: Data(name.utf8)).prefix(16))
+        b[6] = (b[6] & 0x0F) | 0x50
+        b[8] = (b[8] & 0x3F) | 0x80
+        return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
+    }
 }
 
 public enum TurnEvent: Sendable, Equatable {
@@ -75,15 +88,16 @@ public struct Conversation: Equatable, Sendable {
         var restored: [ChatMessage] = []
         for t in turns where turnToMessage[t.turnId] == nil {
             let at = Date(timeIntervalSince1970: t.sentAt / 1000)
-            restored.append(ChatMessage(id: UUID(), role: .user, text: t.question, status: .done, sentAt: at))
+            restored.append(ChatMessage(id: ChatMessage.storedID(turnId: t.turnId, role: .user), role: .user, text: t.question,
+                                        status: .done, sentAt: at))
             let status: ChatMessage.Status = switch t.status {
             case "completed": .done
             case "interrupted": .interrupted
             case "failed", "abandoned": .failed(t.error ?? "The reply stopped.")
             default: .failed("The reply did not finish.")
             }
-            restored.append(ChatMessage(id: UUID(), role: .assistant, text: t.answer, status: status, threadId: t.threadId,
-                                        turnId: t.turnId, sentAt: at))
+            restored.append(ChatMessage(id: ChatMessage.storedID(turnId: t.turnId, role: .assistant), role: .assistant,
+                                        text: t.answer, status: status, threadId: t.threadId, turnId: t.turnId, sentAt: at))
         }
         messages.insert(contentsOf: restored, at: 0)
         restoredCount = restored.count

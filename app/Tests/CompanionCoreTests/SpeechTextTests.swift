@@ -26,9 +26,6 @@ import Testing
     @Test func keepsSnakeCase() {
         #expect(SpeechText.plainText(fromMarkdown: "use file_name_here") == "use file_name_here")
     }
-    @Test func flattensTables() {
-        #expect(SpeechText.plainText(fromMarkdown: "| a | b |\n|---|---|\n| 1 | 2 |") == "a, b\n1, 2")
-    }
 
     private func texts(_ md: String, readCode: Bool = false) -> [String] { SpeechText.segments(fromMarkdown: md, readCode: readCode).map(\.text) }
 
@@ -56,12 +53,36 @@ import Testing
         #expect(texts("Read [the docs](https://example.com/x).") == ["Read the docs."])
         #expect(texts("Go to <https://example.com>.") == ["Go to link."])
     }
-    @Test func markdownSymbolsAreNeverRead() {
-        #expect(texts("a *star* and ~~gone~~ and `tick` and a_b and _lone") == ["a star and gone and tick and a_b and lone"])
+    @Test func markdownSymbolsAreNeverReadButLiteralCharactersAre() {
+        // The parser removes the Markdown; what is left is the answer's own text (final review minor 4).
+        #expect(texts("a *star* and ~~gone~~ and `tick` and a_b and _lone") == ["a star and gone and tick and a_b and _lone"])
+        #expect(texts("Call `__init__` with a \\*b and a | b.") == ["Call __init__ with a *b and a | b."])
     }
     @Test func codeBlockOmittedOrReadLineByLine() {
         #expect(texts("Before.\n\n```ts\nlet a = 1\nlet b = 2\n```") == ["Before.", "Code block omitted."])
         #expect(texts("```ts\nlet a = 1\nlet b = 2\n```", readCode: true) == ["let a = 1", "let b = 2"])
+    }
+    @Test func flattensTables() {
+        #expect(texts("| a | b |\n|---|---|\n| 1 | 2 |") == ["A table with 1 row.", "1: 2."])
+    }
+    @Test func longTablesAreSummarised() {
+        let rows = (1...7).map { "| r\($0) | \($0) |" }.joined(separator: "\n")
+        #expect(texts("| k | v |\n|---|---|\n" + rows) == ["A table with 7 rows is shown on screen."])
+    }
+    @Test func chartsReadTheirSummary() {
+        #expect(texts("```companion-chart\n\(ChartSpecTests.valid)\n```")
+                == ["Bar chart, Test runtime by package: parser 4.2 seconds, csv 1.9 seconds."])
+        #expect(texts("```companion-chart\n{}\n```") == ["Chart not shown."])
+    }
+    @Test func taskItemsSayDoneOrToDo() {
+        #expect(texts("- [x] Ship it\n- [ ] Test it") == ["Done: Ship it", "To do: Test it"])
+    }
+    @Test func mathAndRulesAreNotSpelledOut() {
+        #expect(texts("Before.\n\n---\n\n$$\na+b\n$$") == ["Before.", "A formula is shown on screen."])
+    }
+    @Test func noMarkdownPipesOrJSONAreSpoken() {
+        let md = "## H\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```companion-chart\n\(ChartSpecTests.valid)\n```"
+        for t in texts(md) { #expect(!t.contains("|") && !t.contains("{") && !t.contains("#")) }
     }
     @Test func plainTextJoinsSegments() {
         #expect(SpeechText.plainText(fromMarkdown: "One. Two.\n\nThree.") == "One. Two.\nThree.")

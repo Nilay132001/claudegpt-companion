@@ -7,6 +7,9 @@ struct SidebarView: View {
 
     var body: some View {
         @Bindable var model = model
+        #if DEBUG
+        let _ = PerfProbe.count("body.SidebarView")
+        #endif
         content
             .frame(minWidth: 280, maxWidth: 640, minHeight: 320)
             .background(Color(nsColor: .windowBackgroundColor))
@@ -45,16 +48,17 @@ struct SidebarView: View {
     @ViewBuilder private var content: some View {
         switch model.gate {
         case .ready:
-            if let past = model.pastChat {
-                ChatView(messages: past.messages, readOnly: true)
-            } else if model.currentMessages.isEmpty {
+            // Reads only the feed's emptiness and identity (M9 §5.5): a streamed delta does not re-render this view.
+            if let past = model.pastChat, let feed = model.pastFeed {
+                ChatView(feed: feed, sessionKey: "past:" + past.summary.threadId, readOnly: true)
+            } else if model.currentFeed?.isEmpty ?? true {
                 if model.isLoadingCurrentChat {
                     GateView(symbol: nil, title: "Loading this chat…", spinner: true)
                 } else {
                     EmptyStateView()
                 }
-            } else {
-                ChatView(messages: model.currentMessages, readOnly: false)
+            } else if let feed = model.currentFeed {
+                ChatView(feed: feed, sessionKey: model.selectedSessionId ?? "", readOnly: false)
             }
         case .connecting:
             GateView(symbol: nil, title: "Starting companiond…", detail: "The companion's local helper is starting up.", spinner: true)

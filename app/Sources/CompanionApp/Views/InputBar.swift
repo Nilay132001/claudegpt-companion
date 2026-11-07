@@ -41,7 +41,7 @@ struct InputBar: View {
                     .layoutPriority(1)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 2) {
-                    if model.privacy?.sharingMode != .off && !model.currentMessages.isEmpty { explainButton } // ruling 20
+                    if model.privacy?.sharingMode != .off && !(model.currentFeed?.isEmpty ?? true) { explainButton } // ruling 20
                     micButton
                     sendButton
                 }

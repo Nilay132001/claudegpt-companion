@@ -339,4 +339,166 @@ import Testing
         await m.setSharingMode(.off)
         #expect(m.privacy?.sharingMode == .off)
     }
+
+    @Test func restoredAnswersAreRenderedInTheBackground() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "Hello\n\nWorld")]
+        let (m, _) = await started(d)
+        await m.chatLoad?.value
+        await m.prewarmTask?.value
+        #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: m.currentRoot) != nil)
+    }
+
+    @Test func theFeedMirrorsTheConversationAndDeltasAreCoalesced() async {
+        let (m, _) = await started()
+        await m.ask("q")
+        let feed = m.currentFeed!
+        #expect(feed.turns.count == 1 && feed.isRunning && m.isAnswering)
+        let answer = feed.turns[0].answer!
+        for i in 0..<50 {
+            m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: "w\(i) ")))
+        }
+        #expect(m.currentMessages.last?.text.hasPrefix("w0 w1 ") == true)    // the Conversation is immediate
+        m.flushPendingUpdates()
+        #expect(feed.model(answer)?.message.text == m.currentMessages.last?.text)
+        #expect(feed.model(answer)?.rendered?.plainText.hasPrefix("w0 w1") == true)
+        m.handle(.turnCompleted(TurnCompleted(sessionId: "s1", threadId: "t1", turnId: "u1", status: "completed", error: nil)))
+        #expect(!feed.isRunning && !m.isAnswering)
+    }
+
+    @Test func aDeltaInvalidatesOnlyItsOwnAnswer() async {
+        let (m, _) = await started()
+        await m.ask("one")
+        m.handle(.turnCompleted(TurnCompleted(sessionId: "s1", threadId: "t1", turnId: "u1", status: "completed", error: nil)))
+        await m.ask("two")
+        let feed = m.currentFeed!
+        let first = feed.model(feed.turns[0].answer!)!
+        let turns = Flag(), earlier = Flag(), sidebar = Flag()
+        withObservationTracking { _ = feed.turns } onChange: { turns.set() }
+        withObservationTracking { _ = first.message; _ = first.rendered } onChange: { earlier.set() }
+        withObservationTracking { _ = m.currentFeed?.isEmpty; _ = m.isLoadingCurrentChat; _ = m.gate } onChange: { sidebar.set() }
+        m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u2", itemId: "i1", text: "streaming")))
+        m.flushPendingUpdates()
+        #expect(!turns.on && !earlier.on && !sidebar.on)
+    }
+
+    /// Starts with the worktree read held, after the chat has been restored (its prewarm is waiting for the root).
+    func startedWithWorktreeHeld(_ d: FakeDaemon) async -> AppModel {
+        d.worktreeGate = true
+        let m = AppModel(connector: { d.connection })
+        await m.start()
+        await m.chatLoad?.value
+        while d.worktreeResume == nil { await Task.yield() }
+        return m
+    }
+
+    @Test func prewarmWaitsForTheRootBeforeRendering() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "Hello\n\nWorld")]
+        let m = await startedWithWorktreeHeld(d)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(m.renderCache.count == 0)   // nothing rendered under root nil while the worktree is unknown
+        d.worktreeResume?.resume()
+        await m.detailLoad?.value
+        await m.prewarmTask?.value
+        #expect(m.currentRoot == "/r")
+        #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: "/r") != nil)
+        #expect(m.renderCache.cachedAnswer(for: "Hello\n\nWorld", root: nil) == nil)
+    }
+
+    @Test func aCancelledPrewarmRendersNothing() async {
+        let d = FakeDaemon()
+        d.worktree = nil   // the root stays nil, so resolving starts no second prewarm
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "Hello\n\nWorld")]
+        let m = await startedWithWorktreeHeld(d)
+        let task = m.prewarmTask
+        #expect(task != nil)
+        task?.cancel()
+        d.worktreeResume?.resume()
+        await m.detailLoad?.value
+        await task?.value
+        #expect(m.prewarmTask == task)
+        #expect(m.renderCache.count == 0)
+    }
+
+    /// The `companion-open` paths an answer links to (they resolve against the root it was rendered with).
+    func linkedPaths(_ r: RenderedAnswer?) -> [String] {
+        (r?.blocks ?? []).flatMap { b -> [String] in
+            guard case .paragraphs(let a) = b.block else { return [] }
+            return a.runs.compactMap { $0.link.flatMap(EditorLink.parseCompanionURL)?.path }
+        }
+    }
+
+    @Test func aRootChangeRendersAnswersAgainWithTheNewRoot() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "See src/a.ts:3")]
+        let (m, _) = await started(d)
+        await m.chatLoad?.value
+        await m.prewarmTask?.value
+        let feed = m.currentFeed!
+        let id = feed.turns[0].answer!
+        #expect(linkedPaths(feed.model(id)?.rendered) == ["/r/src/a.ts"])
+        let oldRoot = feed.model(id)!.rendered!
+        m.handle(.sessionWorktree(WorktreeEvent(sessionId: "s1", resolution: .resolved(root: "/r2", branch: "b", isLinkedWorktree: true),
+                                                change: nil)))
+        #expect(feed.root == "/r2" && feed.model(id)?.root == "/r2")
+        #expect(feed.model(id)?.rendered != oldRoot)          // the old-root render is not kept
+        await m.prewarmTask?.value
+        #expect(linkedPaths(feed.model(id)?.rendered) == ["/r2/src/a.ts"])
+        feed.setRendered(oldRoot, for: id, text: "See src/a.ts:3", root: "/r")   // a late old-root batch
+        #expect(linkedPaths(feed.model(id)?.rendered) == ["/r2/src/a.ts"])
+    }
+
+    @Test func aPastChatFollowsItsSessionsRootAndKeepsItsOwnPrewarm() async {
+        let d = FakeDaemon()
+        d.turnsStore = [TurnRecord(turnId: "u1", sessionId: "s1", threadId: "t1", question: "q", answer: "See src/a.ts:3")]
+        let (m, _) = await started(d)
+        await m.chatLoad?.value
+        await m.prewarmTask?.value
+        await m.loadHistory()
+        await m.openPastChat(m.history!.chats[0])
+        let past = m.pastFeed!
+        let pastTask = past.prewarmTask
+        await pastTask?.value
+        let id = past.turns[0].answer!
+        #expect(linkedPaths(past.model(id)?.rendered) == ["/r/src/a.ts"])
+        m.handle(.sessionWorktree(WorktreeEvent(sessionId: "s1", resolution: .resolved(root: "/r2", branch: "b", isLinkedWorktree: true),
+                                                change: nil)))
+        #expect(past.root == "/r2")
+        await past.prewarmTask?.value
+        #expect(linkedPaths(past.model(id)?.rendered) == ["/r2/src/a.ts"])
+    }
+
+    @Test func coalescedDeltasReachTheFeedOnTheirOwn() async throws {
+        let (m, _) = await started()
+        await m.ask("q")
+        let feed = m.currentFeed!
+        let answer = feed.turns[0].answer!
+        m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: "one ")))
+        m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: "two")))
+        #expect(m.currentMessages.last?.text == "one two")      // the Conversation is immediate
+        // No manual flush: the frame timer delivers it. Poll generously so a loaded CI machine cannot flake.
+        let deadline = ContinuousClock.now + .seconds(2)
+        while feed.model(answer)?.message.text != "one two", ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(feed.model(answer)?.message.text == "one two")
+        #expect(feed.model(answer)?.rendered?.plainText == "one two")
+    }
+
+    @Test func aCompletionRightAfterDeltasLandsTheFinalText() async throws {
+        let (m, _) = await started()
+        await m.ask("q")
+        let feed = m.currentFeed!
+        let answer = feed.turns[0].answer!
+        for w in ["a ", "b ", "c"] {
+            m.handle(.chatDelta(ChatDelta(sessionId: "s1", threadId: "t1", turnId: "u1", itemId: "i1", text: w)))
+        }
+        m.handle(.turnCompleted(TurnCompleted(sessionId: "s1", threadId: "t1", turnId: "u1", status: "completed", error: nil)))
+        #expect(feed.model(answer)?.message.text == "a b c")
+        #expect(feed.model(answer)?.message.status == .done && !feed.isRunning)
+        #expect(feed.model(answer)?.rendered?.plainText == "a b c")
+        try await Task.sleep(for: .milliseconds(40))           // the cancelled pending flush changes nothing
+        #expect(feed.model(answer)?.message.text == "a b c" && feed.model(answer)?.message.status == .done)
+    }
 }

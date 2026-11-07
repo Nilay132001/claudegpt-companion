@@ -6,27 +6,35 @@ import SwiftUI
 struct ContextSentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let record: TurnRecord
-    @State private var expanded: Bool
-    @State private var showRaw = false
+    /// On the answer's model, not in @State: a lazy row scrolled far away is recycled, and its state with it.
+    let disclosure: ContextDisclosure
     @State private var copied = CopiedFlag()
 
-    init(record: TurnRecord) {
+    init(record: TurnRecord, disclosure: ContextDisclosure) {
         self.record = record
+        self.disclosure = disclosure
         #if DEBUG
-        _expanded = State(initialValue: (DemoFlags.is_("context") || DemoFlags.is_("raw")) && record.turnId == "h1")
-        _showRaw = State(initialValue: DemoFlags.is_("raw") && record.turnId == "h1")
-        #else
-        _expanded = State(initialValue: false)
+        if !disclosure.seeded {
+            disclosure.seeded = true
+            disclosure.expanded = (DemoFlags.is_("context") || DemoFlags.is_("raw")) && record.turnId == "h1"
+            disclosure.showRaw = DemoFlags.is_("raw") && record.turnId == "h1"
+        }
         #endif
     }
+
+    private var expanded: Bool { disclosure.expanded }
+    private var showRaw: Bool { disclosure.showRaw }
 
     private var expandable: Bool { !record.items.isEmpty }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.ContextSentView")
+        #endif
         VStack(alignment: .trailing, spacing: Design.Space.s) {
             Button {
                 guard expandable else { return }
-                withAnimation(Design.Motion.standard(reduceMotion: reduceMotion)) { expanded.toggle() }
+                withAnimation(Design.Motion.standard(reduceMotion: reduceMotion)) { disclosure.expanded.toggle() }
             } label: {
                 HStack(spacing: 4) {
                     Text(verbatim: ContextSummary.short(record))
@@ -72,7 +80,7 @@ struct ContextSentView: View {
                 }
                 .help("Copy the exact block GPT received")
                 Button {
-                    withAnimation(Design.Motion.standard(reduceMotion: reduceMotion)) { showRaw.toggle() }
+                    withAnimation(Design.Motion.standard(reduceMotion: reduceMotion)) { disclosure.showRaw.toggle() }
                 } label: {
                     Label(showRaw ? "Hide Raw Block" : "Raw Block", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
@@ -84,7 +92,9 @@ struct ContextSentView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
             if showRaw {
-                CodeBlockView(language: nil, code: record.contextBlock, title: "Raw block sent to GPT", copyHelp: "Copy raw block")
+                CodeBlock(model: CodeModel(language: nil, text: record.contextBlock, isOpen: false,
+                                           lineCount: record.contextBlock.split(separator: "\n", omittingEmptySubsequences: false).count,
+                                           reference: nil), root: nil, title: "Raw block sent to GPT", copyHelp: "Copy raw block")
                     .transition(.opacity)
             }
         }
