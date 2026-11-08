@@ -15,53 +15,6 @@ public struct SpeechSegment: Equatable, Sendable {
 }
 
 public enum SpeechText {
-    /// Markdown to sentences with pauses: a short one between sentences, a longer one after a paragraph,
-    /// list item or heading.
-    public static func segments(fromMarkdown markdown: String, readCode: Bool = false) -> [SpeechSegment] {
-        var out: [SpeechSegment] = []
-        var paragraph: [String] = []
-        var inFence = false
-        var fenced: [String] = []
-
-        func emit(_ sentences: [String]) {
-            let s = sentences.filter { !$0.isEmpty }
-            for (i, t) in s.enumerated() { out.append(SpeechSegment(t, pause: i == s.count - 1 ? .paragraph : .sentence)) }
-        }
-        func flush() {
-            if !paragraph.isEmpty { emit(sentences(in: inline(paragraph.joined(separator: " ")))) }
-            paragraph = []
-        }
-        func closeFence() {
-            if readCode {
-                emit(fenced.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
-            } else {
-                emit(["Code block omitted."])
-            }
-            fenced = []
-        }
-
-        for raw in markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") || line.hasPrefix("~~~") {
-                if inFence { closeFence() } else { flush() }
-                inFence.toggle()
-                continue
-            }
-            if inFence { fenced.append(raw); continue }
-            if line.isEmpty { flush(); continue }
-            if line.range(of: #"^\|?\s*:?-{3,}"#, options: .regularExpression) != nil { continue }
-            if isStructural(line) {
-                flush()
-                emit(sentences(in: inline(block(line))))
-            } else {
-                paragraph.append(line)
-            }
-        }
-        if inFence { closeFence() }
-        flush()
-        return out
-    }
-
     /// The old flat form: sentences joined by spaces, paragraphs by newlines.
     public static func plainText(fromMarkdown markdown: String, readCode: Bool = false) -> String {
         var s = ""
@@ -70,22 +23,6 @@ public enum SpeechText {
             s += seg.pause == .paragraph ? "\n" : " "
         }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Heading, quote, list item or table row: stands alone instead of joining the paragraph.
-    static func isStructural(_ line: String) -> Bool {
-        line.range(of: #"^(#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\|)"#, options: .regularExpression) != nil
-    }
-
-    static func block(_ line: String) -> String {
-        if line.hasPrefix("|") {
-            return line.split(separator: "|")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-                .joined(separator: ", ")
-        }
-        return line.replacingOccurrences(
-            of: #"^(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)"#, with: "", options: .regularExpression)
     }
 
     static func inline(_ text: String) -> String {
@@ -99,6 +36,15 @@ public enum SpeechText {
         // Markdown symbols left over (unpaired emphasis, strikethrough, stray ticks and pipes) are never read.
         t = t.replacingOccurrences(of: #"[*`|]|~~"#, with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: #"(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Text that came from the parser: its Markdown is already gone, so a literal `*`, `|`, backtick or edge `_` (an
+    /// escaped `\*`, `a | b`, `__init__`) is the answer's own text and is read. Only a bare address becomes "link".
+    static func parsed(_ text: String) -> String {
+        var t = text
+        t = t.replacingOccurrences(of: #"<?https?://[^\s<>)\]]*[^\s<>)\].,;:!?'"]>?"#, with: "link", options: .regularExpression)
         t = t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
         return t.trimmingCharacters(in: .whitespaces)
     }
@@ -129,5 +75,53 @@ public enum SpeechText {
         }
         if start < chars.count { result.append(String(chars[start...]).trimmingCharacters(in: .whitespaces)) }
         return result.filter { !$0.isEmpty }
+    }
+}
+
+extension SpeechText {
+    /// Markdown to sentences with pauses: rendered by `ReplyMarkdown` (the only parser), then spoken by block.
+    public static func segments(fromMarkdown markdown: String, readCode: Bool = false) -> [SpeechSegment] {
+        segments(for: ReplyMarkdown.render(markdown, root: nil), readCode: readCode)
+    }
+
+    /// An answer's blocks as sentences: a short pause between sentences, a longer one after a paragraph, heading,
+    /// list item, table row or chart. No Markdown marker, table pipe or chart JSON is ever spoken; code only when asked.
+    public static func segments(for answer: RenderedAnswer, readCode: Bool) -> [SpeechSegment] {
+        var out: [SpeechSegment] = []
+        func emit(_ sentences: [String]) {
+            let s = sentences.filter { !$0.isEmpty }
+            for (i, t) in s.enumerated() { out.append(SpeechSegment(t, pause: i == s.count - 1 ? .paragraph : .sentence)) }
+        }
+        func spoken(_ s: AttributedString) -> String {
+            s.runs.filter { $0[AnswerAttributes.SpeechSkip.self] != true }.map { String(s[$0.range].characters) }.joined()
+        }
+        func walk(_ blocks: [AnswerBlock], prefix: String = "") {
+            var prefix = prefix
+            for b in blocks {
+                switch b {
+                case .paragraphs(let s):
+                    for para in spoken(s).components(separatedBy: "\n\n") {
+                        emit(sentences(in: prefix + parsed(para.replacingOccurrences(of: "\n", with: " "))))
+                        prefix = ""
+                    }
+                case .heading(_, let s): emit(sentences(in: parsed(spoken(s))))
+                case .list(let l):
+                    for item in l.items { walk(item.content, prefix: item.check.map { $0 == .done ? "Done: " : "To do: " } ?? "") }
+                case .quote(let bs): walk(bs)
+                case .code(let c):
+                    emit(readCode ? c.text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) } : ["Code block omitted."])
+                case .table(let t):
+                    let n = t.rows.count
+                    emit(n <= 6 ? ["A table with \(n) row\(n == 1 ? "" : "s")."] : ["A table with \(n) rows is shown on screen."])
+                    if n <= 6 { for r in t.spokenRows { emit([parsed(r)]) } }
+                case .rule: break
+                case .math: emit(["A formula is shown on screen."])
+                case .chart(.valid(let s)): emit([s.spokenSummary])
+                case .chart(.invalid): emit(["Chart not shown."])
+                }
+            }
+        }
+        walk(answer.blocks.map(\.block))
+        return out
     }
 }

@@ -14,6 +14,26 @@ import Observation
 
 public enum Playback: Equatable, Sendable { case idle, playing(UUID), paused(UUID) }
 
+public enum SpeechPhase: Equatable, Sendable { case idle, playing, paused }
+
+/// One message's Read Aloud state: a playback change touches only the messages involved (M9 §5.5).
+@MainActor @Observable public final class MessageSpeech {
+    public internal(set) var phase: SpeechPhase = .idle
+}
+
+extension Playback {
+    var messageId: UUID? {
+        switch self { case .idle: nil; case .playing(let id), .paused(let id): id }
+    }
+    func phase(of id: UUID) -> SpeechPhase {
+        switch self {
+        case .playing(id): .playing
+        case .paused(id): .paused
+        default: .idle
+        }
+    }
+}
+
 /// Read Aloud (spec §8, §9): one synthesizer, pause/resume/stop at word boundaries, 0.5×–2×, new playback stops the old.
 @MainActor @Observable
 public final class ReadAloudController {
@@ -24,6 +44,7 @@ public final class ReadAloudController {
     @ObservationIgnored private let synth: any SpeechSynthesizing
     @ObservationIgnored private let installedVoices: () -> [VoiceDescriptor]
     @ObservationIgnored private var token = 0
+    @ObservationIgnored private var speech: [UUID: MessageSpeech] = [:]
 
     public init(synth: any SpeechSynthesizing, voices: @escaping () -> [VoiceDescriptor] = VoiceDescriptor.installed) {
         self.synth = synth
@@ -46,31 +67,34 @@ public final class ReadAloudController {
         return VoiceRanking.best(all, for: VoiceRanking.currentLanguageCode)?.identifier
     }
 
-    public func play(id: UUID, markdown: String) {
+    /// `rendered`: the answer's cached render when the caller has it (else the Markdown is rendered here).
+    public func play(id: UUID, markdown: String, rendered: RenderedAnswer? = nil) {
         if playback != .idle { synth.stop(atWordBoundary: false) }
         token += 1
-        playback = .playing(id)
-        synth.speak(SpeechText.segments(fromMarkdown: markdown, readCode: readCode),
+        set(.playing(id))
+        let segments = rendered.map { SpeechText.segments(for: $0, readCode: readCode) }
+            ?? SpeechText.segments(fromMarkdown: markdown, readCode: readCode)
+        synth.speak(segments,
                     rate: Self.avRate(multiplier: rateMultiplier), voiceIdentifier: resolvedVoice(), token: token)
     }
 
-    public func toggle(id: UUID, markdown: String) {
+    public func toggle(id: UUID, markdown: String, rendered: RenderedAnswer? = nil) {
         switch playback {
         case .playing(id):
             synth.pause()
-            playback = .paused(id)
+            set(.paused(id))
         case .paused(id):
             synth.resume()
-            playback = .playing(id)
+            set(.playing(id))
         default:
-            play(id: id, markdown: markdown)
+            play(id: id, markdown: markdown, rendered: rendered)
         }
     }
 
     public func stop() {
         guard playback != .idle else { return }
         synth.stop(atWordBoundary: true)
-        playback = .idle
+        set(.idle)
     }
 
     /// Playing (not paused) this message: drives the speaking indicator.
@@ -87,7 +111,22 @@ public final class ReadAloudController {
     }
 
     private func ended(_ t: Int) {
-        if t == token { playback = .idle }
+        if t == token { set(.idle) }
+    }
+
+    /// Never pruned: a view may hold the object it read, and entries are one small object per answer shown.
+    public func speech(for id: UUID) -> MessageSpeech {
+        if let s = speech[id] { return s }
+        let s = MessageSpeech()
+        s.phase = playback.phase(of: id)
+        speech[id] = s
+        return s
+    }
+
+    private func set(_ new: Playback) {
+        let old = playback
+        playback = new
+        for id in Set([old.messageId, new.messageId].compactMap { $0 }) { speech[id]?.phase = new.phase(of: id) }
     }
 }
 

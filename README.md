@@ -9,12 +9,17 @@ official Codex app-server. No API keys.
 - It explains code, Claude's last message, test failures and Jira tickets in plain language.
 - Microphone dictation and Read Aloud use on-device macOS speech.
 
-> Status: **Milestones M1–M8 are implemented.** You can build an installable app from source (see Install).
+> Status: **Milestones M1–M9 are implemented.** You can build an installable app from source (see Install).
 > The owner checklists in `docs/manual/` are still pending.
 >
 > M8 (0.8.0): redesigned sidebar, copy on every message, kept chat history, better context ranking, app icon
 > and a more natural Read Aloud voice. Chat history is stored locally in `companion.db` (secrets redacted). You
 > can turn it off or clear it in Settings › Privacy.
+>
+> M9 (0.9.0): smooth long chats (lazy list, cached parsing), rich answers (tables, task lists, scrolling code,
+> charts from validated data), narrow-panel layouts and listenable answers. Measurements: see §11 of
+> `docs/superpowers/specs/2026-11-05-m9-rich-ui-performance-design.md` (perf numbers measured at af5d7bf; the later
+> scroll fixes are checked there with harness drivers and an interleaved A/B).
 
 ## Docs
 

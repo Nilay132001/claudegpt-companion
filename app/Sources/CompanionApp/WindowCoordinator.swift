@@ -13,6 +13,7 @@ import SwiftUI
     private var following = false
     private var registered: HotkeySpec?
     private var resizeObserver: NSObjectProtocol?
+    private var resizeStartObserver: NSObjectProtocol?
     private var closeObserver: NSObjectProtocol?
     /// Called when the panel is hidden (hotkey) or closed: nothing keeps listening behind a hidden panel (spec §7.8).
     var onHide: (@MainActor () -> Void)?
@@ -23,17 +24,28 @@ import SwiftUI
     }
 
     func install(rootView: some View, onWidthChange: @escaping @MainActor (CGFloat) -> Void) {
-        let p = SidePanel(content: NSHostingView(rootView: rootView))
+        let hosting = NSHostingView(rootView: rootView)
+        // The panel's min/max size comes from SidePanel.contentMinSize/contentMaxSize. With the default options the
+        // hosting view re-measured the whole chat on every update to derive them (21% of streaming main-thread time).
+        hosting.sizingOptions = []
+        let p = SidePanel(content: hosting)
         panel = p
+        resizeStartObserver = NotificationCenter.default.addObserver(forName: NSWindow.willStartLiveResizeNotification, object: p, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.status.liveResizing = true }
+        }
         resizeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: p, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let p = self.panel else { return }
+                self.status.liveResizing = false
                 self.width = p.frame.width
                 onWidthChange(p.frame.width)
             }
         }
         closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.onHide?() }
+            MainActor.assumeIsolated {
+                self?.status.liveResizing = false // never left on if a didEndLiveResize was missed
+                self?.onHide?()
+            }
         }
         let claude = ClaudeWindowFollower.windowListBounds()
         if let screen = claude.flatMap(Self.screen(containing:)) ?? NSScreen.main {
@@ -49,6 +61,7 @@ import SwiftUI
     func toggle() {
         guard let p = panel else { return }
         if p.isVisible && p.isKeyWindow {
+            status.liveResizing = false
             p.orderOut(nil)
             onHide?()
         } else {

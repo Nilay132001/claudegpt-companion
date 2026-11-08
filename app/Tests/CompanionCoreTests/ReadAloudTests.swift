@@ -54,6 +54,13 @@ final class EndBox: Sendable {
         #expect(ReadAloudController.avRate(multiplier: 0) == ReadAloudController.avRate(multiplier: 0.5))
     }
 
+    @Test func aCachedRenderIsSpokenInsteadOfReRendering() {
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s, voices: { [] })
+        c.toggle(id: UUID(), markdown: "Ignored.", rendered: ReplyMarkdown.render("| a | b |\n|---|---|\n| 1 | 2 |", root: nil))
+        #expect(s.lastSegments.map(\.text) == ["A table with 1 row.", "1: 2."])
+    }
+
     @Test func playPauseResumeStop() {
         let s = FakeSynth()
         let c = ReadAloudController(synth: s)
@@ -199,5 +206,23 @@ final class EndBox: Sendable {
         for _ in 0..<200 where !box.tokens.withLock({ $0.contains(2) }) { try await Task.sleep(for: .milliseconds(50)) }
         #expect(box.tokens.withLock { $0.contains(2) })
         withExtendedLifetime(adapter) {}
+    }
+
+    @Test func playbackChangesTouchOnlyTheMessagesInvolved() {
+        let s = FakeSynth()
+        let c = ReadAloudController(synth: s)
+        let a = UUID(), b = UUID(), other = UUID()
+        let otherSpeech = c.speech(for: other)
+        let touched = Flag()
+        withObservationTracking { _ = otherSpeech.phase } onChange: { touched.set() }
+        c.play(id: a, markdown: "One.")
+        #expect(c.speech(for: a).phase == .playing)
+        c.toggle(id: a, markdown: "")
+        #expect(c.speech(for: a).phase == .paused)
+        c.play(id: b, markdown: "Two.")
+        #expect(c.speech(for: a).phase == .idle && c.speech(for: b).phase == .playing)
+        s.onEnd?(s.lastToken)
+        #expect(c.speech(for: b).phase == .idle)
+        #expect(!touched.on)
     }
 }

@@ -94,4 +94,39 @@ import Testing
         c.attach(id, threadId: "t", turnId: "t49")
         #expect(c.messages[1].text.count == Conversation.earlyEventCap)
     }
+
+    @Test func storedTurnsGetTheSameIdsOnEveryRestore() {
+        let turns = [TurnRecord(turnId: "h1", sessionId: "s1", threadId: "t1", question: "q1", answer: "a1"),
+                     TurnRecord(turnId: "h2", sessionId: "s1", threadId: "t1", question: "q2", answer: "a2")]
+        var a = Conversation()
+        a.restore(turns)
+        let first = a.messages.map(\.id)
+        a.restore(turns)
+        #expect(a.messages.map(\.id) == first)
+        var b = Conversation()
+        b.restore(turns)
+        #expect(b.messages.map(\.id) == first)
+        #expect(Set(first).count == 4)
+        #expect(first[0] == ChatMessage.storedID(turnId: "h1", role: .user))
+        #expect(first[1] == ChatMessage.storedID(turnId: "h1", role: .assistant))
+    }
+
+    @Test func storedIdsDependOnTurnAndRoleOnly() {
+        #expect(ChatMessage.storedID(turnId: "x", role: .user) == ChatMessage.storedID(turnId: "x", role: .user))
+        #expect(ChatMessage.storedID(turnId: "x", role: .user) != ChatMessage.storedID(turnId: "x", role: .assistant))
+        #expect(ChatMessage.storedID(turnId: "x", role: .user) != ChatMessage.storedID(turnId: "y", role: .user))
+        // RFC 4122 variant and the name-based version nibble.
+        let s = ChatMessage.storedID(turnId: "x", role: .user).uuidString
+        #expect(Array(s)[14] == "5")
+        #expect("89AB".contains(Array(s)[19]))
+    }
+
+    @Test func liveTurnsKeepTheirIdsAcrossARestore() {
+        var c = Conversation()
+        let a = c.begin(question: "live")
+        c.attach(a, threadId: "t1", turnId: "u9")
+        c.restore([TurnRecord(turnId: "u9", sessionId: "s1", threadId: "t1", question: "live", answer: "stored")])
+        #expect(c.messages.map(\.id).contains(a))
+        #expect(c.messages.count == 2)
+    }
 }

@@ -85,7 +85,17 @@ import Foundation
     func sessionsSync(_ sessionId: String) async throws -> SyncStatus {
         SyncStatus(state: "live", stats: SyncStats(records: 3, malformedLines: 1, unknownRecords: 0, droppedEvents: 0), lastPollAt: 1)
     }
-    func sessionsWorktree(_ sessionId: String) async throws -> WorktreeResolution? { calls.append("sessions.worktree"); return worktree }
+    /// When true, the next sessions.worktree suspends until `worktreeResume` is resumed (then answers `worktree`).
+    var worktreeGate = false
+    var worktreeResume: CheckedContinuation<Void, Never>?
+    func sessionsWorktree(_ sessionId: String) async throws -> WorktreeResolution? {
+        calls.append("sessions.worktree")
+        if worktreeGate {
+            worktreeGate = false
+            await withCheckedContinuation { worktreeResume = $0 }
+        }
+        return worktree
+    }
     var privacyError: DaemonError?
     func privacyGet() async throws -> PrivacyState {
         calls.append("privacy.get")

@@ -63,6 +63,9 @@ public enum CodeHighlighter {
 
         while i < chars.endIndex {
             let c = chars[i]
+            // Off the main actor, in a task the view cancels when it goes away: stop at a line boundary (final review
+            // minor 7) instead of running to the end for a view that no longer exists.
+            if c == "\n", Task.isCancelled { return [] }
             if slashComments, c == "/", peek(i) == "/" {
                 let end = chars[i...].firstIndex(of: "\n") ?? chars.endIndex
                 out.append((i..<end, .comment)); i = end; continue
