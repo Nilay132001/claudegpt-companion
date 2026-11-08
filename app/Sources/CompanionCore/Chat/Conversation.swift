@@ -25,6 +25,8 @@ public struct ChatMessage: Identifiable, Equatable, Sendable {
     public var activity: String?
     /// Set after hostBusy / turnBusy / hostNotReady: the same prepareId may be sent again ("Send again").
     public var retry: PendingSend?
+    /// When the question was sent (restored or live turns); nil for messages that predate this field.
+    public var sentAt: Date? = nil
     public var isRunning: Bool { role == .assistant && (status == .sending || status == .streaming) }
 }
 
@@ -50,6 +52,8 @@ public struct Conversation: Equatable, Sendable {
     private var itemText: [String: String] = [:]
     private var early: [String: [TurnEvent]] = [:]
     private var earlyOrder: [String] = []
+    /// How many messages at the front came from `restore` (they are replaced by the next restore).
+    private var restoredCount = 0
 
     public init() {}
 
@@ -57,10 +61,32 @@ public struct Conversation: Equatable, Sendable {
 
     @discardableResult
     public mutating func begin(question: String) -> UUID {
-        messages.append(ChatMessage(id: UUID(), role: .user, text: question, status: .done))
+        let now = Date()
+        messages.append(ChatMessage(id: UUID(), role: .user, text: question, status: .done, sentAt: now))
         let id = UUID()
-        messages.append(ChatMessage(id: id, role: .assistant, text: "", status: .sending))
+        messages.append(ChatMessage(id: id, role: .assistant, text: "", status: .sending, sentAt: now))
         return id
+    }
+
+    /// Puts the stored turns (oldest first) in front of the live messages. Replaces what an earlier restore added,
+    /// and skips turns this run already owns, so restoring twice never duplicates.
+    public mutating func restore(_ turns: [TurnRecord]) {
+        messages.removeFirst(min(restoredCount, messages.count))
+        var restored: [ChatMessage] = []
+        for t in turns where turnToMessage[t.turnId] == nil {
+            let at = Date(timeIntervalSince1970: t.sentAt / 1000)
+            restored.append(ChatMessage(id: UUID(), role: .user, text: t.question, status: .done, sentAt: at))
+            let status: ChatMessage.Status = switch t.status {
+            case "completed": .done
+            case "interrupted": .interrupted
+            case "failed", "abandoned": .failed(t.error ?? "The reply stopped.")
+            default: .failed("The reply did not finish.")
+            }
+            restored.append(ChatMessage(id: UUID(), role: .assistant, text: t.answer, status: status, threadId: t.threadId,
+                                        turnId: t.turnId, sentAt: at))
+        }
+        messages.insert(contentsOf: restored, at: 0)
+        restoredCount = restored.count
     }
 
     public mutating func attach(_ id: UUID, threadId: String, turnId: String) {

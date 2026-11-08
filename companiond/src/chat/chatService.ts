@@ -11,7 +11,7 @@ import { RpcError } from "../codex/rpc.ts";
 import { RepoRefusedError } from "../git/safeGit.ts";
 import { redact } from "../jail/redactor.ts";
 import type { LaunchSpec } from "../launch/seatbelt.ts";
-import type { SharingMode, Store } from "../store/store.ts";
+import { capText, MAX_ANSWER, MAX_CONTEXT_BLOCK, type SharingMode, type Store, type TurnRow, type TurnStatus } from "../store/store.ts";
 import type { SubagentUpdate } from "../transcript/subagents.ts";
 import type { TranscriptEvent } from "../transcript/parser.ts";
 import type { IsApproved, WorktreeResolution } from "../worktree/resolver.ts";
@@ -79,7 +79,11 @@ interface Open { threadId: string; root: string | null; gitCommonDir: string | n
 
 const MAX_QUESTION = 20_000;
 const MAX_SENT = 50;
+/** This run's turns kept in memory per session (spec §7.5: "View what was sent" works with history off). */
+const MAX_MEMORY_TURNS = 50;
 const MAX_EARLY = 32;
+const MAX_ANSWER_BUFFER = 64 * 1024;
+const ABANDONED_ERROR = "Codex restarted before this reply finished. Ask again.";
 const TRACKER_LABEL = "Subagent summary";
 
 /** Failures that happen before a turn starts and leave the prepare reusable until it expires. */
@@ -114,10 +118,11 @@ export class ChatService {
   #inFlight = new Set<string>();
   #pending = new Map<string, Pending>();
   /** turn/completed that arrived before turn/start answered (CodexHost emits it as it comes). */
-  #early = new Map<string, string>();
+  #early = new Map<string, { status: string; error: string | null }>();
+  /** Reply text per turn, by item in first-seen order (the app joins items with a blank line). */
+  #answers = new Map<string, { order: string[]; texts: Map<string, string>; size: number }>();
   #repoNotes = new Map<string, string>();
   #subagents = new Map<string, SubagentTracker>();
-  #sent = new Map<string, SentRecord[]>();
   #open = new Map<string, Open>();
   #closeAfterTurn = new Set<string>();
   /** One send at a time per session, so two first sends cannot open two threads. */
@@ -128,12 +133,23 @@ export class ChatService {
   /** Bumped by every approval revoke; a send that opened its thread across a revoke is aborted. */
   #revokeGen = 0;
   #listeners = new Set<(e: ChatEvent) => void>();
+  /** This run's turns per session, newest last, redacted like companion.db rows. Kept whatever the history setting,
+   * never written anywhere: they answer "what was sent" when history is off or a store write failed. */
+  #memory = new Map<string, TurnRow[]>();
+  /** Turns whose companion.db insert succeeded. */
+  #stored = new Set<string>();
 
   constructor(d: ChatServiceDeps) {
     this.#d = d;
     this.#now = d.now ?? Date.now;
+    try {
+      d.store.abandonRunningTurns();
+    } catch {
+      // history is best effort
+    }
     d.host.on((e) => {
-      if (e.type === "turnCompleted") this.#onTurnCompleted(e.threadId, e.turnId, e.status);
+      if (e.type === "delta") this.#onDelta(e.turnId, e.itemId, e.text);
+      else if (e.type === "turnCompleted") this.#onTurnCompleted(e.threadId, e.turnId, e.status, e.error);
     });
   }
 
@@ -220,7 +236,73 @@ export class ChatService {
   }
 
   sent(sessionId: string): SentRecord[] {
-    return [...(this.#sent.get(sessionId) ?? [])];
+    return this.turns(sessionId, MAX_SENT).turns.map((t) => ({
+      sessionId: t.sessionId, threadId: t.threadId, turnId: t.turnId, contextBlock: t.contextBlock, question: t.question, sentAt: t.sentAt,
+    }));
+  }
+
+  /** The turns of the session's current thread, oldest first, at most `limit`. History on: companion.db rows, plus
+   * this run's turns whose store write failed. History off (or the store unreadable): this run's turns, from memory. */
+  turns(sessionId: string, limit = 200): { threadId: string | null; turns: TurnRow[] } {
+    let threadId: string | null;
+    try {
+      threadId = this.#d.store.getThread(sessionId);
+    } catch {
+      return { threadId: null, turns: [] };
+    }
+    if (!threadId) return { threadId: null, turns: [] };
+    const memory = (this.#memory.get(sessionId) ?? []).filter((t) => t.threadId === threadId).map((t) => ({ ...t, items: [...t.items] }));
+    let rows: TurnRow[];
+    try {
+      if (!this.#d.store.historyEnabled()) rows = memory;
+      else {
+        const stored = this.#d.store.turnsForThread(threadId, limit);
+        const ids = new Set(stored.map((t) => t.turnId));
+        const missing = memory.filter((t) => !this.#stored.has(t.turnId) && !ids.has(t.turnId));
+        rows = [...stored, ...missing].sort((a, b) => a.sentAt - b.sentAt || (a.turnId < b.turnId ? -1 : a.turnId > b.turnId ? 1 : 0));
+      }
+    } catch {
+      rows = memory;
+    }
+    return { threadId, turns: rows.slice(-limit) };
+  }
+
+  /** history.clear: this run's in-memory turns go too (every thread when `threadId` is null). */
+  forgetTurns(threadId: string | null): void {
+    for (const [sessionId, list] of this.#memory) {
+      const keep = threadId === null ? [] : list.filter((t) => t.threadId !== threadId);
+      for (const t of list) if (!keep.includes(t)) this.#stored.delete(t.turnId);
+      if (keep.length === 0) this.#memory.delete(sessionId);
+      else this.#memory.set(sessionId, keep);
+    }
+  }
+
+  /** "New chat": the next question starts a new Codex thread. The old conversation stays in history. */
+  async newChat(sessionId: string): Promise<void> {
+    const check = () => {
+      const busy = this.#sending.has(sessionId)
+        || [...this.#inFlight].some((id) => this.#prepared.get(id)?.sessionId === sessionId)
+        || [...this.#pending.values()].some((p) => p.sessionId === sessionId);
+      const threadId = this.#d.store.getThread(sessionId);
+      if (busy || (threadId !== null && this.#d.host.activeTurn(threadId) !== null)) throw new TurnBusyError();
+    };
+    check(); // refuse now: a queued send would otherwise hold this call behind it
+    await this.#queued(sessionId, async () => {
+      check();
+      const o = this.#open.get(sessionId);
+      if (o) await this.#close(sessionId, o);
+      this.#d.store.clearThread(sessionId);
+      this.#d.store.clearCursor(sessionId);
+      this.#repoNotes.delete(sessionId);
+      this.#subagents.delete(sessionId);
+      // An unsent prepare of the old chat must not restore the old cursor into the new one.
+      for (const [id, p] of this.#prepared) if (p.sessionId === sessionId && !this.#inFlight.has(id)) this.#prepared.delete(id);
+    });
+  }
+
+  /** Test aid: how many turns have a reply buffer. */
+  answerBufferCount(): number {
+    return this.#answers.size;
   }
 
   /** Turns CodexHost no longer runs although no turn/completed came (sign-in replaced every process, the host
@@ -231,6 +313,7 @@ export class ChatService {
       if (this.#d.host.activeTurn(p.threadId) === turnId) continue;
       this.#pending.delete(turnId);
       this.#closeAfterTurn.delete(p.threadId);
+      this.#finishTurn(turnId, "abandoned", ABANDONED_ERROR);
       out.push({ sessionId: p.sessionId, threadId: p.threadId, turnId });
     }
     return out;
@@ -289,14 +372,12 @@ export class ChatService {
         sessionId: p.sessionId, threadId, cursor: p.preview?.cursorAfter ?? null,
         subagents: p.preview ? sentSubagents(p.preview, removeIds, this.#d.caps) : [], repoNote: p.repoNote,
       };
-      const list = this.#sent.get(p.sessionId) ?? [];
-      list.push({ sessionId: p.sessionId, threadId, turnId, contextBlock, question: p.question, sentAt: this.#now() });
-      this.#sent.set(p.sessionId, list.slice(-MAX_SENT));
+      this.#recordTurn(p, removeIds, threadId, turnId, contextBlock);
       const early = this.#early.get(turnId);
       this.#pending.set(turnId, pending);
       if (early !== undefined) {
         this.#early.delete(turnId);
-        this.#onTurnCompleted(threadId, turnId, early);
+        this.#onTurnCompleted(threadId, turnId, early.status, early.error);
       }
       if (this.#interruptAfterStart.delete(p.sessionId)) void this.#d.host.interrupt(threadId).catch(() => undefined);
       return { threadId, turnId };
@@ -398,7 +479,68 @@ export class ChatService {
     }
   }
 
-  #onTurnCompleted(threadId: string, turnId: string, status: string): void {
+  #recordTurn(p: PreparedInternal, removeIds: ReadonlySet<string>, threadId: string, turnId: string, contextBlock: string): void {
+    const turn = {
+      turnId, sessionId: p.sessionId, threadId, sessionTitle: p.sessionTitle, mode: p.mode, question: p.question, contextBlock,
+      items: (p.preview?.items ?? []).filter((i) => !removeIds.has(i.id)).map((i) => ({ kind: i.kind, label: i.label, text: i.text, redactions: i.redactions })),
+      omitted: p.preview?.omitted ?? 0, sentAt: this.#now(),
+    };
+    const list = this.#memory.get(p.sessionId) ?? [];
+    list.push({
+      ...turn, question: redact(turn.question).text, contextBlock: capText(redact(contextBlock).text, MAX_CONTEXT_BLOCK),
+      answer: "", status: "running", error: null, completedAt: null,
+    });
+    for (const old of list.splice(0, Math.max(0, list.length - MAX_MEMORY_TURNS))) this.#stored.delete(old.turnId);
+    this.#memory.set(p.sessionId, list);
+    try {
+      if (!this.#d.store.historyEnabled()) return;
+      this.#d.store.insertTurn(turn);
+      this.#stored.add(turnId);
+    } catch {
+      // a history write failure must never break chatting
+    }
+  }
+
+  #onDelta(turnId: string, itemId: string, text: string): void {
+    let a = this.#answers.get(turnId);
+    if (!a) {
+      a = { order: [], texts: new Map(), size: 0 };
+      this.#answers.set(turnId, a);
+      // Buffers of turns that never started here are bounded; a started turn's buffer is kept until it ends.
+      for (const k of this.#answers.keys()) {
+        if (this.#answers.size <= MAX_EARLY) break;
+        if (!this.#pending.has(k) && k !== turnId) this.#answers.delete(k);
+      }
+    }
+    if (a.size >= MAX_ANSWER_BUFFER) return;
+    const room = MAX_ANSWER_BUFFER - a.size;
+    const part = text.length > room ? text.slice(0, room) : text;
+    if (!a.texts.has(itemId)) a.order.push(itemId);
+    a.texts.set(itemId, (a.texts.get(itemId) ?? "") + part);
+    a.size += part.length;
+  }
+
+  #finishTurn(turnId: string, status: TurnStatus, error: string | null): void {
+    const a = this.#answers.get(turnId);
+    this.#answers.delete(turnId);
+    const answer = a ? a.order.map((id) => a.texts.get(id) ?? "").join("\n\n") : "";
+    for (const list of this.#memory.values()) {
+      const t = list.find((x) => x.turnId === turnId);
+      if (t && t.status === "running") {
+        t.answer = capText(redact(answer).text, MAX_ANSWER);
+        t.status = status;
+        t.error = error === null ? null : redact(error).text;
+        t.completedAt = this.#now();
+      }
+    }
+    try {
+      this.#d.store.finishTurn(turnId, { answer, status, error });
+    } catch {
+      // a history write failure must never break chatting
+    }
+  }
+
+  #onTurnCompleted(threadId: string, turnId: string, status: string, error: string | null): void {
     if (this.#closeAfterTurn.delete(threadId)) {
       for (const [sessionId, o] of this.#open) {
         if (o.threadId === threadId) void this.#close(sessionId, o).catch(() => undefined);
@@ -406,7 +548,7 @@ export class ChatService {
     }
     const p = this.#pending.get(turnId);
     if (!p) {
-      this.#early.set(turnId, status);
+      this.#early.set(turnId, { status, error });
       for (const k of this.#early.keys()) {
         if (this.#early.size <= MAX_EARLY) break;
         this.#early.delete(k);
@@ -414,6 +556,8 @@ export class ChatService {
       return;
     }
     this.#pending.delete(turnId);
+    const rowStatus: TurnStatus = status === "completed" ? "completed" : status === "interrupted" ? "interrupted" : "failed";
+    this.#finishTurn(turnId, rowStatus, rowStatus === "failed" ? (error ?? "The reply did not finish.") : null);
     if (status !== "completed") return; // spec §4.7: the cursor moves only when the turn completes
     if (p.cursor && !this.#behindCursor(p.sessionId, p.cursor)) this.#d.store.setCursor(p.sessionId, p.cursor);
     this.#tracker(p.sessionId).markSent(p.subagents);

@@ -125,6 +125,56 @@ import Foundation
     }
     func chatInterrupt(sessionId: String) async throws { calls.append("chat.interrupt:\(sessionId)") }
     func chatSent(sessionId: String) async throws -> [SentRecord] { sent }
+    // History (M8): `turnsStore` is the daemon's stored turns, oldest first.
+    var turnsStore: [TurnRecord] = []
+    var historyEnabled = true
+    /// When true, the next history.turns(sessionId:) suspends until `gateResume` is resumed (then answers from the store as it is).
+    var turnsGate = false
+    var gateResume: CheckedContinuation<Void, Never>?
+    var historyListError: DaemonError?
+    var newChatError: DaemonError?
+    func historyList() async throws -> HistoryList {
+        calls.append("history.list")
+        if let e = historyListError { throw e }
+        var byThread: [String: [TurnRecord]] = [:]
+        for t in turnsStore { byThread[t.threadId, default: []].append(t) }
+        let chats = byThread.values.map { ts in
+            ChatSummary(sessionId: ts[0].sessionId, threadId: ts[0].threadId, sessionTitle: ts[0].sessionTitle,
+                        firstQuestion: ts[0].question, turns: ts.count, startedAt: ts[0].sentAt, lastAt: ts.last!.sentAt)
+        }.sorted { $0.lastAt > $1.lastAt }
+        var current: [String: String] = [:]
+        for t in turnsStore { current[t.sessionId] = t.threadId }
+        return HistoryList(chats: chats, currentThreads: current, enabled: historyEnabled)
+    }
+    func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns {
+        calls.append("history.turns:session:\(sessionId)" + (limit.map { ":limit:\($0)" } ?? ""))
+        if turnsGate {
+            turnsGate = false
+            await withCheckedContinuation { gateResume = $0 }
+            let mine = turnsStore.filter { $0.sessionId == sessionId }
+            return HistoryTurns(threadId: mine.last?.threadId, turns: Array(mine.suffix(limit ?? 200)))
+        }
+        let mine = turnsStore.filter { $0.sessionId == sessionId }
+        guard let thread = mine.last?.threadId else { return HistoryTurns(threadId: nil, turns: []) }
+        return HistoryTurns(threadId: thread, turns: Array(mine.filter { $0.threadId == thread }.suffix(limit ?? 200)))
+    }
+    func historyTurns(threadId: String) async throws -> HistoryTurns {
+        calls.append("history.turns:thread:\(threadId)")
+        return HistoryTurns(threadId: threadId, turns: turnsStore.filter { $0.threadId == threadId })
+    }
+    func historyClear(threadId: String?) async throws {
+        calls.append("history.clear:\(threadId ?? "null")")
+        turnsStore.removeAll { threadId == nil || $0.threadId == threadId }
+    }
+    func historySetEnabled(_ enabled: Bool) async throws -> Bool {
+        calls.append("history.setEnabled:\(enabled)")
+        historyEnabled = enabled
+        return enabled
+    }
+    func chatNewChat(sessionId: String) async throws {
+        calls.append("chat.newChat:\(sessionId)")
+        if let e = newChatError { throw e }
+    }
     func settingsGet(_ key: String) async throws -> String? {
         guard key.wholeMatch(of: Self.storeKey) != nil else { throw DaemonError(code: DaemonErrorCode.invalidParams, message: "UI setting keys look like ui.<name>.") }
         return stored[key]

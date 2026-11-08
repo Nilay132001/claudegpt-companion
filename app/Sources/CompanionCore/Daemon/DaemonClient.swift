@@ -78,6 +78,7 @@ public actor DaemonClient {
 private struct Empty: Decodable, Sendable {}
 private struct AuthLink: Decodable, Sendable { let authUrl: String }
 private struct ModeResult: Decodable, Sendable { let sharingMode: SharingMode }
+private struct EnabledResult: Decodable, Sendable { let enabled: Bool }
 private struct SettingValue: Decodable, Sendable { let value: String? }
 
 extension DaemonClient: DaemonAPI {
@@ -136,6 +137,24 @@ extension DaemonClient: DaemonAPI {
     }
     public func chatSent(sessionId: String) async throws -> [SentRecord] {
         try await call("chat.sent", .object(["sessionId": .string(sessionId)]), as: [SentRecord].self)
+    }
+    public func historyList() async throws -> HistoryList { try await call("history.list", as: HistoryList.self) }
+    public func historyTurns(sessionId: String, limit: Int?) async throws -> HistoryTurns {
+        var params: [String: JSONValue] = ["sessionId": .string(sessionId)]
+        if let limit { params["limit"] = .number(Double(limit)) }
+        return try await call("history.turns", .object(params), as: HistoryTurns.self)
+    }
+    public func historyTurns(threadId: String) async throws -> HistoryTurns {
+        try await call("history.turns", .object(["threadId": .string(threadId)]), as: HistoryTurns.self)
+    }
+    public func historyClear(threadId: String?) async throws {
+        _ = try await call("history.clear", .object(["threadId": threadId.map(JSONValue.string) ?? .null]), as: Empty.self)
+    }
+    public func historySetEnabled(_ enabled: Bool) async throws -> Bool {
+        try await call("history.setEnabled", .object(["enabled": .bool(enabled)]), as: EnabledResult.self).enabled
+    }
+    public func chatNewChat(sessionId: String) async throws {
+        _ = try await call("chat.newChat", .object(["sessionId": .string(sessionId)]), as: Empty.self)
     }
     public func settingsGet(_ key: String) async throws -> String? {
         try await call("settings.get", .object(["key": .string(key)]), as: SettingValue.self).value

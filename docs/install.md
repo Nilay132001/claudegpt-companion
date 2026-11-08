@@ -33,9 +33,9 @@ What each one prints when it worked:
 
 | Command | Last line |
 |---------|-----------|
-| `scripts/build-app.sh` | `built and verified: app/build/ClaudeGPT Companion.app (version 0.7.0, identity: -)`. Just before it: `codex: N Mach-O files verified`. |
+| `scripts/build-app.sh` | `built and verified: app/build/ClaudeGPT Companion.app (version 0.8.0, identity: -)`. Just before it: `codex: N Mach-O files verified`. |
 | `scripts/smoke-bundle.sh` | `smoke-bundle: OK` |
-| `scripts/package-app.sh` | `packaged: app/build/ClaudeGPT-Companion-0.7.0.dmg` |
+| `scripts/package-app.sh` | `packaged: app/build/ClaudeGPT-Companion-0.8.0.dmg` |
 
 Notes:
 
@@ -52,7 +52,7 @@ Notes:
 ## 3. Install
 
 1. Quit a running copy of ClaudeGPT Companion.
-2. Open `app/build/ClaudeGPT-Companion-0.7.0.dmg`.
+2. Open `app/build/ClaudeGPT-Companion-0.8.0.dmg`.
 3. Drag the app onto Applications. Replace the old copy if asked.
 4. Eject the disk image.
 

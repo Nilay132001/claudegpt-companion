@@ -6,7 +6,7 @@ import { HostBusyError, TurnBusyError, type HostEvent, type HostState, type Jira
 import { JiraService } from "../../src/jira/jiraService.ts";
 import { RpcError } from "../../src/codex/rpc.ts";
 import { DisabledHost } from "../../src/daemon/disabledHost.ts";
-import { ABANDONED_STATUS, buildHandlers, toDaemonError, wireEvents, type DaemonBridge, type DaemonDeps, type DaemonHost } from "../../src/daemon/handlers.ts";
+import { ABANDONED_STATUS, buildHandlers, capTurnsResponse, MAX_HISTORY_TURNS_BYTES, toDaemonError, wireEvents, type DaemonBridge, type DaemonDeps, type DaemonHost } from "../../src/daemon/handlers.ts";
 import { DAEMON_PROTOCOL_VERSION, ErrorCodes, METHODS } from "../../src/daemon/protocol.ts";
 import { Privacy } from "../../src/privacy/privacy.ts";
 import { Store } from "../../src/store/store.ts";
@@ -37,6 +37,10 @@ class FakeHost implements DaemonHost {
     this.latched = detail;
     this.#active.clear();
     this.set({ state: "failed", detail: `Security check failed: ${detail}` });
+  }
+  finishTurn(threadId: string, turnId: string): void {
+    this.#active.delete(threadId);
+    this.emit({ type: "turnCompleted", threadId, turnId, status: "completed", error: null });
   }
   signedInAgain(): void {
     this.#active.clear(); // every process replaced, open threads closed
@@ -462,4 +466,118 @@ test("shutdown calls the deps", async () => {
   const x = deps();
   await buildHandlers(x.d)["daemon.shutdown"]!({});
   assert.equal(x.shut(), 1);
+});
+
+test("M8: protocol lists the history methods and chat.newChat", () => {
+  for (const m of ["history.list", "history.turns", "history.clear", "history.setEnabled", "chat.newChat"]) assert.ok((METHODS as readonly string[]).includes(m), m);
+});
+
+test("M8: history.list, turns, clear, setEnabled and chat.newChat", async () => {
+  const host = new FakeHost();
+  const { d, store } = deps({ host, mode: "automatic" });
+  const h = buildHandlers(d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q1" });
+  const sent: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  host.emit({ type: "delta", threadId: sent.threadId, turnId: sent.turnId, itemId: "i", text: "answer" });
+  host.finishTurn(sent.threadId, sent.turnId);
+  const l: any = await h["history.list"]!({});
+  assert.equal(l.enabled, true);
+  assert.deepEqual(l.currentThreads, { s1: sent.threadId });
+  assert.equal(l.chats.length, 1);
+  assert.equal(l.chats[0].threadId, sent.threadId);
+  const byThread: any = await h["history.turns"]!({ threadId: sent.threadId });
+  assert.equal(byThread.threadId, sent.threadId);
+  assert.equal(byThread.turns[0].answer, "answer");
+  const bySession: any = await h["history.turns"]!({ sessionId: "s1" });
+  assert.deepEqual(bySession.turns.map((t: any) => t.turnId), [sent.turnId]);
+  assert.deepEqual(await h["history.turns"]!({ sessionId: "s2" }), { threadId: null, turns: [] });
+  for (const bad of [{}, { threadId: "t", sessionId: "s1" }]) {
+    await assert.rejects(h["history.turns"]!(bad), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+  }
+  assert.deepEqual(await h["chat.sent"]!({ sessionId: "s1" }).then((r: any) => r.map((x: any) => x.question)), ["q1"]);
+  assert.deepEqual(await h["chat.newChat"]!({ sessionId: "s1" }), {});
+  assert.equal(store.getThread("s1"), null);
+  assert.deepEqual((await h["history.list"]!({}) as any).currentThreads, {});
+  assert.deepEqual(await h["history.setEnabled"]!({ enabled: false }), { enabled: false });
+  assert.equal(store.historyEnabled(), false);
+  await assert.rejects(h["history.setEnabled"]!({ enabled: "no" }), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+  assert.deepEqual(await h["history.clear"]!({ threadId: sent.threadId }), { deleted: 1 });
+  assert.deepEqual(await h["history.clear"]!({ threadId: null }), { deleted: 0 });
+  await assert.rejects(h["history.clear"]!({}), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams);
+});
+
+test("M8: chat.newChat while a reply runs maps to turnBusy", async () => {
+  const host = new FakeHost();
+  const { d } = deps({ host, mode: "automatic" });
+  const h = buildHandlers(d);
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "q" });
+  await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  await assert.rejects(h["chat.newChat"]!({ sessionId: "s1" }), (e: any) => toDaemonError(e).code === ErrorCodes.turnBusy);
+});
+
+test("M8: history.turns takes an optional limit from 1 to 200", async () => {
+  const host = new FakeHost();
+  const { d } = deps({ host, mode: "automatic" });
+  const h = buildHandlers(d);
+  const ids: string[] = [];
+  for (const q of ["q1", "q2", "q3"]) {
+    const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: q });
+    const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+    host.finishTurn(s.threadId, s.turnId);
+    ids.push(s.turnId);
+  }
+  const one: any = await h["history.turns"]!({ sessionId: "s1", limit: 1 });
+  assert.deepEqual(one.turns.map((t: any) => t.turnId), [ids[2]]);
+  const two: any = await h["history.turns"]!({ threadId: one.threadId, limit: 2 });
+  assert.deepEqual(two.turns.map((t: any) => t.turnId), ids.slice(1));
+  const all: any = await h["history.turns"]!({ sessionId: "s1" });
+  assert.equal(all.turns.length, 3);
+  for (const limit of [0, 201, 1.5, "1", null]) {
+    await assert.rejects(h["history.turns"]!({ sessionId: "s1", limit }), (e: any) => toDaemonError(e).code === ErrorCodes.invalidParams, String(limit));
+  }
+});
+
+test("M8: history.turns stays under 4 MB of JSON, keeping the newest turns", async () => {
+  const { d, store } = deps();
+  const h = buildHandlers(d);
+  // ~144 KB per turn (64 KB answer, 16 KB context, 32 KB items, 20 KB question): 60 turns is well over 4 MB.
+  for (let i = 0; i < 60; i++) {
+    const turnId = `t${String(i).padStart(3, "0")}`;
+    store.insertTurn({
+      turnId, sessionId: "s1", threadId: "thr-big", sessionTitle: null, mode: "automatic", question: "q".repeat(20_000),
+      contextBlock: "c".repeat(16 * 1024), items: [{ kind: "user", label: "You", text: "i".repeat(30 * 1024), redactions: 0 }], omitted: 0, sentAt: i,
+    });
+    store.finishTurn(turnId, { answer: "a".repeat(64 * 1024), status: "completed", error: null });
+  }
+  const r: any = await h["history.turns"]!({ threadId: "thr-big" });
+  const bytes = Buffer.byteLength(JSON.stringify(r), "utf8");
+  assert.ok(bytes <= MAX_HISTORY_TURNS_BYTES, `${bytes}`);
+  assert.ok(r.turns.length > 1 && r.turns.length < 60, `${r.turns.length}`);
+  assert.equal(r.turns.at(-1).turnId, "t059"); // the newest are kept
+  assert.equal(r.turns[0].turnId, `t${String(60 - r.turns.length).padStart(3, "0")}`); // contiguous, oldest dropped
+  // A single turn larger than the cap is still returned.
+  const big = { threadId: "x", turns: [{ text: "z".repeat(100) }] };
+  assert.deepEqual(capTurnsResponse(big, 10), big);
+  const two = { threadId: "x", turns: [{ text: "old".repeat(30) }, { text: "new" }] };
+  assert.deepEqual(capTurnsResponse(two, 60).turns, [{ text: "new" }]);
+});
+
+test("M8: with history off, history.turns {sessionId} and chat.sent show this run's turns from memory", async () => {
+  const host = new FakeHost();
+  const { d, store } = deps({ host, mode: "automatic" });
+  const h = buildHandlers(d);
+  await h["history.setEnabled"]!({ enabled: false });
+  const p: any = await h["chat.prepare"]!({ sessionId: "s1", question: "what was sent?" });
+  const s: any = await h["chat.send"]!({ prepareId: p.prepareId, removeItemIds: [] });
+  host.emit({ type: "delta", threadId: s.threadId, turnId: s.turnId, itemId: "i", text: "reply" });
+  host.finishTurn(s.threadId, s.turnId);
+  const r: any = await h["history.turns"]!({ sessionId: "s1", limit: 1 });
+  assert.equal(r.threadId, s.threadId);
+  assert.deepEqual(r.turns.map((t: any) => [t.question, t.answer, t.status]), [["what was sent?", "reply", "completed"]]);
+  assert.ok(r.turns[0].contextBlock.length > 0);
+  assert.deepEqual((await h["chat.sent"]!({ sessionId: "s1" }) as any).map((x: any) => x.turnId), [s.turnId]);
+  assert.deepEqual(store.turnsForThread(s.threadId), []); // nothing in companion.db
+  assert.deepEqual((await h["history.list"]!({}) as any).chats, []);
+  assert.deepEqual(await h["history.clear"]!({ threadId: null }), { deleted: 0 });
+  assert.deepEqual((await h["history.turns"]!({ sessionId: "s1" }) as any).turns, []);
 });

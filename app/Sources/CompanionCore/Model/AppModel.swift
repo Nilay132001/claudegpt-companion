@@ -16,16 +16,6 @@ public struct PendingPreview: Identifiable, Equatable, Sendable {
     public var id: String { prepared.prepareId }
 }
 
-public enum SentView: Identifiable, Equatable, Sendable {
-    case found(SentRecord), notKept(turnId: String)
-    public var id: String {
-        switch self {
-        case .found(let r): r.turnId
-        case .notKept(let t): t
-        }
-    }
-}
-
 /// App state and every action that reaches companiond. Sends only a prepareId from chat.prepare in the same flow.
 @MainActor @Observable
 public final class AppModel {
@@ -36,7 +26,7 @@ public final class AppModel {
     public private(set) var host: HostState = .starting
     public private(set) var auth: AuthState?
     public private(set) var authError: String?
-    public private(set) var threadNotices: [String: String] = [:]
+    public internal(set) var threadNotices: [String: String] = [:]
     /// Set after a revoke whose threads are still finishing (pendingClose > 0).
     public private(set) var revokeNotice: String?
     public private(set) var snapshot: SessionsSnapshot?
@@ -46,14 +36,23 @@ public final class AppModel {
     public private(set) var repoBanners: [String: String] = [:]
     public private(set) var alerts: [SecurityAlert] = []
     public private(set) var syncError: String?
-    public private(set) var conversations: [String: Conversation] = [:]
+    public internal(set) var conversations: [String: Conversation] = [:]
     public private(set) var settings = UISettings()
+    /// Stored turns by turnId: filled from restore and refreshed after each reply; feeds "Context sent".
+    public internal(set) var records: [String: TurnRecord] = [:]
+    public internal(set) var history: HistoryList?
+    public internal(set) var pastChat: PastChat?
+    /// Sessions whose stored chat is being read (the view shows a loading state instead of the empty state).
+    public internal(set) var loadingChats: Set<String> = []
     public var draft = ""
     public var preview: PendingPreview?
-    public var sentView: SentView?
     public var errorMessage: String?
     public internal(set) var jira: JiraStatus?
     public internal(set) var jiraNote: String?
+    /// Sessions whose stored chat was loaded on this connection.
+    @ObservationIgnored var loadedChats: Set<String> = []
+    @ObservationIgnored public internal(set) var chatLoad: Task<Void, Never>?
+    @ObservationIgnored public internal(set) var recordLoad: Task<Void, Never>?
     @ObservationIgnored let jiraStore: any JiraSecretStore
 
     /// `byUser` is true only for a change made in this run (setSetting), false when settings are loaded from companiond.
@@ -64,7 +63,13 @@ public final class AppModel {
     @ObservationIgnored private let connector: Connector
     @ObservationIgnored private var current: Connection?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
-    @ObservationIgnored private var generation = 0
+    @ObservationIgnored var generation = 0
+    /// Bumped by newChat / clearHistory / session changes: a stored-chat read that started under an older token is dropped.
+    @ObservationIgnored var chatTokens: [String: Int] = [:]
+    @ObservationIgnored var pastToken = 0
+    /// Sends between chat.send being called and answering; a restore must not run in that window.
+    @ObservationIgnored var sendsInFlight: [String: Int] = [:]
+    @ObservationIgnored var reloadAfterSend: Set<String> = []
     /// False until this connection has told us the host state (host.status or host.changed). Until then a security
     /// stop cannot be ruled out, so restartDaemon reads the state first.
     @ObservationIgnored private var hostKnown = false
@@ -77,7 +82,7 @@ public final class AppModel {
         self.jiraStore = jiraStore
     }
 
-    private var api: (any DaemonAPI)? { current?.api }
+    var api: (any DaemonAPI)? { current?.api }
     var currentAPI: (any DaemonAPI)? { current?.api }
 
     // MARK: Lifecycle
@@ -86,6 +91,10 @@ public final class AppModel {
         connection = .connecting
         generation += 1
         hostKnown = false
+        loadedChats = []
+        chatTokens = [:]
+        sendsInFlight = [:]
+        reloadAfterSend = []
         let gen = generation
         let c: Connection
         do {
@@ -115,6 +124,7 @@ public final class AppModel {
             apply(snapshot: try await c.api.sessionsSnapshot())
             await loadJira(c.api)
             if host.isReady { await loadAuth() }
+            await chatLoad?.value
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -191,7 +201,9 @@ public final class AppModel {
     private func apply(snapshot new: SessionsSnapshot) {
         let old = snapshot?.selection.sessionId
         snapshot = new
-        guard let id = new.selection.sessionId, id != old || worktrees[id] == nil else { return }
+        guard let id = new.selection.sessionId else { return }
+        if id != old || !loadedChats.contains(id) { chatLoad = Task { await self.loadCurrentChat(sessionId: id) } }
+        guard id != old || worktrees[id] == nil else { return }
         detailLoad = Task { await self.loadDetail(id) }
     }
 
@@ -215,6 +227,7 @@ public final class AppModel {
             _ = try await api.sessionsPin(sessionId)
             apply(snapshot: try await api.sessionsSnapshot())
             await detailLoad?.value
+            await chatLoad?.value
         } catch { errorMessage = Self.describe(error) }
     }
 
@@ -247,6 +260,8 @@ public final class AppModel {
             errorMessage = "The question is too long. Keep it under 20,000 characters."
             return false
         }
+        pastChat = nil // a past chat is only a view: asking always goes to the current chat
+        pastToken += 1
         do {
             let p = try await api.chatPrepare(sessionId: sid, question: q)
             // Second guard: an Ask-mode prepare always goes through the sheet, whatever needsConfirm says.
@@ -300,6 +315,14 @@ public final class AppModel {
 
     private func send(sessionId sid: String, _ s: PendingSend, question: String, attempt: Int = 0) async {
         guard let api else { return }
+        sendsInFlight[sid, default: 0] += 1
+        defer {
+            sendsInFlight[sid, default: 1] -= 1
+            if sendsInFlight[sid] == 0 {
+                sendsInFlight[sid] = nil
+                if reloadAfterSend.remove(sid) != nil { chatLoad = Task { await self.loadCurrentChat(sessionId: sid) } }
+            }
+        }
         var conv = conversations[sid] ?? Conversation()
         let mid = conv.begin(question: question)
         conversations[sid] = conv
@@ -340,13 +363,6 @@ public final class AppModel {
     public func interrupt() async {
         guard let api, let sid = selectedSessionId else { return }
         do { try await api.chatInterrupt(sessionId: sid) } catch { errorMessage = Self.describe(error) }
-    }
-
-    public func viewSent(_ message: ChatMessage) async {
-        guard let api, let turn = message.turnId,
-              let sid = conversations.first(where: { $0.value.owns(turnId: turn) })?.key else { return }
-        let records = (try? await api.chatSent(sessionId: sid)) ?? []
-        sentView = records.first { $0.turnId == turn }.map { SentView.found($0) } ?? .notKept(turnId: turn)
     }
 
     private func maybeAutoPlay(_ sid: String, turnId: String) {
@@ -456,6 +472,7 @@ public final class AppModel {
         case .turnCompleted(let t):
             if let sid = route(t.sessionId, .completed(turnId: t.turnId, status: t.status, error: t.error)) {
                 maybeAutoPlay(sid, turnId: t.turnId)
+                refreshRecords(sessionId: sid)
             }
             if let id = selectedSessionId { detailLoad = Task { await self.loadDetail(id) } } // live branch after a turn
         case .securityAlert(let a):

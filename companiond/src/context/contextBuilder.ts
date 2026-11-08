@@ -29,7 +29,8 @@ export const CURSOR_RESET_NOTE = "Cursor reset: Claude's transcript was rewritte
  * repository line, the repository note, and the "left out" note. Each of those is fitted to its share.
  */
 const HEADER_BYTES = { title: 256, repo: 512, repoNote: 192 } as const;
-const OMITTED_NOTE_BYTES = 96;
+// Longest note: "Note: 9999 item(s) left out (40-item limit) (kept ...; left out: 9999 user, 9999 assistant, 9999 subagent, 9999 tool).\n" is ~160 bytes.
+const OMITTED_NOTE_BYTES = 200;
 const OPEN_TAG = '<untrusted_data source="claude-session">';
 const CLOSE_TAG = "</untrusted_data>";
 const RESERVED_BYTES = OPEN_TAG.length + 1 + HEADER_BYTES.title + 1 + HEADER_BYTES.repo + 1 + HEADER_BYTES.repoNote + 1 + CLOSE_TAG.length + OMITTED_NOTE_BYTES;
@@ -38,6 +39,11 @@ type Cut = "head" | "tail";
 /** One field before redaction. `max` is in characters; it is applied after redaction. */
 interface Part { s: string; max: number; cut: Cut }
 interface Draft { kind: PreviewItemKind; label: Part; text: Part[]; redacted: number }
+
+/** Keep priority under the byte cap (plan R5): 1 is kept first. Items are still emitted in transcript order. */
+export const TIER: Record<PreviewItemKind, 1 | 2 | 3 | 4> = {
+  user: 1, assistant: 2, failure: 2, command: 3, file_edit: 3, folder: 3, subagent: 4,
+};
 
 const part = (s: string, max = Number.POSITIVE_INFINITY, cut: Cut = "head"): Part => ({ s, max, cut });
 const MARKER = /\[REDACTED:[a-z-]+\]/g;
@@ -174,41 +180,40 @@ export function buildPreview(input: {
   if (input.hadCursor && !input.cursorFound) notes.push(CURSOR_RESET_NOTE);
   // The cap covers the whole block as sent (after escaping), so the header's share is reserved first.
   const budget = caps.totalBytes - RESERVED_BYTES - notes.reduce((n, s) => n + noteBytes(s), 0);
-  const picked: typeof drafts = [];
+  // Rank by kind, not recency alone: the user's messages, Claude's replies and failures come first (pass A, up
+  // to 75% of the budget bytes and of the item slots), then commands/edits/folder changes, then subagent items, then
+  // any remaining tier 1-2 items. Within a tier the newest item wins. A miss skips that item rather than stopping.
+  const sized = drafts.map((d, index) => ({ d, index, size: itemBytes(d.label, d.text) }));
+  const fits = sized.filter((x) => x.size <= budget); // too big on its own: never picked, cannot hide the rest
+  const chosen = new Set<number>();
   let bytes = 0;
-  let older = 0;
-  let tooBig = 0;
-  let stoppedBy: "items" | "bytes" | null = null;
-  for (let i = drafts.length - 1; i >= 0; i--) {
-    const d = drafts[i];
-    if (!d) continue;
-    const size = itemBytes(d.label, d.text);
-    if (picked.length >= caps.maxItems) {
-      stoppedBy = "items";
-      older = i + 1;
-      break;
+  const take = (tiers: readonly number[], limit: number, maxCount: number) => {
+    for (let i = fits.length - 1; i >= 0; i--) {
+      const x = fits[i];
+      if (!x || chosen.has(x.index) || !tiers.includes(TIER[x.d.kind])) continue;
+      if (chosen.size >= maxCount) return;
+      if (bytes + x.size > limit) continue;
+      chosen.add(x.index);
+      bytes += x.size;
     }
-    // An item too big for the whole budget on its own is skipped, so it cannot hide everything older.
-    if (size > budget) {
-      tooBig++;
-      continue;
-    }
-    if (bytes + size > budget) {
-      stoppedBy = "bytes";
-      older = i + 1;
-      break;
-    }
-    picked.push(d);
-    bytes += size;
-  }
-  picked.reverse();
-  const omitted = older + tooBig;
+  };
+  take([1, 2], budget * 0.75, Math.floor(0.75 * caps.maxItems));
+  take([3], budget, caps.maxItems);
+  take([4], budget, caps.maxItems);
+  take([1, 2], budget, caps.maxItems);
+  const picked = sized.filter((x) => chosen.has(x.index)).map((x) => x.d);
+  const omitted = drafts.length - picked.length;
 
   if (omitted > 0) {
     const kb = Math.round(caps.totalBytes / 1024);
-    notes.push(stoppedBy === "items"
-      ? `${omitted} ${tooBig > 0 ? "" : "older "}item(s) left out (${caps.maxItems}-item limit${tooBig > 0 ? `, ${kb} KB cap` : ""}).`
-      : `${omitted} ${tooBig > 0 ? "" : "older "}item(s) left out to stay under ${kb} KB.`);
+    const counts = { user: 0, assistant: 0, subagent: 0, tool: 0 };
+    for (const x of sized) {
+      if (chosen.has(x.index)) continue;
+      counts[x.d.kind === "user" || x.d.kind === "assistant" || x.d.kind === "subagent" ? x.d.kind : "tool"]++;
+    }
+    const gone = (["user", "assistant", "subagent", "tool"] as const).filter((k) => counts[k] > 0).map((k) => `${counts[k]} ${k}`).join(", ");
+    const why = picked.length >= caps.maxItems ? `(${caps.maxItems}-item limit)` : `to stay under ${kb} KB`;
+    notes.push(`${omitted} item(s) left out ${why} (kept your messages and Claude's replies first; left out: ${gone}).`);
   }
   bytes += notes.reduce((n, s) => n + noteBytes(s), 0);
   let cursorAfter: string | null = null;

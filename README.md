@@ -9,8 +9,12 @@ official Codex app-server. No API keys.
 - It explains code, Claude's last message, test failures and Jira tickets in plain language.
 - Microphone dictation and Read Aloud use on-device macOS speech.
 
-> Status: **Milestones M1–M7 are implemented.** You can build an installable app from source (see Install).
+> Status: **Milestones M1–M8 are implemented.** You can build an installable app from source (see Install).
 > The owner checklists in `docs/manual/` are still pending.
+>
+> M8 (0.8.0): redesigned sidebar, copy on every message, kept chat history, better context ranking, app icon
+> and a more natural Read Aloud voice. Chat history is stored locally in `companion.db` (secrets redacted). You
+> can turn it off or clear it in Settings › Privacy.
 
 ## Docs
 

@@ -9,7 +9,8 @@ final class SidePanel: NSPanel {
         title = "ClaudeGPT Companion"
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
-        isMovableByWindowBackground = true
+        // R7: a drag over text must select it, not move the window. The header's titlebar row still drags.
+        isMovableByWindowBackground = false
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         level = .normal

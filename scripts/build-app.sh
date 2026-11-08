@@ -27,6 +27,33 @@ cp "$bin_dir/CompanionApp" "$out/Contents/MacOS/CompanionApp"
 cp app/bundle/Info.plist "$out/Contents/Info.plist"
 plutil -lint "$out/Contents/Info.plist"
 
+# App icon: the committed .icns always (CFBundleIconFile). Where actool can compile the Icon Composer document
+# (Xcode 26 or later), also the Liquid Glass icon in Assets.car (CFBundleIconName), which macOS 26 prefers.
+# CFBundleIconName is added only when actool's partial Info.plist names the icon, so the key never points at
+# an icon that Assets.car does not hold. actool needs an absolute path to the .icon document (a relative one
+# is resolved against the document twice).
+cp app/bundle/icon/AppIcon.icns "$out/Contents/Resources/AppIcon.icns"
+if xcrun --find actool >/dev/null 2>&1; then
+  icon_work="$(mktemp -d)"
+  icon_name=""
+  if xcrun actool --compile "$icon_work" --platform macosx --minimum-deployment-target 26.0 --app-icon AppIcon \
+      --output-partial-info-plist "$icon_work/partial.plist" "$PWD/app/bundle/icon/AppIcon.icon" \
+      >/dev/null 2>"$icon_work/actool.err" \
+    && [ -f "$icon_work/Assets.car" ] && [ -f "$icon_work/partial.plist" ]; then
+    icon_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$icon_work/partial.plist" 2>/dev/null || true)"
+  fi
+  if [ -n "$icon_name" ]; then
+    cp "$icon_work/Assets.car" "$out/Contents/Resources/Assets.car"
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string $icon_name" "$out/Contents/Info.plist"
+  else
+    why="$(head -c 300 "$icon_work/actool.err" 2>/dev/null | tr '\n' ' ' | cut -c1-160)"
+    echo "build-app: actool gave no CFBundleIconName; using AppIcon.icns only${why:+ (actool: $why)}"
+  fi
+  rm -rf "$icon_work"
+else
+  echo "build-app: no actool; using AppIcon.icns only"
+fi
+
 # companiond: sources, the relay source (built at every daemon start, spec §7.1.9) and production dependencies.
 res="$out/Contents/Resources/companiond"
 mkdir -p "$res"
@@ -46,7 +73,11 @@ codesign --force --options runtime "${ts[@]}" \
 # ---- Verification ----
 codesign --verify --deep --strict --verbose=2 "$out"
 for f in src/lineBuffer.ts src/daemon/main.ts src/version.ts relay/relay.c package.json; do test -f "$res/$f"; done
-for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription CFBundleIdentifier LSMinimumSystemVersion; do
+test -s "$out/Contents/Resources/AppIcon.icns" || { echo "build-app: no AppIcon.icns"; exit 1; }
+if /usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$out/Contents/Info.plist" >/dev/null 2>&1; then
+  test -s "$out/Contents/Resources/Assets.car" || { echo "build-app: CFBundleIconName without Assets.car"; exit 1; }
+fi
+for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription CFBundleIdentifier LSMinimumSystemVersion CFBundleIconFile; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$out/Contents/Info.plist" >/dev/null
 done
 

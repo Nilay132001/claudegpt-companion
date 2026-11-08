@@ -57,11 +57,11 @@ test("the newest items win under the byte cap; the rest are counted", () => {
   assert.ok(p.items.length < 30);
   assert.equal(p.omitted, 30 - p.items.length);
   assert.match(p.items.at(-1)?.text ?? "", /^29 /);
-  assert.match(p.notes.join(), /older item\(s\) left out to stay under 12 KB/);
+  assert.match(p.notes.join(), /item\(s\) left out to stay under 12 KB \(kept your messages/);
   assert.equal(p.cursorAfter, "u29");
   const few = buildPreview({ events: ev, hadCursor: false, cursorFound: false, caps: { ...DEFAULT_CAPS, maxItems: 2 } });
   assert.equal(few.items.length, 2);
-  assert.match(few.notes.join(), /28 older item\(s\) left out \(2-item limit\)/);
+  assert.match(few.notes.join(), /28 item\(s\) left out \(2-item limit\) \(kept your messages.*left out: 28 user/);
 });
 
 test("long file_edit and cwd_change paths are clipped, keeping the name", () => {
@@ -89,7 +89,7 @@ test("one item too big on its own is skipped and counted; older items still fit"
   const p = buildPreview({ events: [userText("older question", "u1"), assistantText("older reply", "u2"), edit], hadCursor: true, cursorFound: true, caps });
   assert.deepEqual(p.items.map((i) => [i.kind, i.text]), [["user", "older question"], ["assistant", "older reply"]]);
   assert.equal(p.omitted, 1);
-  assert.deepEqual(p.notes, ["1 item(s) left out to stay under 12 KB."]);
+  assert.deepEqual(p.notes, ["1 item(s) left out to stay under 12 KB (kept your messages and Claude's replies first; left out: 1 tool)."]);
   assert.equal(p.cursorAfter, edit.uuid); // the cursor advances to the newest record in the previewed delta
   assert.ok(p.bytes <= DEFAULT_CAPS.totalBytes);
 });
