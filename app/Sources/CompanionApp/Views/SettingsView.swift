@@ -9,6 +9,10 @@ import SwiftUI
     var accessibilityTrusted = false
     var followNote: String?
     var hotkeyError: String?
+    /// The user is dragging the panel's edge (AppKit live resize). Answer text is not selectable meanwhile
+    /// (ChatTextSelection): every selectable Text keeps a selection overlay view that AppKit updated on each resize
+    /// frame, which made every resize frame late.
+    var liveResizing = false
 }
 
 struct SettingsView: View {
@@ -188,6 +192,7 @@ struct WindowSettings: View {
             Text("Uses the Accessibility permission only to read where Claude Desktop's window is, and keeps the panel against its left edge. Nothing in Claude is changed.")
                 .font(.caption).foregroundStyle(.secondary)
             if let note = status.followNote { Text(note).font(.callout).foregroundStyle(.orange) }
+            Toggle("Wrap long lines in code blocks", isOn: Binding(get: { model.settings.codeWrap }, set: { model.setSetting(\.codeWrap, $0) }))
             Section("Show or hide shortcut") {
                 HStack {
                     Toggle("⌃", isOn: modifier(\.control))

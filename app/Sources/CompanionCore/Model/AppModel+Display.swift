@@ -21,12 +21,17 @@ extension AppModel {
         return selectedSessionId == nil ? .noSession : .ready
     }
 
+    /// Not observed (the store is not): tests and Copy. Views read `currentFeed`.
     public var currentMessages: [ChatMessage] { selectedSessionId.flatMap { conversations[$0]?.messages } ?? [] }
-    public var isAnswering: Bool { selectedSessionId.flatMap { conversations[$0]?.isRunning } ?? false }
+    /// From the feed (observed), not the store: true from the question until the reply ends.
+    public var isAnswering: Bool { currentFeed?.isRunning ?? false }
     public var canSend: Bool { gate == .ready && !isAnswering && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     public var currentWorktree: WorktreeResolution? { selectedSessionId.flatMap { worktrees[$0] } }
-    public var currentRoot: String? {
-        if case .resolved(let root, _, _)? = currentWorktree { root } else { nil }
+    public var currentRoot: String? { selectedSessionId.flatMap(root(for:)) }
+
+    /// The session's repository root once resolved; answers link `path:line` only inside it.
+    public func root(for sessionId: String) -> String? {
+        if case .resolved(let root, _, _)? = worktrees[sessionId] { root } else { nil }
     }
 
     public var repoSummary: String {

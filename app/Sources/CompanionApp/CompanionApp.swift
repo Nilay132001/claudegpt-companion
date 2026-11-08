@@ -27,7 +27,7 @@ struct CompanionApp: App {
             CommandGroup(after: .pasteboard) {
                 Button("Copy Conversation") { Design.copy(delegate.model.conversationMarkdown(includeContext: false)) }
                     .keyboardShortcut("c", modifiers: [.command, .shift])
-                    .disabled(delegate.model.currentMessages.isEmpty && delegate.model.pastChat == nil)
+                    .disabled((delegate.model.currentFeed?.isEmpty ?? true) && delegate.model.pastChat == nil)
             }
         }
     }

@@ -23,7 +23,8 @@ public enum UIKey {
     public static let width = "ui.window.width"
     public static let hotkey = "ui.hotkey"
     public static let editor = "ui.editor"
-    public static let all = [speechRate, voice, autoPlay, readCode, follow, width, hotkey, editor]
+    public static let codeWrap = "ui.code.wrap"
+    public static let all = [speechRate, voice, autoPlay, readCode, follow, width, hotkey, editor, codeWrap]
 }
 
 public struct UISettings: Equatable, Sendable {
@@ -35,6 +36,8 @@ public struct UISettings: Equatable, Sendable {
     public var panelWidth = 360.0
     public var hotkey = HotkeySpec.default
     public var editor = EditorChoice.auto
+    /// Code blocks soft-wrap instead of scrolling sideways (R1: off by default).
+    public var codeWrap = false
 
     public init() {}
 
@@ -51,13 +54,15 @@ public struct UISettings: Equatable, Sendable {
         if let v = await finite(UIKey.width) { s.panelWidth = Double(PanelGeometry.clampWidth(v)) }
         if let v = await read(UIKey.hotkey).flatMap(HotkeySpec.init(string:)) { s.hotkey = v }
         if let v = await read(UIKey.editor).flatMap(EditorChoice.init(rawValue:)) { s.editor = v }
+        if let v = await read(UIKey.codeWrap) { s.codeWrap = v == "true" }
         return s
     }
 
     public var values: [String: String] {
         [UIKey.speechRate: String(speechRate), UIKey.voice: voiceIdentifier ?? "", UIKey.autoPlay: String(autoPlay),
          UIKey.readCode: String(readCode), UIKey.follow: String(followClaude), UIKey.width: String(Int(panelWidth)),
-         UIKey.hotkey: hotkey.string, UIKey.editor: editor.rawValue]
+         UIKey.hotkey: hotkey.string, UIKey.editor: editor.rawValue,
+         UIKey.codeWrap: String(codeWrap)]
     }
 
     public func changes(from old: UISettings) -> [(key: String, value: String)] {

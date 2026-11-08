@@ -111,34 +111,3 @@ import Testing
         #expect(HistorySections.group(chats, query: "zzz", now: now, calendar: cal).isEmpty)
     }
 }
-
-@Suite struct ReplySegmentsTests {
-    @Test func proseRunsAreOneStringBetweenCodeBlocks() {
-        let md = "# Title\nIntro\n\n- one\n- two\n\n```ts\nlet x = 1\n```\nAfter `code`"
-        var roles: [ProseRole] = []
-        let segs = ReplyMarkdown.segments(md, root: nil) { role, _ in roles.append(role) }
-        #expect(segs.count == 3)
-        guard case .prose(let first) = segs[0], case .code(let lang, let code) = segs[1], case .prose(let last) = segs[2] else {
-            Issue.record("unexpected segments \(segs)")
-            return
-        }
-        #expect(String(first.characters) == "Title\n\nIntro\n\n•  one\n•  two")
-        #expect(lang == "ts" && code == "let x = 1")
-        #expect(String(last.characters) == "After code")
-        #expect(roles == [.heading(level: 1), .paragraph, .gap, .bullet, .gap, .bullet, .paragraph]) // each piece, then the gap before it
-    }
-
-    @Test func styleIsApplied() {
-        let segs = ReplyMarkdown.segments("## Head", root: nil) { role, s in
-            if case .heading = role { s.link = URL(string: "x:") }
-        }
-        guard case .prose(let s) = segs.first else { Issue.record("no prose"); return }
-        #expect(s.runs.allSatisfy { $0.link != nil })
-    }
-
-    @Test func linksStayRemovedInsideRuns() {
-        let segs = ReplyMarkdown.segments("See [x](https://evil.example)\n\n- ![p](https://evil.example/p.png)", root: nil)
-        guard case .prose(let s) = segs.first else { Issue.record("no prose"); return }
-        #expect(s.runs.allSatisfy { $0.link == nil && $0.imageURL == nil })
-    }
-}

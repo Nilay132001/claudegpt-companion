@@ -257,7 +257,7 @@ import Testing
         }
         d.sendResults = [.success(SendResult(threadId: "t1", turnId: "u1x"))]
         let ask = Task { await m.ask("live") }
-        await ask.value
+        _ = await ask.value
         await start.value
         await m.chatLoad?.value
         #expect(d.calls.contains("chat.send:p-auto"), "\(d.calls)")

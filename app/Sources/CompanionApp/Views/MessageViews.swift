@@ -1,16 +1,21 @@
 import CompanionCore
+import AppKit
 import SwiftUI
 
 /// The user's question: a soft neutral bubble on the trailing side, at most 80 % of the column, selectable.
 struct QuestionBubble: View {
-    let message: ChatMessage
+    let model: MessageModel
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfProbe.count("body.QuestionBubble")
+        #endif
+        let message = model.message
         TrailingFraction(fraction: Design.bubbleMaxFraction) {
             Text(verbatim: message.text)
                 .font(.body)
                 .lineSpacing(2)
-                .textSelection(.enabled)
+                .chatTextSelection()
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, Design.Space.m + 2)
                 .padding(.vertical, Design.Space.s + 2)
@@ -26,58 +31,120 @@ struct QuestionBubble: View {
 }
 
 /// GPT's answer: plain full-width text, no label row (D4). A compact actions row sits directly under it: always
-/// shown for the latest answer, on hover for older ones (it keeps its height, so hovering never moves the text).
+/// shown for the latest answer, on hover for older ones, as a zero-height overlay, so hovering never moves the text).
+/// It observes only its own message model and its own Read Aloud state (M9 §5.5).
 struct AnswerView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(AppModel.self) private var app
     @Environment(ReadAloudController.self) private var readAloud
-    let message: ChatMessage
+    let model: MessageModel
     let readOnly: Bool
     var isLatest = false
-    @State private var hovering = false
+    /// Set by the TurnView that owns the hover tracking.
+    var rowHovered = false
+    /// The pointer is on the overlaid actions row itself (it sits just outside the turn's own bounds).
+    @State private var overlayHovered = false
+    /// The Copy menu is open: the pointer is in the menu, not on the row, but the row stays until it closes.
+    @State private var menuOpen = false
+    private static let overlayRowHeight: CGFloat = 22
 
     var body: some View {
+        let message = model.message
+        #if DEBUG
+        let _ = PerfProbe.count(message.isRunning ? "body.AnswerView.running" : "body.AnswerView.settled")
+        #endif
+        // Once per body. Normally the model carries it (rendered by
+        // the coalesced update or the background prewarm); otherwise render now, with the feed's root (closed chunks
+        // come from the cache).
+        let rendered = model.rendered ?? render(message)
+        let speech = readAloud.speech(for: message.id)
         VStack(alignment: .leading, spacing: Design.Space.s) {
             if message.text.isEmpty && message.isRunning {
                 if let a = message.activity { ActivityRow(text: a) } else { TypingIndicator() }
             } else if !message.text.isEmpty {
-                ReplyView(markdown: message.text, root: model.currentRoot)
+                BlockStack(answer: rendered, root: model.root, charts: model.chartDisclosures)
             }
             if !message.text.isEmpty, message.isRunning, let a = message.activity { ActivityRow(text: a) }
-            statusRow
-            if !message.isRunning && !message.text.isEmpty {
-                actionsRow.padding(.top, -Design.Space.s + 2)
+            statusRow(message)
+            if isLatest && !message.isRunning && !message.text.isEmpty {
+                actionsRow(message, phase: speech.phase).padding(.top, -Design.Space.s + 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+        // Older answers: a zero-height overlay just below the last block, so nothing reserves space under the text
+        // (the gap to the next turn is the plain turn gap) and revealing it never moves a line.
+        .overlay(alignment: .bottomLeading) {
+            if !isLatest && !message.isRunning && !message.text.isEmpty {
+                let shown = rowHovered || overlayHovered || menuOpen || speech.phase != .idle
+                actionsRow(message, phase: speech.phase)
+                    .opacity(shown ? 1 : 0)
+                    .animation(Design.Motion.quick, value: shown)
+                    .allowsHitTesting(shown)
+                    .accessibilityHidden(!shown)
+                    .onHover { overlayHovered = $0 }
+                    // Only the answer whose row the pointer is on (or whose menu is open) listens for menus.
+                    .background {
+                        // The subscription exists only while this view does.
+                        if overlayHovered || menuOpen {
+                            Color.clear.frame(width: 0, height: 0)
+                                .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+                                    if overlayHovered { menuOpen = true }
+                                }
+                                .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                                    menuOpen = false
+                                }
+                        }
+                    }
+                    .onDisappear { menuOpen = false; overlayHovered = false }
+                    // The in-layout row of the latest answer sits 2 pt below the last block (8 pt stack gap minus the
+                    // 6 pt pull-up); the overlay's bottom edge is the last block's, so its row starts at +height+2.
+                    .offset(y: Self.overlayRowHeight + 2)
+            }
+        }
         // No contextMenu here: right-click on selected text keeps the system menu (Copy, Look Up, Share).
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityText)
+        // A container, not a combined element: each block keeps its own label and headings stay in the rotor.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityLabel(message))
         .accessibilityAction(named: "Copy") { Design.copy(CopyFormat.markdown(message)) }
         .accessibilityAction(named: "Copy as plain text") { Design.copy(CopyFormat.plain(message)) }
-        .accessibilityAction(named: readAloud.isActive(message.id) ? "Pause or resume reading" : "Read aloud") {
-            readAloud.toggle(id: message.id, markdown: message.text)
+        .accessibilityAction(named: speech.phase != .idle ? "Pause or resume reading" : "Read aloud") {
+            readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered ?? render(message))
         }
         .accessibilityActions {
+            if speech.phase != .idle {
+                Button("Stop reading") { readAloud.stop() }
+            }
             if message.retry != nil && !readOnly {
-                Button("Send again") { Task { await model.sendAgain(message) } }
+                Button("Send again") { Task { await app.sendAgain(message) } }
             }
         }
     }
 
-    private var accessibilityText: String {
+    private func render(_ message: ChatMessage) -> RenderedAnswer {
+        guard !message.text.isEmpty else { return .empty }
+        #if DEBUG
+        return PerfProbe.measure("render.answer") {
+            app.renderCache.answer(for: message.text, root: model.root, streaming: message.isRunning)
+        }
+        #else
+        return app.renderCache.answer(for: message.text, root: model.root, streaming: message.isRunning)
+        #endif
+    }
+
+    private func accessibilityLabel(_ message: ChatMessage) -> String {
         if message.isRunning && message.text.isEmpty { return "GPT is thinking" }
         if case .failed(let why) = message.status { return "GPT's reply failed: \(why)" }
-        return "GPT answered: \(ReplyMarkdown.plainText(message.text))"
+        return "GPT answer"
     }
 
-    /// Read Aloud state of this answer: nil when it is not being read.
-    private var speaking: Bool? {
-        readAloud.isActive(message.id) ? readAloud.isSpeaking(message.id) : nil
+    private static func icon(_ phase: SpeechPhase) -> String {
+        switch phase {
+        case .playing: "pause.fill"
+        case .paused: "play.fill"
+        case .idle: "speaker.wave.2"
+        }
     }
 
-    @ViewBuilder private var statusRow: some View {
+    @ViewBuilder private func statusRow(_ message: ChatMessage) -> some View {
         switch message.status {
         case .streaming where !message.text.isEmpty && message.activity == nil:
             Text("Answering…").font(.caption).foregroundStyle(.secondary)
@@ -87,11 +154,11 @@ struct AnswerView: View {
             // Borderless on the canvas (D1): icon, the reason, and the retry.
             HStack(alignment: .firstTextBaseline, spacing: Design.Space.s) {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                Text(verbatim: why).font(.callout).textSelection(.enabled)
+                Text(verbatim: why).font(.callout).chatTextSelection()
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.retry != nil && !readOnly {
-                    Button("Send Again") { Task { await model.sendAgain(message) } }
+                    Button("Send Again") { Task { await app.sendAgain(message) } }
                         .controlSize(.small)
                         .buttonStyle(.borderless)
                         .fixedSize()
@@ -102,39 +169,36 @@ struct AnswerView: View {
         }
     }
 
-    @ViewBuilder private var copyItems: some View {
+    @ViewBuilder private func copyItems(_ message: ChatMessage, phase: SpeechPhase) -> some View {
         Button("Copy as Markdown") { Design.copy(CopyFormat.markdown(message)) }
         Button("Copy as Plain Text") { Design.copy(CopyFormat.plain(message)) }
         if !message.text.isEmpty && !message.isRunning {
             Divider()
-            Button(readAloud.isActive(message.id) ? "Pause or Resume Reading" : "Read Aloud") {
-                readAloud.toggle(id: message.id, markdown: message.text)
+            Button(phase != .idle ? "Pause or Resume Reading" : "Read Aloud") {
+                readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered ?? render(message))
             }
-            if readAloud.isActive(message.id) { Button("Stop Reading") { readAloud.stop() } }
+            if phase != .idle { Button("Stop Reading") { readAloud.stop() } }
         }
     }
 
     /// Copy ▾, Read aloud (and Stop while reading), the Speaking badge, then the time: one line, at most 22 pt
     /// tall. ViewThatFits drops the time, then the badge's text, so it fits at 280 pt by construction.
-    private var actionsRow: some View {
+    private func actionsRow(_ message: ChatMessage, phase: SpeechPhase) -> some View {
         ViewThatFits(in: .horizontal) {
-            actions(time: true, badgeText: true)
-            actions(time: false, badgeText: true)
-            actions(time: false, badgeText: false)
+            actions(message, phase: phase, time: true, badgeText: true)
+            actions(message, phase: phase, time: false, badgeText: true)
+            actions(message, phase: phase, time: false, badgeText: false)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(.callout)
         .foregroundStyle(.secondary)
-        .frame(height: 22)
-        // Shown for the latest answer, on hover for older ones; opacity keeps them for keyboard and VoiceOver.
-        .opacity(isLatest || hovering || speaking != nil ? 1 : 0)
-        .animation(Design.Motion.quick, value: hovering)
+        .frame(height: Self.overlayRowHeight)
     }
 
-    private func actions(time: Bool, badgeText: Bool) -> some View {
+    private func actions(_ message: ChatMessage, phase: SpeechPhase, time: Bool, badgeText: Bool) -> some View {
         HStack(spacing: 2) {
             Menu {
-                copyItems
+                copyItems(message, phase: phase)
             } label: {
                 Image(systemName: "doc.on.doc")
             } primaryAction: {
@@ -147,15 +211,15 @@ struct AnswerView: View {
             .fixedSize()
             .help("Copy (click), or choose Markdown or plain text")
             .accessibilityLabel("Copy answer")
-            IconButton(symbol: readAloud.icon(for: message.id),
-                       label: readAloud.isActive(message.id) ? "Pause or resume reading" : "Read aloud") {
-                readAloud.toggle(id: message.id, markdown: message.text)
+            IconButton(symbol: Self.icon(phase),
+                       label: phase != .idle ? "Pause or resume reading" : "Read aloud") {
+                readAloud.toggle(id: message.id, markdown: message.text, rendered: model.rendered ?? render(message))
             }
-            if readAloud.isActive(message.id) {
+            if phase != .idle {
                 IconButton(symbol: "stop.fill", label: "Stop reading") { readAloud.stop() }
             }
-            if let on = speaking {
-                SpeakingBadge(paused: !on, showText: badgeText).padding(.leading, Design.Space.xs)
+            if phase != .idle {
+                SpeakingBadge(paused: phase == .paused, showText: badgeText).padding(.leading, Design.Space.xs)
             }
             if time, let at = message.sentAt {
                 Text(verbatim: at.shortStamp)

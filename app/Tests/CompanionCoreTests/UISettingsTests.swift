@@ -50,4 +50,12 @@ import Testing
         for k in UIKey.all { #expect(k.wholeMatch(of: /ui\.[a-z0-9_.]{1,64}/) != nil, "\(k)") }
         #expect(Set(UIKey.all) == Set(UISettings().values.keys))
     }
+
+    @Test func codeWrapIsOffByDefaultAndRoundTrips() async {
+        #expect(!UISettings().codeWrap)
+        #expect(UIKey.all.contains("ui.code.wrap"))
+        let s = await UISettings.load { $0 == "ui.code.wrap" ? "true" : nil }
+        #expect(s.codeWrap)
+        #expect(s.values["ui.code.wrap"] == "true")
+    }
 }
